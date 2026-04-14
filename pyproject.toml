@@ -22,18 +22,18 @@ readme = "README.md"
 # check.  Resolved versions are captured in the lockfile for reproducibility.
 dependencies = [
     # Configuration and validation
-    "pydantic>=2.10",
-    "pydantic-settings>=2.7",
+    "pydantic>=2.11",
+    "pydantic-settings>=2.11",
     "python-dotenv>=1.0",
 
     # SEC data retrieval
-    "edgartools>=3.0",
+    "edgartools>=5.0",
 
     # HTML parsing
-    "doc2dict>=0.3",
+    "doc2dict>=0.5",
 
     # Vector store and metadata
-    "chromadb>=0.6",
+    "chromadb>=1.0",
 
     # API framework
     "fastapi>=0.115",
@@ -41,7 +41,7 @@ dependencies = [
 
     # CLI
     "typer>=0.15",
-    "rich>=13.0",
+    "rich>=14.0",
 
     # HTTP client (used by provider adapters and test client)
     "httpx>=0.28",
@@ -56,15 +56,15 @@ encryption = [
 # Development tools — linting, formatting, pre-commit hooks.
 dev = [
     "ruff>=0.11",
-    "pre-commit>=4.0",
+    "pre-commit>=4.3",
 ]
 
 # Testing framework — pytest, coverage, and async test utilities.
 test = [
     "pytest>=8.0",
-    "pytest-cov>=6.0",
-    "pytest-asyncio>=0.25",
-    "coverage[toml]>=7.0",
+    "pytest-cov>=7.0",
+    "pytest-asyncio>=1.0",
+    "coverage[toml]>=7.10",
 ]
 
 [project.scripts]
