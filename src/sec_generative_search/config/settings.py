@@ -1,4 +1,18 @@
-"""Configuration management using Pydantic Settings v2."""
+"""Configuration management using Pydantic Settings v2.
+
+Hierarchical settings pattern: each domain area is a separate nested
+``BaseSettings`` subclass with its own ``env_prefix``.  The root
+``Settings`` class composes them all and provides a singleton accessor.
+
+Environment variable mapping (examples):
+    EDGAR_IDENTITY_NAME     -> settings.edgar.identity_name
+    EMBEDDING_MODEL_NAME    -> settings.embedding.model_name
+    LLM_DEFAULT_PROVIDER    -> settings.llm.default_provider
+    PROVIDER_TIMEOUT         -> settings.provider.timeout
+    RAG_CONTEXT_TOKEN_BUDGET -> settings.rag.context_token_budget
+    DB_ENCRYPTION_KEY       -> settings.database.encryption_key
+    API_KEY                 -> settings.api.key
+"""
 
 from pathlib import Path
 
@@ -130,15 +144,20 @@ class DatabaseSettings(BaseSettings):
         to write files outside the project directory.
 
         Checks:
-        - Resolved path must be relative to ``Path.cwd()``
-        - No symlinks in parent directories (prevents symlink-based escapes)
+        - Resolved path must be relative to ``Path.cwd()``.
+        - No symlinks in any lexical parent directory.  The walk is
+          intentionally done over the *lexical* (non-resolved) path — a
+          post-``resolve()`` walk never sees symlinks because they have
+          already been followed, which would silently pass a symlink
+          whose target happens to live inside cwd.
         """
         base_dir = Path.cwd().resolve()
         for field_name in ("chroma_path", "metadata_db_path"):
             raw_value = getattr(self, field_name)
+            lexical = Path(raw_value).absolute()
             resolved = Path(raw_value).resolve()
 
-            # Check the path stays within the working directory
+            # Check the resolved path stays within the working directory.
             if not resolved.is_relative_to(base_dir):
                 raise ValueError(
                     f"Database path '{field_name}' resolves to "
@@ -147,23 +166,80 @@ class DatabaseSettings(BaseSettings):
                     f"within the project directory."
                 )
 
-            # Check for symlinks in existing parent directories
-            # (prevents symlink-based directory escapes)
-            check = resolved
-            while check != base_dir:
-                if check.is_symlink():
+            # Walk up the lexical path and refuse if any existing parent
+            # is a symlink.  Stops at cwd once it is reached.
+            check = lexical
+            while check != check.parent:  # stop at filesystem root
+                if check.exists() and check.is_symlink():
                     raise ValueError(
                         f"Database path '{field_name}' contains a "
                         f"symlink at '{check}'. Symlinks are not "
                         f"permitted in database paths for security."
                     )
+                if check == base_dir:
+                    break
                 check = check.parent
 
         return self
 
 
+class LLMSettings(BaseSettings):
+    """LLM model selection and generation defaults.
+
+    These control which model is used and how it generates responses.
+    Provider-level network policy (timeouts, retries) lives in
+    ``ProviderSettings``; this class covers model behaviour.
+    """
+
+    default_provider: str = "openai"  # provider key registered in ProviderRegistry
+    default_model: str | None = None  # None = use the provider's own default
+    temperature: float = 0.1  # low temperature for factual SEC analysis
+    max_output_tokens: int = 2048
+    streaming: bool = True  # prefer streaming responses by default
+
+    model_config = SettingsConfigDict(env_prefix="LLM_")
+
+
+class ProviderSettings(BaseSettings):
+    """Provider-level network and resilience policy.
+
+    Applies to all external LLM/embedding API calls (OpenAI, Anthropic,
+    Gemini, etc.).  Per-provider overrides will be supported in the
+    provider registry; these are the global defaults.
+    """
+
+    timeout: int = 60  # seconds per API call
+    max_retries: int = 3
+    retry_backoff_base: float = 2.0  # exponential backoff base (seconds)
+    circuit_breaker_threshold: int = 5  # consecutive failures before circuit opens
+    circuit_breaker_reset: int = 60  # seconds before half-open retry
+    cost_tracking_enabled: bool = True  # track token usage and estimated cost
+
+    model_config = SettingsConfigDict(env_prefix="PROVIDER_")
+
+
+class RAGSettings(BaseSettings):
+    """RAG orchestration configuration.
+
+    Controls how retrieval results are assembled into a prompt context
+    and how the generation pipeline behaves.  ``SearchSettings`` covers
+    the vector-search layer; this class covers the generation layer
+    on top of it.
+    """
+
+    context_token_budget: int = 6000  # max tokens allocated to retrieved context
+    citation_mode: str = "inline"  # "inline" or "footnote"
+    default_answer_mode: str = "concise"  # "concise", "analytical", "extractive", "comparative"
+    refusal_enabled: bool = True  # refuse when context is insufficient
+    chunk_overlap_tokens: int = 50  # overlap between adjacent chunks for context continuity
+    chat_history_enabled: bool = False  # session-scoped conversation memory (off by default)
+    chat_history_max_turns: int = 10  # max turns retained in session memory
+
+    model_config = SettingsConfigDict(env_prefix="RAG_")
+
+
 class SearchSettings(BaseSettings):
-    """Search configuration."""
+    """Vector search configuration (retrieval layer)."""
 
     top_k: int = 5
     min_similarity: float = 0.0
@@ -239,6 +315,9 @@ class Settings(BaseSettings):
     embedding: EmbeddingSettings = EmbeddingSettings()
     chunking: ChunkingSettings = ChunkingSettings()
     database: DatabaseSettings = DatabaseSettings()
+    llm: LLMSettings = LLMSettings()
+    provider: ProviderSettings = ProviderSettings()
+    rag: RAGSettings = RAGSettings()
     search: SearchSettings = SearchSettings()
     log_file: LoggingSettings = LoggingSettings()
     hugging_face: HuggingFaceSettings = HuggingFaceSettings()

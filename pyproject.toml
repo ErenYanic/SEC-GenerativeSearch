@@ -1,0 +1,162 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sec-generative-search"
+version = "0.1.0"
+description = "RAG system for SEC filings (10-K, 10-Q, 8-K and amended variants) with grounded financial analysis and citations."
+requires-python = ">=3.12"
+license = "MIT"
+authors = [
+    { name = "Eren Yanic" },
+]
+readme = "README.md"
+
+# Core runtime dependencies — every deployment needs these.
+#
+# Lower bounds only (no upper caps) — we track the latest stable releases
+# to pick up security patches and provider-SDK updates promptly.  The
+# minimums document the oldest version known to work; CI always installs
+# the newest compatible release and is the authoritative compatibility
+# check.  Resolved versions are captured in the lockfile for reproducibility.
+dependencies = [
+    # Configuration and validation
+    "pydantic>=2.10",
+    "pydantic-settings>=2.7",
+    "python-dotenv>=1.0",
+
+    # SEC data retrieval
+    "edgartools>=3.0",
+
+    # HTML parsing
+    "doc2dict>=0.3",
+
+    # Vector store and metadata
+    "chromadb>=0.6",
+
+    # API framework
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+
+    # CLI
+    "typer>=0.15",
+    "rich>=13.0",
+
+    # HTTP client (used by provider adapters and test client)
+    "httpx>=0.28",
+]
+
+[project.optional-dependencies]
+# SQLCipher encryption support — requires system-level sqlcipher library.
+encryption = [
+    "pysqlcipher3>=1.2",
+]
+
+# Development tools — linting, formatting, pre-commit hooks.
+dev = [
+    "ruff>=0.11",
+    "pre-commit>=4.0",
+]
+
+# Testing framework — pytest, coverage, and async test utilities.
+test = [
+    "pytest>=8.0",
+    "pytest-cov>=6.0",
+    "pytest-asyncio>=0.25",
+    "coverage[toml]>=7.0",
+]
+
+[project.scripts]
+sec-rag = "sec_generative_search.cli.main:app"
+
+# ---------------------------------------------------------------------------
+# Ruff — linter and formatter configuration
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py312"
+src = ["src", "tests"]
+line-length = 100
+
+# Exclude modules that are migrated from SEC-SemanticSearch but not yet
+# adapted for the generative-search roadmap.  Each entry is removed from
+# this list as its owning phase lands, at which point it becomes subject
+# to the same lint rules as the rest of the project.
+#
+#   api/       -> Phase 10
+#   cli/       -> Phase 12
+#   database/  -> Phase 6
+#   pipeline/  -> Phase 4
+#   search/    -> Phase 7
+extend-exclude = [
+    "src/sec_generative_search/api",
+    "src/sec_generative_search/cli",
+    "src/sec_generative_search/database",
+    "src/sec_generative_search/pipeline",
+    "src/sec_generative_search/search",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "A",    # flake8-builtins
+    "S",    # flake8-bandit (security)
+    "T20",  # flake8-print (no print() in library code)
+    "SIM",  # flake8-simplify
+    "RUF",  # Ruff-specific rules
+]
+ignore = [
+    "S101",   # assert is fine in tests
+    "S105",   # possible hardcoded password — too many false positives on constants
+    "T201",   # print() allowed in CLI modules
+    "A005",   # module shadowing a Python built-in module (logging.py)
+    "UP035",  # deprecated typing imports — pydantic still uses them
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "S106", "T201"]  # asserts, hardcoded passwords, prints OK in tests
+"src/sec_generative_search/cli/**/*.py" = ["T201"]  # CLI modules may print
+
+[tool.ruff.lint.isort]
+known-first-party = ["sec_generative_search"]
+
+# ---------------------------------------------------------------------------
+# pytest configuration
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = [
+    "-ra",          # show summary of all non-passing tests
+    "--strict-markers",
+    "--strict-config",
+    "-q",           # quiet by default; CI can override with -v
+]
+markers = [
+    "slow: marks tests that are slow (deselect with '-m \"not slow\"')",
+    "integration: marks integration tests requiring external services",
+    "security: marks security-focused test cases",
+]
+
+# ---------------------------------------------------------------------------
+# coverage configuration
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+source = ["sec_generative_search"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.",
+    "@overload",
+]

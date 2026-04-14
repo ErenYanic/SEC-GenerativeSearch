@@ -1,11 +1,11 @@
 """
-Custom exception hierarchy for SEC-SemanticSearch.
+Custom exception hierarchy for SEC-GenerativeSearch.
 
-All exceptions inherit from SECSemanticSearchError, allowing callers to catch
+All exceptions inherit from SECGenerativeSearchError, allowing callers to catch
 all project-specific errors with a single except clause when desired.
 
 Exception hierarchy:
-    SECSemanticSearchError (base)
+    SECGenerativeSearchError (base)
     ├── ConfigurationError — Invalid or missing configuration
     ├── FetchError — SEC EDGAR API or network failures
     ├── ParseError — HTML parsing failures (doc2dict)
@@ -13,13 +13,21 @@ Exception hierarchy:
     ├── EmbeddingError — Embedding generation failures
     ├── DatabaseError — ChromaDB or SQLite failures
     │   └── FilingLimitExceededError — Maximum filing count reached
-    └── SearchError — Search operation failures
+    ├── SearchError — Search operation failures
+    ├── ProviderError — External LLM/embedding provider failures
+    │   ├── ProviderAuthError — Invalid or expired API key
+    │   ├── ProviderRateLimitError — Provider rate limit exceeded
+    │   ├── ProviderTimeoutError — Provider call timed out
+    │   └── ProviderContentFilterError — Content blocked by provider safety filter
+    ├── GenerationError — RAG answer generation failures
+    ├── PromptError — Prompt template or injection-detection failures
+    └── CitationError — Citation extraction or validation failures
 """
 
 
-class SECSemanticSearchError(Exception):
+class SECGenerativeSearchError(Exception):
     """
-    Base exception for all SEC-SemanticSearch errors.
+    Base exception for all SEC-GenerativeSearch errors.
 
     Args:
         message: Human-readable error description.
@@ -37,7 +45,7 @@ class SECSemanticSearchError(Exception):
         return self.message
 
 
-class ConfigurationError(SECSemanticSearchError):
+class ConfigurationError(SECGenerativeSearchError):
     """
     Raised when configuration is invalid or missing.
 
@@ -47,10 +55,8 @@ class ConfigurationError(SECSemanticSearchError):
         - Missing .env file when required
     """
 
-    pass
 
-
-class FetchError(SECSemanticSearchError):
+class FetchError(SECGenerativeSearchError):
     """
     Raised when fetching SEC filings fails.
 
@@ -61,10 +67,8 @@ class FetchError(SECSemanticSearchError):
         - Filing not found for specified form type
     """
 
-    pass
 
-
-class ParseError(SECSemanticSearchError):
+class ParseError(SECGenerativeSearchError):
     """
     Raised when parsing filing HTML fails.
 
@@ -74,10 +78,8 @@ class ParseError(SECSemanticSearchError):
         - doc2dict library errors
     """
 
-    pass
 
-
-class ChunkingError(SECSemanticSearchError):
+class ChunkingError(SECGenerativeSearchError):
     """
     Raised when text chunking fails.
 
@@ -86,10 +88,8 @@ class ChunkingError(SECSemanticSearchError):
         - Chunking algorithm failures
     """
 
-    pass
 
-
-class EmbeddingError(SECSemanticSearchError):
+class EmbeddingError(SECGenerativeSearchError):
     """
     Raised when embedding generation fails.
 
@@ -99,10 +99,8 @@ class EmbeddingError(SECSemanticSearchError):
         - Invalid input to embedding model
     """
 
-    pass
 
-
-class DatabaseError(SECSemanticSearchError):
+class DatabaseError(SECGenerativeSearchError):
     """
     Raised when database operations fail.
 
@@ -111,8 +109,6 @@ class DatabaseError(SECSemanticSearchError):
         - SQLite write errors
         - Collection not found
     """
-
-    pass
 
 
 class FilingLimitExceededError(DatabaseError):
@@ -138,7 +134,7 @@ class FilingLimitExceededError(DatabaseError):
         super().__init__(message, details)
 
 
-class SearchError(SECSemanticSearchError):
+class SearchError(SECGenerativeSearchError):
     """
     Raised when search operations fail.
 
@@ -148,4 +144,91 @@ class SearchError(SECSemanticSearchError):
         - ChromaDB query failures
     """
 
-    pass
+
+# ---------------------------------------------------------------------------
+# Provider errors — external LLM / embedding API failures
+# ---------------------------------------------------------------------------
+
+
+class ProviderError(SECGenerativeSearchError):
+    """
+    Base exception for external LLM/embedding provider failures.
+
+    All provider-specific errors (auth, rate limit, timeout, content filter)
+    inherit from this class, enabling callers to catch any provider failure
+    generically.
+
+    Attributes:
+        provider: Name of the provider that failed (e.g. "openai", "anthropic").
+        hint: Optional actionable suggestion for the user.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str = "",
+        hint: str | None = None,
+        details: str | None = None,
+    ) -> None:
+        self.provider = provider
+        self.hint = hint
+        super().__init__(message, details)
+
+
+class ProviderAuthError(ProviderError):
+    """Raised when a provider API key is invalid, expired, or missing."""
+
+
+class ProviderRateLimitError(ProviderError):
+    """Raised when a provider's rate limit is exceeded.
+
+    The caller should respect ``Retry-After`` headers or apply
+    exponential backoff before retrying.
+    """
+
+
+class ProviderTimeoutError(ProviderError):
+    """Raised when a provider API call exceeds the configured timeout."""
+
+
+class ProviderContentFilterError(ProviderError):
+    """Raised when a provider's safety filter blocks the request or response."""
+
+
+# ---------------------------------------------------------------------------
+# RAG pipeline errors — generation, prompt, and citation failures
+# ---------------------------------------------------------------------------
+
+
+class GenerationError(SECGenerativeSearchError):
+    """
+    Raised when RAG answer generation fails.
+
+    Examples:
+        - Prompt assembly failure (context too large for model window)
+        - Model output parsing failure (malformed structured output)
+        - Unexpected provider response format
+    """
+
+
+class PromptError(SECGenerativeSearchError):
+    """
+    Raised for prompt template or injection-detection failures.
+
+    Examples:
+        - Missing template variables
+        - Prompt injection detected in retrieved filing content
+        - Template rendering failure
+    """
+
+
+class CitationError(SECGenerativeSearchError):
+    """
+    Raised when citation extraction or validation fails.
+
+    Examples:
+        - Citation references a chunk ID not present in retrieval results
+        - Citation span does not match source text
+        - Malformed citation format in model output
+    """

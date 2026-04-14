@@ -1,4 +1,4 @@
-"""Application-wide constants."""
+"""Application-wide constants for SEC-GenerativeSearch."""
 
 # Supported SEC filing forms (alphabetical order).
 # Amendments (e.g. 10-K/A) are separate form types because edgartools
@@ -68,3 +68,32 @@ COLLECTION_NAME = "sec_filings"
 # Search defaults
 DEFAULT_SEARCH_TOP_K = 5
 DEFAULT_MIN_SIMILARITY = 0.0
+
+# ---------------------------------------------------------------------------
+# RAG pipeline constants
+# ---------------------------------------------------------------------------
+
+# Valid answer modes for RAG generation (maps to RAGSettings.default_answer_mode).
+ANSWER_MODES = ("concise", "analytical", "extractive", "comparative")
+
+# Valid citation modes (maps to RAGSettings.citation_mode).
+CITATION_MODES = ("inline", "footnote")
+
+# Default context-window token budget for retrieved chunks.
+DEFAULT_CONTEXT_TOKEN_BUDGET = 6000
+
+# Default chunk overlap in tokens (context continuity between adjacent chunks).
+DEFAULT_CHUNK_OVERLAP_TOKENS = 50
+
+# ---------------------------------------------------------------------------
+# Provider defaults
+# ---------------------------------------------------------------------------
+
+# Default timeout for external LLM/embedding API calls (seconds).
+DEFAULT_PROVIDER_TIMEOUT = 60
+
+# Default maximum retries for transient provider failures.
+DEFAULT_PROVIDER_MAX_RETRIES = 3
+
+# Default exponential backoff base (seconds).
+DEFAULT_PROVIDER_RETRY_BACKOFF_BASE = 2.0
