@@ -1,16 +1,18 @@
 """
-Core data types for SEC-SemanticSearch.
+Core data types for SEC-GenerativeSearch.
 
 This module defines the domain objects used throughout the pipeline:
     - FilingIdentifier: Unique identifier for an SEC filing
     - Segment: Parsed content unit from a filing
     - Chunk: Embedding-ready text unit
     - SearchResult: Query result with similarity score
+    - IngestResult: Ingestion pipeline outcome
 
 Design notes:
     - Dataclasses are used for simplicity and performance (no runtime validation)
     - FilingIdentifier is frozen (immutable) as it serves as an identifier
     - ContentType enum ensures type-safe content classification
+    - Pydantic is limited to settings and API schemas only — domain objects are dataclasses
 """
 
 from dataclasses import dataclass, field

@@ -1,5 +1,5 @@
 """
-Logging configuration for SEC-SemanticSearch.
+Logging configuration for SEC-GenerativeSearch.
 
 This module provides a consistent logging setup across all package modules.
 It uses Rich for beautiful console output when running interactively.
@@ -13,7 +13,7 @@ Configuration:
     LOG_FILE_BACKUP_COUNT (default 3) control rotation.
 
 Usage:
-    from sec_semantic_search.core.logging import get_logger
+    from sec_generative_search.core.logging import get_logger
 
     logger = get_logger(__name__)
     logger.info("Processing filing", extra={"ticker": "AAPL"})
@@ -30,7 +30,7 @@ from rich.console import Console
 from rich.logging import RichHandler
 
 # Package-level logger name
-LOGGER_NAME = "sec_semantic_search"
+LOGGER_NAME = "sec_generative_search"
 
 # Default format for non-Rich handlers (e.g., file output)
 DEFAULT_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
@@ -86,7 +86,7 @@ def configure_logging(
     """
     Configure the package-level logger.
 
-    This function sets up the root logger for the sec_semantic_search package.
+    This function sets up the root logger for the sec_generative_search package.
     It should be called once at application startup (e.g., in CLI main).
 
     Args:
