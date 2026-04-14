@@ -147,6 +147,7 @@ class TestSettingsComposition:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.security
 class TestDatabasePathSecurity:
     """Security: DB_*_PATH env vars must not escape the working directory."""
 
@@ -208,6 +209,7 @@ class TestDatabasePathSecurity:
                 real_target.rmdir()
 
 
+@pytest.mark.security
 class TestEncryptionKeyResolution:
     """Security: DB_ENCRYPTION_KEY / DB_ENCRYPTION_KEY_FILE mutual exclusion
     and file validation — prevents silent misconfiguration of the at-rest
@@ -250,6 +252,7 @@ class TestEncryptionKeyResolution:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.security
 class TestApiSettings:
     def test_empty_string_api_key_becomes_none(
         self,
