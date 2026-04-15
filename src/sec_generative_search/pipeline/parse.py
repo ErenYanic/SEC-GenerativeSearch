@@ -6,7 +6,7 @@ It uses doc2dict for initial HTML parsing and then recursively extracts
 content with hierarchical paths.
 
 Usage:
-    from sec_semantic_search.pipeline import FilingParser
+    from sec_generative_search.pipeline import FilingParser
 
     parser = FilingParser()
     segments = parser.parse(html_content, filing_id)
@@ -16,12 +16,12 @@ from typing import Any
 
 from doc2dict import html2dict
 
-from sec_semantic_search.core import (
+from sec_generative_search.core.exceptions import ParseError
+from sec_generative_search.core.logging import get_logger
+from sec_generative_search.core.types import (
     ContentType,
     FilingIdentifier,
-    ParseError,
     Segment,
-    get_logger,
 )
 
 logger = get_logger(__name__)

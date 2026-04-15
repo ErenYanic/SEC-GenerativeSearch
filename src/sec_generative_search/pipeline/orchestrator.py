@@ -1,18 +1,23 @@
 """
 Pipeline orchestrator for SEC filing ingestion.
 
-This module coordinates the full ingestion pipeline:
-    Fetch → Parse → Chunk → Embed
+This module coordinates the filing-processing pipeline:
 
-It provides a unified interface for processing SEC filings,
-handling both single-filing and batch operations.
+    Fetch → Parse → Chunk → [Embed]
+
+Embedding is **optional** in Phase 4 — the embedding provider abstraction
+lands in Phase 5 (:class:`BaseEmbeddingProvider`), so the orchestrator
+accepts any callable conforming to :class:`ChunkEmbedder` and produces
+chunk-only :class:`ProcessedFiling` output when no embedder is
+supplied.  The storage layer (Phase 6) is responsible for refusing to
+persist a :class:`ProcessedFiling` whose embeddings are ``None``.
 
 Usage:
-    from sec_semantic_search.pipeline import PipelineOrchestrator
+    from sec_generative_search.pipeline import PipelineOrchestrator
 
     orchestrator = PipelineOrchestrator()
 
-    # Process a single filing
+    # Process a single filing (no embeddings — Phase 5 plugs those in)
     result = orchestrator.process_filing(filing_id, html_content)
 
     # Ingest latest filing for a company
@@ -23,28 +28,45 @@ Usage:
         print(f"Ingested {result.filing_id.ticker}")
 """
 
+from __future__ import annotations
+
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol
 
-import numpy as np
+from sec_generative_search.core.logging import get_logger
+from sec_generative_search.core.types import Chunk, FilingIdentifier, IngestResult
+from sec_generative_search.pipeline.chunk import TextChunker
+from sec_generative_search.pipeline.fetch import FilingFetcher
+from sec_generative_search.pipeline.parse import FilingParser
 
-from sec_semantic_search.core import (
-    Chunk,
-    FilingIdentifier,
-    IngestResult,
-    get_logger,
-)
-from sec_semantic_search.pipeline.chunk import TextChunker
-from sec_semantic_search.pipeline.embed import EmbeddingGenerator
-from sec_semantic_search.pipeline.fetch import FilingFetcher
-from sec_semantic_search.pipeline.parse import FilingParser
+if TYPE_CHECKING:
+    import numpy as np
 
 logger = get_logger(__name__)
 
 
-# Type alias for progress callback
+# Type alias for progress callback — (step_name, current, total)
 ProgressCallback = Callable[[str, int, int], None]
+
+
+class ChunkEmbedder(Protocol):
+    """Structural interface the orchestrator expects of an embedder.
+
+    Kept deliberately narrow — the Phase 5 :class:`BaseEmbeddingProvider`
+    satisfies this protocol via its ``embed_chunks`` method, and no
+    further coupling is imposed by Phase 4.  The ``show_progress`` flag
+    is passed through so CLI callers can drive a progress bar without
+    plumbing new arguments through this layer.
+    """
+
+    def embed_chunks(
+        self,
+        chunks: list[Chunk],
+        *,
+        show_progress: bool = False,
+    ) -> np.ndarray: ...
 
 
 @dataclass
@@ -52,29 +74,29 @@ class ProcessedFiling:
     """
     Result of processing a single filing through the pipeline.
 
-    This contains all the data needed for storage in the database.
     Segment count is captured in ``ingest_result``; the raw segments
     are not retained because no consumer reads them after chunking.
 
     Attributes:
-        filing_id: Identifier for the filing
-        chunks: Chunked text ready for storage
-        embeddings: Vector embeddings for each chunk
-        ingest_result: Statistics about the ingestion
+        filing_id: Identifier for the filing.
+        chunks: Chunked text ready for embedding/storage.
+        embeddings: Vector embeddings for each chunk.  ``None`` when
+            the orchestrator was run without an embedder — the storage
+            layer (Phase 6) must reject a ``ProcessedFiling`` whose
+            ``embeddings`` are ``None`` rather than silently writing
+            chunks without vectors.
+        ingest_result: Statistics about the ingestion.
     """
 
     filing_id: FilingIdentifier
     chunks: list[Chunk]
-    embeddings: np.ndarray
+    embeddings: np.ndarray | None
     ingest_result: IngestResult
 
 
 class PipelineOrchestrator:
     """
     Coordinates the SEC filing ingestion pipeline.
-
-    This class ties together the fetcher, parser, chunker, and embedding
-    generator to provide a unified interface for processing filings.
 
     The orchestrator handles:
         - Single filing processing (when HTML is already available)
@@ -83,9 +105,10 @@ class PipelineOrchestrator:
         - Progress reporting via callbacks
 
     Note:
-        The orchestrator does NOT handle database storage. It returns
-        ProcessedFiling objects containing chunks and embeddings that
-        the database layer can store.
+        The orchestrator does NOT handle database storage or duplicate
+        detection — both live in the metadata registry (Phase 6).  It
+        returns :class:`ProcessedFiling` objects that the database
+        layer can persist.
 
     Example:
         >>> orchestrator = PipelineOrchestrator()
@@ -98,26 +121,34 @@ class PipelineOrchestrator:
         fetcher: FilingFetcher | None = None,
         parser: FilingParser | None = None,
         chunker: TextChunker | None = None,
-        embedder: EmbeddingGenerator | None = None,
+        embedder: ChunkEmbedder | None = None,
     ) -> None:
         """
         Initialise the orchestrator with pipeline components.
 
-        Components are created with defaults if not provided, allowing
-        dependency injection for testing.
+        Components are created with defaults where possible, allowing
+        dependency injection for testing.  The embedder has **no
+        default** in Phase 4 — Phase 5 introduces a provider-backed
+        implementation; until then, the orchestrator returns
+        ``ProcessedFiling`` objects with ``embeddings=None``.
 
         Args:
-            fetcher: FilingFetcher instance (optional)
-            parser: FilingParser instance (optional)
-            chunker: TextChunker instance (optional)
-            embedder: EmbeddingGenerator instance (optional)
+            fetcher: FilingFetcher instance (optional).
+            parser: FilingParser instance (optional).
+            chunker: TextChunker instance (optional).
+            embedder: Any object conforming to :class:`ChunkEmbedder`
+                (optional).  When ``None``, the embedding step is
+                skipped.
         """
         self.fetcher = fetcher or FilingFetcher()
         self.parser = parser or FilingParser()
         self.chunker = chunker or TextChunker()
-        self.embedder = embedder or EmbeddingGenerator()
+        self.embedder = embedder
 
-        logger.debug("PipelineOrchestrator initialised")
+        logger.debug(
+            "PipelineOrchestrator initialised (embedder=%s)",
+            "enabled" if self.embedder is not None else "disabled",
+        )
 
     def process_filing(
         self,
@@ -129,27 +160,29 @@ class PipelineOrchestrator:
         Process a single filing through the pipeline.
 
         This method runs the full pipeline on HTML content that has
-        already been fetched. Use this when you have the HTML content
-        available (e.g., from a previous fetch or cache).
+        already been fetched.  Use this when you have the HTML content
+        available (e.g. from a previous fetch or cache).
 
         Pipeline steps:
             1. Parse HTML → Segments
             2. Chunk segments → Chunks
-            3. Generate embeddings
+            3. Generate embeddings (skipped when ``embedder`` is None)
 
         Args:
-            filing_id: Identifier for the filing
-            html_content: Raw HTML content
-            progress_callback: Optional callback(step_name, current, total)
+            filing_id: Identifier for the filing.
+            html_content: Raw HTML content.
+            progress_callback: Optional callback
+                ``(step_name, current, total)``.
 
         Returns:
-            ProcessedFiling containing all processed data
+            ProcessedFiling containing all processed data.
 
         Example:
             >>> result = orchestrator.process_filing(filing_id, html)
             >>> print(f"Created {len(result.chunks)} chunks")
         """
         start_time = time.time()
+        total_steps = 4
 
         def report_progress(step: str, current: int, total: int) -> None:
             if progress_callback:
@@ -163,19 +196,24 @@ class PipelineOrchestrator:
         )
 
         # Step 1: Parse
-        report_progress("Parsing", 1, 4)
+        report_progress("Parsing", 1, total_steps)
         segments = self.parser.parse(html_content, filing_id)
 
         # Step 2: Chunk
-        report_progress("Chunking", 2, 4)
+        report_progress("Chunking", 2, total_steps)
         chunks = self.chunker.chunk_segments(segments)
 
-        # Step 3: Embed
-        report_progress("Embedding", 3, 4)
-        embeddings = self.embedder.embed_chunks(chunks, show_progress=False)
+        # Step 3: Embed (optional — Phase 5 will supply a real embedder)
+        report_progress("Embedding", 3, total_steps)
+        embeddings: np.ndarray | None
+        if self.embedder is not None:
+            embeddings = self.embedder.embed_chunks(chunks, show_progress=False)
+        else:
+            embeddings = None
+            logger.debug("Skipping embedding step — no embedder wired (Phase 5).")
 
         # Complete
-        report_progress("Complete", 4, 4)
+        report_progress("Complete", 4, total_steps)
         duration = time.time() - start_time
 
         ingest_result = IngestResult(
@@ -210,30 +248,21 @@ class PipelineOrchestrator:
         """
         Fetch and process the latest filing for a company.
 
-        This is a convenience method that combines fetching and processing
-        for the most recent filing of the specified type.
-
         Args:
-            ticker: Stock ticker symbol
-            form_type: SEC form type ("8-K", "10-K", or "10-Q")
-            progress_callback: Optional callback(step_name, current, total)
+            ticker: Stock ticker symbol.
+            form_type: SEC form type ("8-K", "10-K", or "10-Q").
+            progress_callback: Optional callback
+                ``(step_name, current, total)``.
 
         Returns:
-            ProcessedFiling containing all processed data
-
-        Example:
-            >>> result = orchestrator.ingest_latest("AAPL", "10-K")
-            >>> print(f"Ingested: {result.filing_id.date_str}")
+            ProcessedFiling containing all processed data.
         """
         logger.info("Ingesting latest %s for %s", form_type, ticker)
 
-        # Fetch
         if progress_callback:
             progress_callback("Fetching", 0, 4)
 
         filing_id, html_content = self.fetcher.fetch_latest(ticker, form_type)
-
-        # Process
         return self.process_filing(filing_id, html_content, progress_callback)
 
     def ingest_one(
@@ -249,14 +278,14 @@ class PipelineOrchestrator:
         Fetch and process a specific filing by index.
 
         Args:
-            ticker: Stock ticker symbol
-            form_type: SEC form type ("8-K", "10-K", or "10-Q")
-            index: Position in results (0=most recent)
-            year: Optional year filter
-            progress_callback: Optional callback
+            ticker: Stock ticker symbol.
+            form_type: SEC form type.
+            index: Position in results (0=most recent).
+            year: Optional year filter.
+            progress_callback: Optional callback.
 
         Returns:
-            ProcessedFiling containing all processed data
+            ProcessedFiling containing all processed data.
         """
         logger.info(
             "Ingesting %s %s at index %d",
@@ -269,7 +298,6 @@ class PipelineOrchestrator:
             progress_callback("Fetching", 0, 4)
 
         filing_id, html_content = self.fetcher.fetch_one(ticker, form_type, index=index, year=year)
-
         return self.process_filing(filing_id, html_content, progress_callback)
 
     def ingest_multiple(
@@ -285,23 +313,20 @@ class PipelineOrchestrator:
         """
         Fetch and process multiple filings for a company.
 
-        This method yields ProcessedFiling objects one at a time,
-        allowing incremental processing and storage.
+        Yields ProcessedFiling objects one at a time, allowing
+        incremental processing and storage.  Failed filings are logged
+        and skipped so a single bad filing does not abort the batch.
 
         Args:
-            ticker: Stock ticker symbol
-            form_type: SEC form type
-            count: Maximum number of filings
-            year: Year filter
-            start_date: Date range start
-            end_date: Date range end
+            ticker: Stock ticker symbol.
+            form_type: SEC form type.
+            count: Maximum number of filings.
+            year: Year filter.
+            start_date: Date range start.
+            end_date: Date range end.
 
         Yields:
-            ProcessedFiling for each successfully processed filing
-
-        Example:
-            >>> for result in orchestrator.ingest_multiple("AAPL", count=5):
-            ...     print(f"Processed: {result.filing_id.date_str}")
+            ProcessedFiling for each successfully processed filing.
         """
         logger.info(
             "Ingesting multiple %s filings for %s",
@@ -340,24 +365,20 @@ class PipelineOrchestrator:
         """
         Fetch and process filings for multiple companies.
 
-        This method yields ProcessedFiling objects for each successfully
-        processed filing across all specified tickers.
+        Yields ProcessedFiling objects for each successfully processed
+        filing across all specified tickers.  Failed filings are
+        logged and skipped.
 
         Args:
-            tickers: List of stock ticker symbols
-            form_type: SEC form type
-            count_per_ticker: Max filings per company
-            year: Year filter
-            start_date: Date range start
-            end_date: Date range end
+            tickers: List of stock ticker symbols.
+            form_type: SEC form type.
+            count_per_ticker: Max filings per company.
+            year: Year filter.
+            start_date: Date range start.
+            end_date: Date range end.
 
         Yields:
-            ProcessedFiling for each successfully processed filing
-
-        Example:
-            >>> tickers = ["AAPL", "MSFT", "GOOGL"]
-            >>> for result in orchestrator.ingest_batch(tickers, "10-K", year=2024):
-            ...     print(f"Processed: {result.filing_id.ticker}")
+            ProcessedFiling for each successfully processed filing.
         """
         logger.info(
             "Batch ingesting %s filings for %d companies",
