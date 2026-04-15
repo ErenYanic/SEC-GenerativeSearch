@@ -86,13 +86,11 @@ line-length = 100
 #   api/       -> Phase 10
 #   cli/       -> Phase 12
 #   database/  -> Phase 6
-#   pipeline/  -> Phase 4
 #   search/    -> Phase 7
 extend-exclude = [
     "src/sec_generative_search/api",
     "src/sec_generative_search/cli",
     "src/sec_generative_search/database",
-    "src/sec_generative_search/pipeline",
     "src/sec_generative_search/search",
 ]
 

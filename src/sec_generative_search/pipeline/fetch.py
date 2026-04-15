@@ -10,7 +10,7 @@ from the EDGAR database. It provides flexible selection methods including:
     - Filter by date range
 
 Usage:
-    from sec_semantic_search.pipeline import FilingFetcher
+    from sec_generative_search.pipeline import FilingFetcher
 
     fetcher = FilingFetcher()
 
@@ -40,8 +40,11 @@ from typing import Any
 
 from edgar import Company, set_identity
 
-from sec_semantic_search.config import BASE_FORMS, SUPPORTED_FORMS, get_settings
-from sec_semantic_search.core import FetchError, FilingIdentifier, get_logger
+from sec_generative_search.config.constants import BASE_FORMS, SUPPORTED_FORMS
+from sec_generative_search.config.settings import get_settings
+from sec_generative_search.core.exceptions import FetchError
+from sec_generative_search.core.logging import get_logger
+from sec_generative_search.core.types import FilingIdentifier
 
 logger = get_logger(__name__)
 
@@ -267,16 +270,10 @@ class FilingFetcher:
         end_str = ""
 
         if start_date is not None:
-            if isinstance(start_date, date):
-                start_str = start_date.isoformat()
-            else:
-                start_str = start_date
+            start_str = start_date.isoformat() if isinstance(start_date, date) else start_date
 
         if end_date is not None:
-            if isinstance(end_date, date):
-                end_str = end_date.isoformat()
-            else:
-                end_str = end_date
+            end_str = end_date.isoformat() if isinstance(end_date, date) else end_date
 
         return f"{start_str}:{end_str}"
 
