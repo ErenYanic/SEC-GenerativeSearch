@@ -37,7 +37,6 @@ from sec_generative_search.core.resilience import (
     with_timeout,
 )
 
-
 # ---------------------------------------------------------------------------
 # RetryPolicy
 # ---------------------------------------------------------------------------
@@ -210,9 +209,7 @@ class TestNormaliseException:
         assert normalise_exception(original, provider="x", mapping=_MAPPING) is original
 
     def test_auth_mapping(self) -> None:
-        normalised = normalise_exception(
-            _FakeAuthError("401"), provider="openai", mapping=_MAPPING
-        )
+        normalised = normalise_exception(_FakeAuthError("401"), provider="openai", mapping=_MAPPING)
         assert isinstance(normalised, ProviderAuthError)
         assert normalised.provider == "openai"
         assert normalised.hint is not None
@@ -238,9 +235,7 @@ class TestNormaliseException:
         assert isinstance(normalised, ProviderContentFilterError)
 
     def test_unknown_exception_falls_back_to_provider_error(self) -> None:
-        normalised = normalise_exception(
-            RuntimeError("boom"), provider="openai", mapping=_MAPPING
-        )
+        normalised = normalise_exception(RuntimeError("boom"), provider="openai", mapping=_MAPPING)
         assert isinstance(normalised, ProviderError)
         # Not a known subclass.
         assert not isinstance(
@@ -318,9 +313,7 @@ class TestResilientCall:
             calls += 1
             return "ok"
 
-        result = resilient_call(
-            fn, provider="test", policy=_make_policy(), sleep=_zero_sleep
-        )
+        result = resilient_call(fn, provider="test", policy=_make_policy(), sleep=_zero_sleep)
         assert result == "ok"
         assert calls == 1
 

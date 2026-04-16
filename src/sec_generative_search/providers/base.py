@@ -149,13 +149,9 @@ class _ProviderBase(ABC):
     def __init__(self, api_key: str) -> None:
         cls = type(self)
         if not cls.provider_name:
-            raise TypeError(
-                f"{cls.__name__} must set the `provider_name` class attribute"
-            )
+            raise TypeError(f"{cls.__name__} must set the `provider_name` class attribute")
         if not isinstance(api_key, str):
-            raise TypeError(
-                f"api_key must be a str, got {type(api_key).__name__}"
-            )
+            raise TypeError(f"api_key must be a str, got {type(api_key).__name__}")
         if not api_key:
             raise ValueError("api_key must not be empty")
         # Leading underscore — never serialised by dataclass helpers,
