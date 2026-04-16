@@ -1,4 +1,4 @@
-"""Tests for :mod:`sec_generative_search.providers.base` (Phase 5A.1–5A.3, 5A.8).
+"""Tests for :mod:`sec_generative_search.providers.base` (Phase 5A.1-5A.3, 5A.8).
 
 Covers:
 
@@ -202,7 +202,7 @@ class TestApiKeyValidation:
         provider = _FakeLLM(_LONG_KEY)
         # Stored under a leading-underscore attribute — the name signals
         # 'private' to tooling and reviewers.
-        assert provider._api_key == _LONG_KEY  # noqa: SLF001
+        assert provider._api_key == _LONG_KEY
 
 
 # ---------------------------------------------------------------------------
@@ -249,8 +249,8 @@ class TestFinalRepr:
     def test_repr_is_marked_final(self) -> None:
         """``typing.final`` sets a dunder on the wrapped function."""
         # ``@final`` sets ``__final__ = True`` on the decorated callable.
-        assert getattr(base._ProviderBase.__repr__, "__final__", False) is True  # noqa: SLF001
-        assert getattr(base._ProviderBase.__str__, "__final__", False) is True  # noqa: SLF001
+        assert getattr(base._ProviderBase.__repr__, "__final__", False) is True
+        assert getattr(base._ProviderBase.__str__, "__final__", False) is True
 
 
 # ---------------------------------------------------------------------------

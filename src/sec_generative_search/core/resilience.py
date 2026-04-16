@@ -50,7 +50,6 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TypeVar
 
 from sec_generative_search.core.exceptions import (
     ProviderAuthError,
@@ -72,9 +71,6 @@ __all__ = [
     "resilient_call",
     "with_timeout",
 ]
-
-T = TypeVar("T")
-
 
 # ---------------------------------------------------------------------------
 # Retry policy
@@ -185,10 +181,13 @@ class CircuitBreaker:
 
         Must be called under ``self._lock``.
         """
-        if self._state is CircuitState.OPEN and self._opened_at is not None:
-            if self._clock() - self._opened_at >= self._reset_timeout:
-                self._state = CircuitState.HALF_OPEN
-                logger.info("Circuit breaker entering HALF_OPEN for probe")
+        if (
+            self._state is CircuitState.OPEN
+            and self._opened_at is not None
+            and self._clock() - self._opened_at >= self._reset_timeout
+        ):
+            self._state = CircuitState.HALF_OPEN
+            logger.info("Circuit breaker entering HALF_OPEN for probe")
 
     def before_call(self) -> None:
         """Raise :class:`ProviderError` if the breaker is open.
@@ -203,8 +202,7 @@ class CircuitBreaker:
                 raise ProviderError(
                     "Circuit breaker is open; upstream service is failing",
                     hint=(
-                        f"Retry after {self._reset_timeout:.1f}s or "
-                        "investigate upstream failures."
+                        f"Retry after {self._reset_timeout:.1f}s or investigate upstream failures."
                     ),
                 )
 
@@ -322,7 +320,7 @@ def normalise_exception(
 # ---------------------------------------------------------------------------
 
 
-def with_timeout(fn: Callable[[], T], *, seconds: float) -> T:
+def with_timeout[T](fn: Callable[[], T], *, seconds: float) -> T:
     """Run *fn* with a wall-clock timeout.
 
     A ``seconds`` of 0 (or less) disables the guard and runs in the
@@ -374,7 +372,7 @@ class ResilientCallPolicy:
     circuit_breaker: CircuitBreaker | None = None
 
 
-def resilient_call(
+def resilient_call[T](
     fn: Callable[[], T],
     *,
     provider: str,
@@ -408,10 +406,7 @@ def resilient_call(
             policy.circuit_breaker.before_call()
 
         try:
-            if policy.timeout > 0:
-                result = with_timeout(fn, seconds=policy.timeout)
-            else:
-                result = fn()
+            result = with_timeout(fn, seconds=policy.timeout) if policy.timeout > 0 else fn()
         except Exception as raw:
             normalised = normalise_exception(
                 raw,
