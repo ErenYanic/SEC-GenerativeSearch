@@ -45,6 +45,15 @@ dependencies = [
 
     # HTTP client (used by provider adapters and test client)
     "httpx>=0.28",
+
+    # LLM providers (Phase 5B onwards).  `openai` is the canonical SDK
+    # for OpenAI itself and every OpenAI-compatible vendor (Mistral, Kimi,
+    # DeepSeek, Qwen, OpenRouter — Phase 5D).  `tiktoken` powers exact
+    # token counting and cost accounting; treating it as a hard dep keeps
+    # the price surface honest instead of silently degrading to
+    # whitespace heuristics.
+    "openai>=1",
+    "tiktoken>=0.7",
 ]
 
 [project.optional-dependencies]
