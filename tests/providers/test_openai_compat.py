@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -93,7 +93,7 @@ class _DemoLLM(OpenAICompatibleLLMProvider):
 
     provider_name = "demo-vendor"
     default_model = "demo-chat"
-    MODEL_CATALOGUE = {
+    MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
         "demo-chat": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
@@ -110,7 +110,7 @@ class _DemoLLM(OpenAICompatibleLLMProvider):
 class _DemoEmbed(OpenAICompatibleEmbeddingProvider):
     provider_name = "demo-vendor"
     default_model = "demo-embed"
-    MODEL_DIMENSIONS = {"demo-embed": 8}
+    MODEL_DIMENSIONS: ClassVar[dict[str, int]] = {"demo-embed": 8}
 
 
 # ---------------------------------------------------------------------------
@@ -277,9 +277,7 @@ class TestGenerate:
     def test_system_prompt_prepended(self, llm_provider: _DemoLLM) -> None:
         llm_provider._fake_client.chat.completions.create.return_value = _make_completion()
         llm_provider.generate(
-            GenerationRequest(
-                prompt="user message", model="demo-chat", system="be terse"
-            )
+            GenerationRequest(prompt="user message", model="demo-chat", system="be terse")
         )
         messages = llm_provider._fake_client.chat.completions.create.call_args.kwargs["messages"]
         assert messages[0] == {"role": "system", "content": "be terse"}
@@ -327,9 +325,7 @@ class TestGenerateStream:
         llm_provider._fake_client.chat.completions.create.return_value = iter(
             [_make_chunk(content=None, usage=(1, 1))]
         )
-        list(
-            llm_provider.generate_stream(GenerationRequest(prompt="hi", model="demo-chat"))
-        )
+        list(llm_provider.generate_stream(GenerationRequest(prompt="hi", model="demo-chat")))
         kwargs = llm_provider._fake_client.chat.completions.create.call_args.kwargs
         assert kwargs["stream"] is True
         assert kwargs["stream_options"] == {"include_usage": True}
@@ -551,9 +547,7 @@ class TestSecretSafety:
         package_logger.propagate = True
         try:
             with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
-                llm_provider._fake_client.chat.completions.create.return_value = (
-                    _make_completion()
-                )
+                llm_provider._fake_client.chat.completions.create.return_value = _make_completion()
                 llm_provider.generate(GenerationRequest(prompt="hi", model="demo-chat"))
         finally:
             package_logger.propagate = previous
@@ -578,9 +572,7 @@ class TestStreamingEdgeCases:
             _make_chunk(content=None, usage=(5, 1)),
         ]
         llm_provider._fake_client.chat.completions.create.return_value = iter(chunks)
-        out = list(
-            llm_provider.generate_stream(GenerationRequest(prompt="x", model="demo-chat"))
-        )
+        out = list(llm_provider.generate_stream(GenerationRequest(prompt="x", model="demo-chat")))
         # Only the usage frame should be emitted.
         assert len(out) == 1
         assert out[0].text == ""

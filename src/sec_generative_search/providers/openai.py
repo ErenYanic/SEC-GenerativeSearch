@@ -18,6 +18,8 @@ a cost table.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from sec_generative_search.core.types import PricingTier, ProviderCapability
 from sec_generative_search.providers.openai_compat import (
     ModelInfo,
@@ -41,7 +43,7 @@ class OpenAIProvider(OpenAICompatibleLLMProvider):
     # supports.  Adding a model later is a one-line addition; the SDK
     # will gracefully refuse unknown slugs at call time so a missing
     # entry never silently degrades.
-    MODEL_CATALOGUE = {
+    MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
         "gpt-4o": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
@@ -104,7 +106,7 @@ class OpenAIEmbeddingProvider(OpenAICompatibleEmbeddingProvider):
     # Native dimensions (OpenAI also supports the ``dimensions`` request
     # parameter for shrinking; v1 sticks to the native sizes for
     # ChromaDB collection stability — see AGENT.md "Embeddings").
-    MODEL_DIMENSIONS = {
+    MODEL_DIMENSIONS: ClassVar[dict[str, int]] = {
         "text-embedding-3-small": 1536,
         "text-embedding-3-large": 3072,
     }

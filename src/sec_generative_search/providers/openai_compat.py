@@ -4,7 +4,7 @@ Every vendor that speaks the OpenAI Chat Completions / Embeddings wire
 protocol — OpenAI itself, Mistral, Kimi, DeepSeek, Qwen, OpenRouter —
 shares the same client construction, error normalisation, and request
 shape.  This module captures that shared surface so each concrete
-vendor in Phase 5B–5D differs only by ``provider_name``, an optional
+vendor in Phase 5B-5D differs only by ``provider_name``, an optional
 ``base_url``, and its model catalogue.
 
 Design notes:
@@ -49,7 +49,6 @@ from openai import (
 
 from sec_generative_search.core.exceptions import (
     ProviderContentFilterError,
-    ProviderError,
 )
 from sec_generative_search.core.logging import get_logger
 from sec_generative_search.core.resilience import (
@@ -187,7 +186,7 @@ class _OpenAIClientMixin:
 class OpenAICompatibleLLMProvider(_OpenAIClientMixin, BaseLLMProvider):
     """Chat-completion provider over the OpenAI wire protocol.
 
-    Subclasses (Phase 5B–5D) override ``provider_name``,
+    Subclasses (Phase 5B-5D) override ``provider_name``,
     optionally ``default_base_url``, and supply a ``MODEL_CATALOGUE``
     mapping model slug -> :class:`ModelInfo`.
 
@@ -480,5 +479,3 @@ class OpenAICompatibleEmbeddingProvider(_OpenAIClientMixin, BaseEmbeddingProvide
 
     def get_dimension(self) -> int:
         return self.MODEL_DIMENSIONS[self._model]
-
-

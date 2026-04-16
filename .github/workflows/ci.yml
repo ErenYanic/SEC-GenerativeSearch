@@ -97,9 +97,14 @@ jobs:
           python -m pip install "pip-audit>=2.7"
 
       - name: Audit installed dependencies for known vulnerabilities
-        # ``--strict`` makes unknown/unsupported packages a failure
-        # rather than a silent pass.
-        run: python -m pip_audit --strict
+        # ``--skip-editable`` excludes the project itself (installed via
+        # ``pip install -e .``), which is not published on PyPI and so
+        # cannot be resolved against the advisory database.  ``--strict``
+        # is intentionally omitted because it treats every skipped
+        # distribution — including our own editable install — as a hard
+        # failure, defeating the purpose of the skip.  Any genuine
+        # advisory on a pinned dependency still fails the job.
+        run: python -m pip_audit --skip-editable
 
   secret-scan:
     # Phase 3.10 — scan the working tree for accidentally-committed
@@ -129,13 +134,21 @@ jobs:
           python -m pip install "detect-secrets>=1.5"
 
       - name: Scan for secrets
-        # ``--exclude-files`` drops vendored lockfile and build
-        # artefacts that routinely trigger entropy false-positives.
-        # Any finding fails the job — there is no allow-list.
+        # ``detect-secrets-hook`` compares every tracked file against
+        # ``.secrets.baseline`` — a committed audit trail of known
+        # false-positives (docstring examples, ``.env.example``
+        # placeholders, and deterministic test fixtures).  Any finding
+        # that is NOT already in the baseline fails the job.  New real
+        # secrets therefore block the PR, while refactoring a known
+        # false-positive does not generate noise.
+        #
+        # To update the baseline after adding a new deliberate fixture:
+        #   detect-secrets scan \
+        #     --exclude-files 'uv\.lock' \
+        #     --exclude-files '\.venv/' \
+        #     --exclude-files 'node_modules/' \
+        #     > .secrets.baseline
         run: |
-          detect-secrets scan \
-            --exclude-files 'uv\.lock' \
-            --exclude-files '\.venv/' \
-            --exclude-files 'node_modules/' \
-            > secrets-report.json
-          python -c 'import json,sys; r=json.load(open("secrets-report.json")); f=r.get("results",{}); print(json.dumps(f,indent=2)) if f else print("detect-secrets: no findings"); sys.exit(1 if f else 0)'
+          git ls-files -- \
+            ':!uv.lock' ':!.venv/**' ':!node_modules/**' \
+            | xargs detect-secrets-hook --baseline .secrets.baseline
