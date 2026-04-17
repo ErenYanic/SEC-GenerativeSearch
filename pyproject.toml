@@ -54,6 +54,15 @@ dependencies = [
     # whitespace heuristics.
     "openai>=1",
     "tiktoken>=0.7",
+
+    # Phase 5C: Anthropic and Google Gemini first-party SDKs.  Each
+    # vendor has a deliberately distinct exception hierarchy and
+    # streaming shape, so we do not route them through the OpenAI wire
+    # protocol; they get their own adapters in ``providers/anthropic.py``
+    # and ``providers/gemini.py`` and plug into the same
+    # :func:`resilient_call` contract as every other provider.
+    "anthropic>=0.39",
+    "google-genai>=0.3",
 ]
 
 [project.optional-dependencies]
