@@ -75,7 +75,7 @@ class _FakeAPITimeout(anthropic_mod.APITimeoutError):
 # ---------------------------------------------------------------------------
 
 
-_LONG_KEY = "sk-ant-ABCDEFGHIJKLMNOPQRSTUVWX"
+_LONG_KEY = "sk-ant-ABCDEFGHIJKLMNOPQRSTUVWX"  # pragma: allowlist secret
 _KEY_TAIL = _LONG_KEY[-4:]
 
 
