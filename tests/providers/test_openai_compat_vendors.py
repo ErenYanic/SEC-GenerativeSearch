@@ -73,47 +73,64 @@ def patched_openai(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# LLM vendor table — (ProviderClass, expected provider_name, expected
-# default_base_url, default_model, an extra catalogue slug to spot-check)
+# LLM vendor tables
+#
+# Two matrices so the OpenRouter meta-provider (empty catalogue by
+# design) does not have to opt out at runtime via ``pytest.skip``:
+#
+# - ``_LLM_VENDORS`` covers every vendor and is used for the tests that
+#   apply universally (name, base_url, default_model, construction,
+#   capability probe, repr redaction).
+# - ``_LLM_VENDORS_WITH_CATALOGUE`` adds a per-vendor spot-check slug
+#   and therefore excludes :class:`OpenRouterProvider` — a meta-provider
+#   that ships an empty catalogue cannot have a "non-default slug
+#   declared in the catalogue".  The permissive-default semantics for
+#   OpenRouter are asserted directly in ``test_openrouter_accepts_any_slug``.
 # ---------------------------------------------------------------------------
 
 
-_LLM_VENDORS: list[tuple[type, str, str, str, str | None]] = [
+_LLM_VENDORS: list[tuple[type, str, str, str]] = [
     (
         MistralProvider,
         "mistral",
         "https://api.mistral.ai/v1",
         "mistral-small-latest",
-        "mistral-large-latest",
     ),
     (
         KimiProvider,
         "kimi",
         "https://api.moonshot.ai/v1",
         "moonshot-v1-32k",
-        "kimi-k2",
     ),
     (
         DeepSeekProvider,
         "deepseek",
         "https://api.deepseek.com/v1",
         "deepseek-chat",
-        "deepseek-reasoner",
     ),
     (
         QwenProvider,
         "qwen",
         "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
         "qwen-turbo",
-        "qwen-max",
     ),
     (
         OpenRouterProvider,
         "openrouter",
         "https://openrouter.ai/api/v1",
         "openai/gpt-4o-mini",
-        None,  # catalogue is deliberately empty
     ),
+]
+
+
+# (ProviderClass, extra non-default catalogue slug to spot-check).  Keeps
+# the parametrisation trivially introspectable and avoids an in-test
+# ``pytest.skip`` branch for the meta-provider.
+_LLM_VENDORS_WITH_CATALOGUE: list[tuple[type, str]] = [
+    (MistralProvider, "mistral-large-latest"),
+    (KimiProvider, "kimi-k2"),
+    (DeepSeekProvider, "deepseek-reasoner"),
+    (QwenProvider, "qwen-max"),
 ]
 
 
@@ -141,7 +158,7 @@ _EMBED_VENDORS: list[tuple[type, str, str, str, int]] = [
 
 
 @pytest.mark.parametrize(
-    ("provider_cls", "provider_name", "base_url", "default_model", "extra_slug"),
+    ("provider_cls", "provider_name", "base_url", "default_model"),
     _LLM_VENDORS,
 )
 class TestLLMVendorDeclarations:
@@ -151,7 +168,6 @@ class TestLLMVendorDeclarations:
         provider_name: str,
         base_url: str,
         default_model: str,
-        extra_slug: str | None,
     ) -> None:
         assert provider_cls.provider_name == provider_name
 
@@ -161,7 +177,6 @@ class TestLLMVendorDeclarations:
         provider_name: str,
         base_url: str,
         default_model: str,
-        extra_slug: str | None,
     ) -> None:
         assert provider_cls.default_base_url == base_url
 
@@ -171,42 +186,43 @@ class TestLLMVendorDeclarations:
         provider_name: str,
         base_url: str,
         default_model: str,
-        extra_slug: str | None,
     ) -> None:
         assert provider_cls.default_model == default_model
 
-    def test_default_model_is_in_catalogue_or_meta(
-        self,
-        provider_cls: type,
-        provider_name: str,
-        base_url: str,
-        default_model: str,
-        extra_slug: str | None,
-    ) -> None:
-        # Every non-meta provider pins its default_model to an entry in
-        # the catalogue so the capability probe is truly O(1).  The
-        # OpenRouter meta-provider deliberately ships an empty catalogue
-        # — unknown slugs are the whole point.
-        catalogue = provider_cls.MODEL_CATALOGUE
-        if catalogue:
-            assert default_model in catalogue, (
-                f"{provider_cls.__name__} default_model '{default_model}' "
-                "missing from MODEL_CATALOGUE"
-            )
-        else:
-            assert provider_cls is OpenRouterProvider
 
-    def test_extra_catalogue_slug_present(
-        self,
-        provider_cls: type,
-        provider_name: str,
-        base_url: str,
-        default_model: str,
-        extra_slug: str | None,
-    ) -> None:
-        if extra_slug is None:
-            pytest.skip("meta-provider — catalogue intentionally empty")
-        assert extra_slug in provider_cls.MODEL_CATALOGUE
+@pytest.mark.parametrize(
+    ("provider_cls", "default_model"),
+    [(cls, model) for cls, _name, _url, model in _LLM_VENDORS if cls is not OpenRouterProvider],
+)
+def test_default_model_is_in_catalogue(provider_cls: type, default_model: str) -> None:
+    """Non-meta providers pin ``default_model`` to a catalogue entry.
+
+    This is what makes the capability probe truly O(1) — an unknown
+    ``default_model`` would silently fall through to the permissive
+    default branch and mask a copy-paste mistake in the catalogue.
+    """
+    assert default_model in provider_cls.MODEL_CATALOGUE, (
+        f"{provider_cls.__name__} default_model '{default_model}' missing from MODEL_CATALOGUE"
+    )
+
+
+def test_openrouter_catalogue_is_empty_by_design() -> None:
+    """The meta-provider's empty catalogue is load-bearing.
+
+    Guarded here so a future "helpful" patch that populates
+    :attr:`OpenRouterProvider.MODEL_CATALOGUE` trips a test instead of
+    silently narrowing the set of accepted slugs.  The capability probe
+    relies on the permissive-default branch for any slug not in the
+    catalogue; populating the catalogue would start rejecting slugs
+    OpenRouter actually serves.
+    """
+    assert OpenRouterProvider.MODEL_CATALOGUE == {}
+
+
+@pytest.mark.parametrize(("provider_cls", "extra_slug"), _LLM_VENDORS_WITH_CATALOGUE)
+def test_extra_catalogue_slug_present(provider_cls: type, extra_slug: str) -> None:
+    """Spot-check a non-default slug per vendor to catch catalogue typos."""
+    assert extra_slug in provider_cls.MODEL_CATALOGUE
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +231,7 @@ class TestLLMVendorDeclarations:
 
 
 @pytest.mark.parametrize(
-    ("provider_cls", "provider_name", "base_url", "default_model", "extra_slug"),
+    ("provider_cls", "provider_name", "base_url", "default_model"),
     _LLM_VENDORS,
 )
 def test_base_url_wired_into_client(
@@ -223,10 +239,10 @@ def test_base_url_wired_into_client(
     provider_name: str,
     base_url: str,
     default_model: str,
-    extra_slug: str | None,
     patched_openai: dict[str, Any],
 ) -> None:
     """Every LLM vendor subclass hands its ``default_base_url`` to the SDK."""
+    del provider_name, default_model
     provider_cls(_LONG_KEY)
     kwargs = patched_openai["kwargs"]
     assert kwargs["base_url"] == base_url
@@ -241,7 +257,7 @@ def test_base_url_wired_into_client(
 
 
 @pytest.mark.parametrize(
-    ("provider_cls", "provider_name", "base_url", "default_model", "extra_slug"),
+    ("provider_cls", "provider_name", "base_url", "default_model"),
     _LLM_VENDORS,
 )
 def test_capability_probe_is_offline(
@@ -249,9 +265,9 @@ def test_capability_probe_is_offline(
     provider_name: str,
     base_url: str,
     default_model: str,
-    extra_slug: str | None,
     patched_openai: dict[str, Any],
 ) -> None:
+    del provider_name, base_url
     provider = provider_cls(_LONG_KEY)
     client = patched_openai["client"]
     client.reset_mock()
@@ -347,36 +363,24 @@ class TestEmbeddingVendorDeclarations:
 
 
 @pytest.mark.security
-@pytest.mark.parametrize(
-    ("provider_cls", "provider_name", "base_url", "default_model", "extra_slug"),
-    _LLM_VENDORS,
-)
+@pytest.mark.parametrize("provider_cls", [row[0] for row in _LLM_VENDORS])
 def test_llm_repr_never_exposes_key(
     provider_cls: type,
-    provider_name: str,
-    base_url: str,
-    default_model: str,
-    extra_slug: str | None,
     patched_openai: dict[str, Any],
 ) -> None:
+    del patched_openai  # fixture is only needed to stub the OpenAI client
     text = repr(provider_cls(_LONG_KEY))
     assert _LONG_KEY not in text
     assert _KEY_TAIL in text
 
 
 @pytest.mark.security
-@pytest.mark.parametrize(
-    ("provider_cls", "provider_name", "base_url", "default_model", "dimension"),
-    _EMBED_VENDORS,
-)
+@pytest.mark.parametrize("provider_cls", [row[0] for row in _EMBED_VENDORS])
 def test_embed_repr_never_exposes_key(
     provider_cls: type,
-    provider_name: str,
-    base_url: str,
-    default_model: str,
-    dimension: int,
     patched_openai: dict[str, Any],
 ) -> None:
+    del patched_openai
     text = repr(provider_cls(_LONG_KEY))
     assert _LONG_KEY not in text
     assert _KEY_TAIL in text
