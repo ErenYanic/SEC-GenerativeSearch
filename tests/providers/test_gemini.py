@@ -77,7 +77,7 @@ class _FakeServerError(gemini_mod.errors.ServerError, _FakeAPIError):
 # ---------------------------------------------------------------------------
 
 
-_LONG_KEY = "AIzaSyABCDEFGHIJKLMNOPQRSTUVWX"
+_LONG_KEY = "AIzaSyABCDEFGHIJKLMNOPQRSTUVWX"  # pragma: allowlist secret
 _KEY_TAIL = _LONG_KEY[-4:]
 
 

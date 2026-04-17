@@ -1,0 +1,87 @@
+"""Qwen (Alibaba DashScope) provider adapters (Phase 5D.4).
+
+Alibaba's DashScope exposes an OpenAI-compatible surface at
+``https://dashscope-intl.aliyuncs.com/compatible-mode/v1`` for
+international accounts.  Both chat and embedding surfaces are available
+and are modelled separately here so each can be used independently.
+"""
+
+from __future__ import annotations
+
+from typing import ClassVar
+
+from sec_generative_search.core.types import PricingTier, ProviderCapability
+from sec_generative_search.providers.openai_compat import (
+    ModelInfo,
+    OpenAICompatibleEmbeddingProvider,
+    OpenAICompatibleLLMProvider,
+)
+
+__all__ = [
+    "QwenEmbeddingProvider",
+    "QwenProvider",
+]
+
+
+_QWEN_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+
+
+class QwenProvider(OpenAICompatibleLLMProvider):
+    """Chat-completion provider targeting DashScope's Qwen models."""
+
+    provider_name = "qwen"
+    default_base_url = _QWEN_BASE_URL
+    default_model = "qwen-turbo"
+
+    MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
+        "qwen-max": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=False,
+                context_window_tokens=32_768,
+                max_output_tokens=8_192,
+                pricing_tier=PricingTier.PREMIUM,
+            ),
+        ),
+        "qwen-plus": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=False,
+                context_window_tokens=131_072,
+                max_output_tokens=8_192,
+                pricing_tier=PricingTier.STANDARD,
+            ),
+        ),
+        "qwen-turbo": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=False,
+                context_window_tokens=1_000_000,
+                max_output_tokens=8_192,
+                pricing_tier=PricingTier.LOW,
+            ),
+        ),
+    }
+
+
+class QwenEmbeddingProvider(OpenAICompatibleEmbeddingProvider):
+    """Embedding provider for DashScope's ``text-embedding-v*`` models."""
+
+    provider_name = "qwen"
+    default_base_url = _QWEN_BASE_URL
+    default_model = "text-embedding-v3"
+
+    MODEL_DIMENSIONS: ClassVar[dict[str, int]] = {
+        "text-embedding-v1": 1536,
+        "text-embedding-v2": 1536,
+        "text-embedding-v3": 1024,
+    }
