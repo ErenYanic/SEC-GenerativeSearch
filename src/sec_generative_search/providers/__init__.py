@@ -5,7 +5,9 @@ introduces the OpenAI wire-compatible plumbing; Phase 5C adds first-
 party Anthropic and Google Gemini adapters; Phase 5D ships concrete
 OpenAI-compatible subclasses for Mistral, Kimi (Moonshot), DeepSeek,
 Qwen (DashScope), and OpenRouter; Phase 5E adds the on-device
-``LocalEmbeddingProvider`` backed by ``sentence-transformers``.
+``LocalEmbeddingProvider`` backed by ``sentence-transformers``; Phase 5F
+adds the curated :class:`ProviderRegistry` for capability lookup, model
+listings, and key validation.
 """
 
 from sec_generative_search.providers.anthropic import AnthropicProvider
@@ -37,6 +39,11 @@ from sec_generative_search.providers.qwen import (
     QwenEmbeddingProvider,
     QwenProvider,
 )
+from sec_generative_search.providers.registry import (
+    ProviderEntry,
+    ProviderRegistry,
+    ProviderSurface,
+)
 
 __all__ = [
     "AnthropicProvider",
@@ -55,6 +62,9 @@ __all__ = [
     "OpenAIEmbeddingProvider",
     "OpenAIProvider",
     "OpenRouterProvider",
+    "ProviderEntry",
+    "ProviderRegistry",
+    "ProviderSurface",
     "QwenEmbeddingProvider",
     "QwenProvider",
     "RerankResult",
