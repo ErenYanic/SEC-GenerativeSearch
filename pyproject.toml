@@ -71,6 +71,15 @@ encryption = [
     "pysqlcipher3>=1.2",
 ]
 
+# Local embedding provider (Phase 5E).  Pulls torch + sentence-transformers
+# (~2 GB install) — kept optional so cloud deployments that rely on hosted
+# embedding APIs (OpenAI, Gemini, Mistral, Qwen) do not carry the payload.
+# Install with: `uv pip install -e ".[local-embeddings]"`.
+local-embeddings = [
+    "sentence-transformers>=3.0",
+    "torch>=2.2",
+]
+
 # Development tools — linting, formatting, pre-commit hooks.
 dev = [
     "ruff>=0.11",
