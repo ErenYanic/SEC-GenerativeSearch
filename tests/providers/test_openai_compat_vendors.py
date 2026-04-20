@@ -36,13 +36,17 @@ import pytest
 
 from sec_generative_search.providers import openai_compat
 from sec_generative_search.providers.deepseek import DeepSeekProvider
+from sec_generative_search.providers.grok import GrokProvider
 from sec_generative_search.providers.kimi import KimiProvider
+from sec_generative_search.providers.mimo import MimoProvider
+from sec_generative_search.providers.minimax import MiniMaxProvider
 from sec_generative_search.providers.mistral import (
     MistralEmbeddingProvider,
     MistralProvider,
 )
 from sec_generative_search.providers.openrouter import OpenRouterProvider
 from sec_generative_search.providers.qwen import QwenEmbeddingProvider, QwenProvider
+from sec_generative_search.providers.zai import ZaiProvider
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -115,6 +119,30 @@ _LLM_VENDORS: list[tuple[type, str, str, str]] = [
         "qwen-turbo",
     ),
     (
+        ZaiProvider,
+        "zai",
+        "https://api.z.ai/api/paas/v4",
+        "glm-4.5-air",
+    ),
+    (
+        GrokProvider,
+        "grok",
+        "https://api.x.ai/v1",
+        "grok-4-1-fast-non-reasoning",
+    ),
+    (
+        MiniMaxProvider,
+        "minimax",
+        "https://api.minimax.io/v1",
+        "MiniMax-M2.7-highspeed",
+    ),
+    (
+        MimoProvider,
+        "mimo",
+        "https://api.xiaomimimo.com/v1",
+        "MiMo-V2-Flash",
+    ),
+    (
         OpenRouterProvider,
         "openrouter",
         "https://openrouter.ai/api/v1",
@@ -131,6 +159,10 @@ _LLM_VENDORS_WITH_CATALOGUE: list[tuple[type, str]] = [
     (KimiProvider, "kimi-k2"),
     (DeepSeekProvider, "deepseek-reasoner"),
     (QwenProvider, "qwen-max"),
+    (ZaiProvider, "glm-5.1"),
+    (GrokProvider, "grok-4.20-0309-reasoning"),
+    (MiniMaxProvider, "MiniMax-M2"),
+    (MimoProvider, "MiMo-V2-Pro"),
 ]
 
 

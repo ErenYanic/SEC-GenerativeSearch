@@ -30,6 +30,31 @@ class KimiProvider(OpenAICompatibleLLMProvider):
     default_model = "moonshot-v1-32k"
 
     MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
+        "kimi-k2.6": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                context_window_tokens=262_144,
+                max_output_tokens=8_192,
+                pricing_tier=PricingTier.PREMIUM,
+            ),
+        ),
+        "kimi-k2.5": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                vision=True,
+                context_window_tokens=262_144,
+                max_output_tokens=8_192,
+                pricing_tier=PricingTier.PREMIUM,
+            ),
+        ),
         "kimi-k2": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
@@ -39,7 +64,7 @@ class KimiProvider(OpenAICompatibleLLMProvider):
                 prompt_caching=True,
                 context_window_tokens=128_000,
                 max_output_tokens=8_192,
-                pricing_tier=PricingTier.PREMIUM,
+                pricing_tier=PricingTier.STANDARD,
             ),
         ),
         "moonshot-v1-8k": ModelInfo(
