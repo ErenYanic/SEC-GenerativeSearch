@@ -7,7 +7,9 @@ OpenAI-compatible subclasses for Mistral, Kimi (Moonshot), DeepSeek,
 Qwen (DashScope), and OpenRouter; Phase 5E adds the on-device
 ``LocalEmbeddingProvider`` backed by ``sentence-transformers``; Phase 5F
 adds the curated :class:`ProviderRegistry` for capability lookup, model
-listings, and key validation.
+listings, and key validation; Phase 5G extends the LLM surface with
+four more OpenAI-compatible vendors — Z.ai (GLM family), xAI (Grok),
+MiniMax, and Xiaomi MiMo.
 """
 
 from sec_generative_search.providers.anthropic import AnthropicProvider
@@ -24,8 +26,11 @@ from sec_generative_search.providers.gemini import (
     GeminiEmbeddingProvider,
     GeminiProvider,
 )
+from sec_generative_search.providers.grok import GrokProvider
 from sec_generative_search.providers.kimi import KimiProvider
 from sec_generative_search.providers.local import LocalEmbeddingProvider
+from sec_generative_search.providers.mimo import MimoProvider
+from sec_generative_search.providers.minimax import MiniMaxProvider
 from sec_generative_search.providers.mistral import (
     MistralEmbeddingProvider,
     MistralProvider,
@@ -44,6 +49,7 @@ from sec_generative_search.providers.registry import (
     ProviderRegistry,
     ProviderSurface,
 )
+from sec_generative_search.providers.zai import ZaiProvider
 
 __all__ = [
     "AnthropicProvider",
@@ -55,8 +61,11 @@ __all__ = [
     "GeminiProvider",
     "GenerationRequest",
     "GenerationResponse",
+    "GrokProvider",
     "KimiProvider",
     "LocalEmbeddingProvider",
+    "MimoProvider",
+    "MiniMaxProvider",
     "MistralEmbeddingProvider",
     "MistralProvider",
     "OpenAIEmbeddingProvider",
@@ -68,4 +77,5 @@ __all__ = [
     "QwenEmbeddingProvider",
     "QwenProvider",
     "RerankResult",
+    "ZaiProvider",
 ]

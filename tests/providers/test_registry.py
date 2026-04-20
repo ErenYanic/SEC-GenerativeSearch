@@ -45,8 +45,11 @@ from sec_generative_search.providers.gemini import (
     GeminiEmbeddingProvider,
     GeminiProvider,
 )
+from sec_generative_search.providers.grok import GrokProvider
 from sec_generative_search.providers.kimi import KimiProvider
 from sec_generative_search.providers.local import LocalEmbeddingProvider
+from sec_generative_search.providers.mimo import MimoProvider
+from sec_generative_search.providers.minimax import MiniMaxProvider
 from sec_generative_search.providers.mistral import (
     MistralEmbeddingProvider,
     MistralProvider,
@@ -65,6 +68,7 @@ from sec_generative_search.providers.registry import (
     ProviderRegistry,
     ProviderSurface,
 )
+from sec_generative_search.providers.zai import ZaiProvider
 
 # ---------------------------------------------------------------------------
 # Shared constants
@@ -132,6 +136,10 @@ _EXPECTED_LLM_NAMES = (
     "kimi",
     "mistral",
     "qwen",
+    "zai",
+    "grok",
+    "minimax",
+    "mimo",
     "openrouter",
 )
 
@@ -281,6 +289,10 @@ _GET_CLASS_CASES: list[tuple[str, ProviderSurface, type]] = [
     ("kimi", ProviderSurface.LLM, KimiProvider),
     ("mistral", ProviderSurface.LLM, MistralProvider),
     ("qwen", ProviderSurface.LLM, QwenProvider),
+    ("zai", ProviderSurface.LLM, ZaiProvider),
+    ("grok", ProviderSurface.LLM, GrokProvider),
+    ("minimax", ProviderSurface.LLM, MiniMaxProvider),
+    ("mimo", ProviderSurface.LLM, MimoProvider),
     ("openrouter", ProviderSurface.LLM, OpenRouterProvider),
     ("openai", ProviderSurface.EMBEDDING, OpenAIEmbeddingProvider),
     ("gemini", ProviderSurface.EMBEDDING, GeminiEmbeddingProvider),
@@ -359,7 +371,20 @@ class TestArbitraryModels:
         assert ProviderRegistry.supports_arbitrary_models("openrouter", ProviderSurface.LLM) is True
 
     @pytest.mark.parametrize(
-        "name", ["openai", "anthropic", "gemini", "deepseek", "kimi", "mistral", "qwen"]
+        "name",
+        [
+            "openai",
+            "anthropic",
+            "gemini",
+            "deepseek",
+            "kimi",
+            "mistral",
+            "qwen",
+            "zai",
+            "grok",
+            "minimax",
+            "mimo",
+        ],
     )
     def test_closed_catalogue_providers_do_not(self, name: str) -> None:
         assert ProviderRegistry.supports_arbitrary_models(name, ProviderSurface.LLM) is False

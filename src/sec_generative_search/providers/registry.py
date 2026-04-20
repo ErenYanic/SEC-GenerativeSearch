@@ -54,8 +54,11 @@ from sec_generative_search.providers.gemini import (
     GeminiEmbeddingProvider,
     GeminiProvider,
 )
+from sec_generative_search.providers.grok import GrokProvider
 from sec_generative_search.providers.kimi import KimiProvider
 from sec_generative_search.providers.local import LocalEmbeddingProvider
+from sec_generative_search.providers.mimo import MimoProvider
+from sec_generative_search.providers.minimax import MiniMaxProvider
 from sec_generative_search.providers.mistral import (
     MistralEmbeddingProvider,
     MistralProvider,
@@ -69,6 +72,7 @@ from sec_generative_search.providers.qwen import (
     QwenEmbeddingProvider,
     QwenProvider,
 )
+from sec_generative_search.providers.zai import ZaiProvider
 
 __all__ = [
     "ProviderEntry",
@@ -162,6 +166,10 @@ class ProviderRegistry:
         ProviderEntry("kimi", ProviderSurface.LLM, KimiProvider),
         ProviderEntry("mistral", ProviderSurface.LLM, MistralProvider),
         ProviderEntry("qwen", ProviderSurface.LLM, QwenProvider),
+        ProviderEntry("zai", ProviderSurface.LLM, ZaiProvider),
+        ProviderEntry("grok", ProviderSurface.LLM, GrokProvider),
+        ProviderEntry("minimax", ProviderSurface.LLM, MiniMaxProvider),
+        ProviderEntry("mimo", ProviderSurface.LLM, MimoProvider),
         ProviderEntry(
             "openrouter",
             ProviderSurface.LLM,

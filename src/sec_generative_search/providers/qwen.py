@@ -34,6 +34,30 @@ class QwenProvider(OpenAICompatibleLLMProvider):
     default_model = "qwen-turbo"
 
     MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
+        "qwen3-max": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=False,
+                context_window_tokens=262_144,
+                max_output_tokens=8_192,
+                pricing_tier=PricingTier.PREMIUM,
+            ),
+        ),
+        "qwen3-plus": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=False,
+                context_window_tokens=1_000_000,
+                max_output_tokens=8_192,
+                pricing_tier=PricingTier.STANDARD,
+            ),
+        ),
         "qwen-max": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
