@@ -265,7 +265,7 @@ class TestGenerate:
         provider._fake_client.models.generate_content.return_value = _make_response()
         provider.generate(GenerationRequest(prompt="hi", model=""))
         kwargs = provider._fake_client.models.generate_content.call_args.kwargs
-        assert kwargs["model"] == "gemini-3.1-flash-lite-preview"
+        assert kwargs["model"] == GeminiProvider.default_model
 
     def test_system_prompt_is_passed_on_config(self, provider: GeminiProvider) -> None:
         provider._fake_client.models.generate_content.return_value = _make_response()
