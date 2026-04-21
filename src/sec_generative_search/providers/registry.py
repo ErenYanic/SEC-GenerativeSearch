@@ -127,6 +127,14 @@ class ProviderEntry:
             ``MODEL_CATALOGUE`` is intentionally empty
             (:class:`OpenRouterProvider`).  Tells UIs to render a free-text
             slug input rather than a closed dropdown.
+        supports_upstream_routing: ``True`` for providers that honour
+            :class:`~sec_generative_search.providers.openrouter.OpenRouterRoutingHints`
+            on :class:`~sec_generative_search.providers.base.GenerationRequest`
+            — currently only :class:`OpenRouterProvider`.  Tells the CLI
+            and web UI to surface an upstream-provider picker only where
+            the hint actually does something.  Every other provider
+            silently ignores ``routing_hints`` via the OpenAI-compatible
+            base's empty default :meth:`_extra_request_kwargs` hook.
     """
 
     name: str
@@ -134,6 +142,7 @@ class ProviderEntry:
     provider_cls: type
     requires_extras: tuple[str, ...] = ()
     supports_arbitrary_models: bool = False
+    supports_upstream_routing: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +183,7 @@ class ProviderRegistry:
             ProviderSurface.LLM,
             OpenRouterProvider,
             supports_arbitrary_models=True,
+            supports_upstream_routing=True,
         ),
         # --- Embedding surface ---
         ProviderEntry("openai", ProviderSurface.EMBEDDING, OpenAIEmbeddingProvider),
@@ -303,6 +313,21 @@ class ProviderRegistry:
         free-text input when this returns ``True``.
         """
         return cls.get_entry(name, surface).supports_arbitrary_models
+
+    @classmethod
+    def supports_upstream_routing(cls, name: str, surface: ProviderSurface) -> bool:
+        """Whether the provider honours upstream-routing hints.
+
+        ``True`` for :class:`OpenRouterProvider`; ``False`` for every
+        provider that ships a direct upstream.  UIs should render an
+        upstream-provider picker only when this returns ``True`` — every
+        other vendor silently ignores
+        :class:`~sec_generative_search.providers.openrouter.OpenRouterRoutingHints`
+        via the OpenAI-compatible base's empty default
+        :meth:`_extra_request_kwargs` hook, so rendering the picker
+        elsewhere would be a no-op at best and a misleading UX at worst.
+        """
+        return cls.get_entry(name, surface).supports_upstream_routing
 
     @classmethod
     def get_capability(

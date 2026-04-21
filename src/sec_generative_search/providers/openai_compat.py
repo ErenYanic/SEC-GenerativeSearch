@@ -256,6 +256,7 @@ class OpenAICompatibleLLMProvider(_OpenAIClientMixin, BaseLLMProvider):
     def generate(self, request: GenerationRequest) -> GenerationResponse:
         """Non-streaming chat completion."""
         messages = self._build_messages(request)
+        extra = self._extra_request_kwargs(request)
 
         def call() -> Any:
             return self._client.chat.completions.create(
@@ -264,6 +265,7 @@ class OpenAICompatibleLLMProvider(_OpenAIClientMixin, BaseLLMProvider):
                 temperature=request.temperature,
                 max_tokens=request.max_output_tokens,
                 stream=False,
+                **extra,
             )
 
         completion = self._call(call)
@@ -302,6 +304,7 @@ class OpenAICompatibleLLMProvider(_OpenAIClientMixin, BaseLLMProvider):
         accounting reported by the ``stream_options`` payload.
         """
         messages = self._build_messages(request)
+        extra = self._extra_request_kwargs(request)
 
         def call() -> Any:
             return self._client.chat.completions.create(
@@ -311,6 +314,7 @@ class OpenAICompatibleLLMProvider(_OpenAIClientMixin, BaseLLMProvider):
                 max_tokens=request.max_output_tokens,
                 stream=True,
                 stream_options={"include_usage": True},
+                **extra,
             )
 
         stream = self._call(call)
@@ -392,6 +396,20 @@ class OpenAICompatibleLLMProvider(_OpenAIClientMixin, BaseLLMProvider):
             messages.append({"role": "system", "content": request.system})
         messages.append({"role": "user", "content": request.prompt})
         return messages
+
+    def _extra_request_kwargs(self, request: GenerationRequest) -> dict[str, Any]:
+        """Hook for vendor-specific SDK kwargs.
+
+        Splatted into :meth:`generate` / :meth:`generate_stream`'s call
+        to ``chat.completions.create``.  Empty by default so every
+        vanilla OpenAI-compatible vendor issues the same request shape.
+        Overridden by :class:`~sec_generative_search.providers.openrouter.OpenRouterProvider`
+        to forward :class:`~sec_generative_search.providers.openrouter.OpenRouterRoutingHints`
+        via ``extra_body``; unrelated providers inherit the empty default
+        so ``request.routing_hints`` is silently ignored everywhere else.
+        """
+        del request
+        return {}
 
 
 # ---------------------------------------------------------------------------
