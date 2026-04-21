@@ -65,7 +65,25 @@ class TestProviderMetadata:
         assert OpenAIProvider.default_model == "gpt-5.4-mini"
 
     def test_catalogue_includes_required_models(self) -> None:
-        for slug in ("gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-4o", "o3", "o4-mini"):
+        for slug in (
+            "gpt-5.4-pro",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.4-nano",
+            "gpt-5.2-pro",
+            "gpt-5.2",
+            "gpt-5.1",
+            "gpt-5-pro",
+            "gpt-5",
+            "gpt-5-mini",
+            "gpt-5-nano",
+            "gpt-4.1",
+            "gpt-4.1-mini",
+            "gpt-4.1-nano",
+            "gpt-4o",
+            "o3",
+            "o4-mini",
+        ):
             assert slug in OpenAIProvider.MODEL_CATALOGUE, (
                 f"OpenAIProvider missing required model '{slug}' in MODEL_CATALOGUE"
             )
@@ -75,6 +93,12 @@ class TestProviderMetadata:
             PricingTier.LOW
         )
         assert OpenAIProvider.MODEL_CATALOGUE["gpt-5.4"].capability.pricing_tier == (
+            PricingTier.PREMIUM
+        )
+        assert OpenAIProvider.MODEL_CATALOGUE["gpt-4.1-mini"].capability.pricing_tier == (
+            PricingTier.LOW
+        )
+        assert OpenAIProvider.MODEL_CATALOGUE["gpt-5.4-pro"].capability.pricing_tier == (
             PricingTier.PREMIUM
         )
 

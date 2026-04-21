@@ -214,12 +214,53 @@ class GeminiProvider(_GeminiClientMixin, BaseLLMProvider):
     """Chat-completion provider for Google's Gemini models."""
 
     provider_name: ClassVar[str] = "gemini"
-    default_model: ClassVar[str] = "gemini-2.5-flash-lite"
+    default_model: ClassVar[str] = "gemini-3.1-flash-lite-preview"
 
     # Static capability probe — O(1) lookup, no network call at
     # registration.  Context window / max-output figures come from the
-    # Gemini model cards.
+    # Gemini model cards. Only the text-generation Gemini 3.1 entries
+    # are included here; Live, image-generation, and TTS previews use
+    # specialised APIs that do not match this provider surface.
     MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
+        "gemini-3.1-pro-preview": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                vision=True,
+                context_window_tokens=1_048_576,
+                max_output_tokens=65_536,
+                pricing_tier=PricingTier.PREMIUM,
+            ),
+        ),
+        "gemini-3.1-pro-preview-customtools": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                vision=True,
+                context_window_tokens=1_048_576,
+                max_output_tokens=65_536,
+                pricing_tier=PricingTier.PREMIUM,
+            ),
+        ),
+        "gemini-3.1-flash-lite-preview": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                vision=True,
+                context_window_tokens=1_048_576,
+                max_output_tokens=65_536,
+                pricing_tier=PricingTier.LOW,
+            ),
+        ),
         "gemini-2.5-pro": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
