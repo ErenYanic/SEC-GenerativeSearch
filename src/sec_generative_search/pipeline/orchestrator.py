@@ -5,19 +5,18 @@ This module coordinates the filing-processing pipeline:
 
     Fetch → Parse → Chunk → [Embed]
 
-Embedding is **optional** in Phase 4 — the embedding provider abstraction
-lands in Phase 5 (:class:`BaseEmbeddingProvider`), so the orchestrator
-accepts any callable conforming to :class:`ChunkEmbedder` and produces
-chunk-only :class:`ProcessedFiling` output when no embedder is
-supplied.  The storage layer (Phase 6) is responsible for refusing to
-persist a :class:`ProcessedFiling` whose embeddings are ``None``.
+Embedding is optional — the orchestrator accepts any callable
+conforming to :class:`ChunkEmbedder` and produces chunk-only
+:class:`ProcessedFiling` output when no embedder is supplied. The
+storage layer is responsible for refusing to persist a
+:class:`ProcessedFiling` whose embeddings are ``None``.
 
 Usage:
     from sec_generative_search.pipeline import PipelineOrchestrator
 
     orchestrator = PipelineOrchestrator()
 
-    # Process a single filing (no embeddings — Phase 5 plugs those in)
+    # Process a single filing without embeddings
     result = orchestrator.process_filing(filing_id, html_content)
 
     # Ingest latest filing for a company
@@ -54,11 +53,11 @@ ProgressCallback = Callable[[str, int, int], None]
 class ChunkEmbedder(Protocol):
     """Structural interface the orchestrator expects of an embedder.
 
-    Kept deliberately narrow — the Phase 5 :class:`BaseEmbeddingProvider`
-    satisfies this protocol via its ``embed_chunks`` method, and no
-    further coupling is imposed by Phase 4.  The ``show_progress`` flag
-    is passed through so CLI callers can drive a progress bar without
-    plumbing new arguments through this layer.
+    Kept deliberately narrow — :class:`BaseEmbeddingProvider` satisfies
+    this protocol via its ``embed_chunks`` method, and no further
+    coupling is imposed here. The ``show_progress`` flag is passed
+    through so CLI callers can drive a progress bar without plumbing
+    new arguments through this layer.
     """
 
     def embed_chunks(
@@ -82,8 +81,8 @@ class ProcessedFiling:
         chunks: Chunked text ready for embedding/storage.
         embeddings: Vector embeddings for each chunk.  ``None`` when
             the orchestrator was run without an embedder — the storage
-            layer (Phase 6) must reject a ``ProcessedFiling`` whose
-            ``embeddings`` are ``None`` rather than silently writing
+            layer must reject a ``ProcessedFiling`` whose ``embeddings``
+            are ``None`` rather than silently writing
             chunks without vectors.
         ingest_result: Statistics about the ingestion.
     """
@@ -106,7 +105,7 @@ class PipelineOrchestrator:
 
     Note:
         The orchestrator does NOT handle database storage or duplicate
-        detection — both live in the metadata registry (Phase 6).  It
+        detection — both live in the metadata registry. It
         returns :class:`ProcessedFiling` objects that the database
         layer can persist.
 
@@ -127,9 +126,8 @@ class PipelineOrchestrator:
         Initialise the orchestrator with pipeline components.
 
         Components are created with defaults where possible, allowing
-        dependency injection for testing.  The embedder has **no
-        default** in Phase 4 — Phase 5 introduces a provider-backed
-        implementation; until then, the orchestrator returns
+        dependency injection for testing. The embedder has **no
+        default**; when omitted, the orchestrator returns
         ``ProcessedFiling`` objects with ``embeddings=None``.
 
         Args:
@@ -203,14 +201,14 @@ class PipelineOrchestrator:
         report_progress("Chunking", 2, total_steps)
         chunks = self.chunker.chunk_segments(segments)
 
-        # Step 3: Embed (optional — Phase 5 will supply a real embedder)
+        # Step 3: Embed (optional)
         report_progress("Embedding", 3, total_steps)
         embeddings: np.ndarray | None
         if self.embedder is not None:
             embeddings = self.embedder.embed_chunks(chunks, show_progress=False)
         else:
             embeddings = None
-            logger.debug("Skipping embedding step — no embedder wired (Phase 5).")
+            logger.debug("Skipping embedding step — no embedder wired.")
 
         # Complete
         report_progress("Complete", 4, total_steps)

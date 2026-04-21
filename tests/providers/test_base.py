@@ -1,4 +1,4 @@
-"""Tests for :mod:`sec_generative_search.providers.base` (Phase 5A.1-5A.3, 5A.8).
+"""Tests for :mod:`sec_generative_search.providers.base`.
 
 Covers:
 
@@ -15,8 +15,8 @@ Covers:
 - Security: raw API keys never appear in ``repr()``, ``str()``, or
   :mod:`logging` records emitted by the base layer.
 
-Phase 5B+ will add concrete-provider tests; these focus on the
-interface contract only.
+Concrete-provider suites cover vendor-specific behaviour elsewhere;
+these tests focus on the interface contract only.
 """
 
 from __future__ import annotations
@@ -420,7 +420,7 @@ _SECRET_FIELD_HINTS = (
 
 @pytest.mark.security
 class TestNoCredentialFieldsOnProviderDataclasses:
-    """Phase 5A.8: mirror the Phase 2 credential-field check for every
+    """Mirror the domain-type credential-field check for every
     dataclass introduced in :mod:`providers.base`.
 
     Domain types already fail fast on this via

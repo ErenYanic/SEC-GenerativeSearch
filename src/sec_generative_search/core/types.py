@@ -21,8 +21,8 @@ Design notes:
       because each serves as an identifier or audit record that must not mutate
       after construction
     - ContentType and PricingTier enums enforce type-safe classification
-    - Pydantic is limited to settings and API schemas only — domain objects are
-      dataclasses (see AGENT.md "Must-follow constraints")
+        - Pydantic is limited to settings and API schemas only — domain objects are
+            dataclasses
     - No domain type stores a provider API key, the EDGAR identity, or the DB
       encryption key — secrets never travel through the core type surface
 """
@@ -281,8 +281,8 @@ class RetrievalResult(SearchResult):
     RAG orchestrator needs when assembling prompt context: per-chunk token
     count, a flag for whether the chunk was clipped to fit the budget, and
     the parsed hierarchical section path.  Subclassing (rather than
-    composition) keeps the type assignable wherever a ``SearchResult`` is
-    accepted, which matters for the public retrieval API in Phase 7.
+            composition) keeps the type assignable wherever a ``SearchResult`` is
+            accepted, which matters for the public retrieval API.
 
     Attributes:
         token_count: Token count of ``content`` measured by the active
@@ -291,8 +291,8 @@ class RetrievalResult(SearchResult):
             context-token budget.  Surfaces retrieval-overshoot cases to
             the caller and the UI without re-reading the source chunk.
         section_boundaries: Tuple of the parsed ``path`` components, e.g.
-            ``("Part I", "Item 1A", "Risk Factors")``.  Used by diversity
-            controls (Phase 7.5) and by citation display logic to avoid
+            ``("Part I", "Item 1A", "Risk Factors")``. Used by diversity
+            controls and by citation display logic to avoid
             re-parsing ``path`` at generation time.
     """
 
@@ -344,7 +344,7 @@ class Citation:
     Citations are the audit trail of which retrieved sources the model
     actually used.  They are frozen because, once written into a
     :class:`GenerationResult`, they must not be rewritten — that would
-    break answer traceability (Phase 8.7).
+    break answer traceability.
 
     Attributes:
         chunk_id: ChromaDB document ID of the cited chunk.  Matches the
@@ -377,8 +377,8 @@ class TokenUsage:
 
     Promoted to its own type (rather than two ``int`` fields on
     :class:`GenerationResult`) because the same shape is produced by every
-    provider call (Phase 5.16), aggregated across conversation turns
-    (Phase 8.9), and surfaced in dashboards (Phase 14.2).
+    provider call, aggregated across conversation turns, and surfaced in
+    dashboards.
 
     Attributes:
         input_tokens: Tokens consumed by the prompt (system + context +
@@ -413,7 +413,7 @@ class GenerationResult:
     the chunks *referenced in the answer* (``citations``).  The
     distinction diagnoses two separate failure modes — retrieval
     overshoot vs. model-ignores-context — that look identical from the
-    final answer alone (AGENT.md "RAG orchestrator" section).
+    final answer alone.
 
     Attributes:
         answer: The generated answer text.  May contain inline citation
@@ -424,7 +424,7 @@ class GenerationResult:
         model: Provider-specific model slug used (e.g. ``"gpt-4o"``).
         prompt_version: Version string of the prompt template used,
             captured so that answer regressions can be traced to a
-            template change (Phase 8.6).
+            template change.
         citations: Chunks the model actually referenced in the answer.
         retrieved_chunks: Chunks the orchestrator fed to the model.
             A superset of the chunk IDs referenced by ``citations``.
@@ -449,11 +449,11 @@ class ConversationTurn:
     """
     Session-scoped audit record of a query/answer pair.
 
-    Conversation history is **off by default** (Phase 3.3,
-    ``RAG_CHAT_HISTORY_ENABLED=0``); when enabled it is encrypted at rest
-    via SQLCipher.  Follow-up turns re-retrieve fresh context — the
+    Conversation history is **off by default**
+    (``RAG_CHAT_HISTORY_ENABLED=0``); when enabled it is encrypted at
+    rest via SQLCipher. Follow-up turns re-retrieve fresh context — the
     ``retrieval_results`` stored here are kept for audit and debugging,
-    not for re-feeding into a later prompt (AGENT.md "RAG orchestrator").
+    not for re-feeding into a later prompt.
 
     Attributes:
         query: The user's question.  Tier 3 data; must pass through
@@ -496,10 +496,8 @@ class ProviderCapability:
     """
     Feature matrix for a concrete provider + model pair.
 
-    Populated by :class:`ProviderRegistry` validation (Phase 5.13, 9.3) —
-    tiny dry-run calls probe which features actually work, since some
-    providers advertise capabilities they mishandle under real load
-    (AGENT.md "Providers" section).
+    Populated by :class:`ProviderRegistry` lookups so routing code can
+    reason about provider/model features without instantiating clients.
 
     Frozen because capabilities are resolved once per provider/model
     registration; swapping the model means constructing a new instance

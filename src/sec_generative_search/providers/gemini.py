@@ -1,4 +1,4 @@
-"""Google Gemini provider adapters (Phase 5C.3/5C.4).
+"""Google Gemini provider adapters.
 
 Concrete adapters that target Google's Gemini API via the first-party
 ``google-genai`` SDK.  Unlike the OpenAI SDK, the genai client raises a
@@ -18,7 +18,7 @@ raise :class:`ProviderContentFilterError` directly — terminal, matching
 the OpenAI content-filter contract.
 
 Token counting is offline via :mod:`tiktoken`'s ``cl100k_base`` for the
-same reason as the Anthropic adapter: the Phase 7 context-window packer
+same reason as the Anthropic adapter: the context-window packer
 needs a cheap estimate *before* calling the model.  ``cl100k_base`` is
 not Gemini's native tokeniser, so the count is an approximation biased
 slightly high — the right direction for a budget guard.
@@ -214,7 +214,7 @@ class GeminiProvider(_GeminiClientMixin, BaseLLMProvider):
     """Chat-completion provider for Google's Gemini models."""
 
     provider_name: ClassVar[str] = "gemini"
-    default_model: ClassVar[str] = "gemini-2.5-flash"
+    default_model: ClassVar[str] = "gemini-2.5-flash-lite"
 
     # Static capability probe — O(1) lookup, no network call at
     # registration.  Context window / max-output figures come from the
@@ -231,6 +231,19 @@ class GeminiProvider(_GeminiClientMixin, BaseLLMProvider):
                 context_window_tokens=1_048_576,
                 max_output_tokens=65_536,
                 pricing_tier=PricingTier.PREMIUM,
+            ),
+        ),
+        "gemini-2.5-flash-lite": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                vision=True,
+                context_window_tokens=1_048_576,
+                max_output_tokens=65_536,
+                pricing_tier=PricingTier.LOW,
             ),
         ),
         "gemini-2.5-flash": ModelInfo(
@@ -417,7 +430,7 @@ class GeminiProvider(_GeminiClientMixin, BaseLLMProvider):
         """Offline token approximation via ``cl100k_base``.
 
         The SDK ships ``models.count_tokens`` but it is a network call.
-        The Phase 7 context-window packer budgets prompts *before* a
+        The context-window packer budgets prompts *before* a
         generation call, so we favour a cheap, over-estimating local
         counter rather than round-tripping every budget check.
         """
@@ -521,11 +534,13 @@ class GeminiEmbeddingProvider(_GeminiClientMixin, BaseEmbeddingProvider):
     """Embedding provider for Google's hosted embedding models."""
 
     provider_name: ClassVar[str] = "gemini"
-    default_model: ClassVar[str] = "text-embedding-004"
+    default_model: ClassVar[str] = "gemini-embedding-2-preview"
 
-    # Native dimensions.  ``text-embedding-004`` is the workhorse 768-
-    # dim model; ``gemini-embedding-001`` is the newer 3072-dim model.
+    # Native dimensions. ``gemini-embedding-2-preview`` currently
+    # defaults to 3072 dimensions while also supporting smaller request-
+    # time projections; the registry uses the native default.
     MODEL_DIMENSIONS: ClassVar[dict[str, int]] = {
+        "gemini-embedding-2-preview": 3072,
         "text-embedding-004": 768,
         "gemini-embedding-001": 3072,
     }

@@ -1,17 +1,16 @@
 """Abstract base classes for LLM, embedding, and reranker providers.
 
-Every concrete provider (Phase 5B onwards) subclasses exactly one of
-the ABCs defined here and supplies:
+Every concrete provider subclasses exactly one of the ABCs defined here and supplies:
 
 - its SDK-specific :class:`ExceptionMapping` for error normalisation,
 - a capability probe populating :class:`ProviderCapability`, and
 - the actual network calls wrapped by :func:`resilient_call`.
 
-Phase 5A intentionally defines *only* the interface surface — no SDK
+Intentionally defines *only* the interface surface — no SDK
 dependency is pulled in yet.  This keeps the abstractions stable before
 any concrete adapter commits to a vendor quirk.
 
-Security constraints (AGENT.md, Phase 5A.1/5A.8):
+Security constraints on API keys:
 
 - API keys are stored on ``self._api_key`` (leading underscore so
   dataclass-style serialisers skip them).
@@ -62,14 +61,13 @@ class GenerationRequest:
 
     Keeps the set of fields small and vendor-neutral.  Provider-specific
     extensions (tool definitions, cache-control markers, JSON schemas)
-    land via subclass-specific request types in later sub-phases.
-
+    land via subclass-specific request types in later.
     Attributes:
         prompt: The user-facing question / instruction.  Tier 3 data —
             callers must not log this without redaction.
         model: Provider-specific model slug (e.g. ``"gpt-4o"``).
         system: Optional system prompt.  May carry SEC-analysis framing
-            from Phase 8.6 templates.
+            for templates.
         temperature: Sampling temperature.  Defaults to 0.1 for factual
             filings analysis.
         max_output_tokens: Upper bound on the response length.
@@ -87,7 +85,7 @@ class GenerationResponse:
     """Output of :meth:`BaseLLMProvider.generate`.
 
     Carries the *model's text* plus accounting — not citations or
-    retrieved chunks.  The Phase 8 RAG orchestrator composes this with
+    retrieved chunks.  The RAG orchestrator composes this with
     retrieval state to produce the higher-level
     :class:`~sec_generative_search.core.types.GenerationResult`.
 
@@ -186,7 +184,7 @@ class _ProviderBase(ABC):
     def get_capabilities(self) -> ProviderCapability:
         """Return the capability matrix for this provider/model pair.
 
-        Concrete implementations are expected to cache this — Phase 5.13
+        Concrete implementations are expected to cache this
         populates the matrix once at registration.
         """
 
@@ -205,7 +203,7 @@ class BaseLLMProvider(_ProviderBase):
       both populate a :class:`TokenUsage` (``generate_stream`` on the
       final yielded chunk).
     - Implement :meth:`count_tokens` using the SDK's tokeniser (or a
-      documented approximation) so the Phase 7 context-window packer
+      documented approximation) so the context-window packer
       can budget prompts before calling the model.
     - Use :func:`resilient_call` with a provider-specific
       :class:`ExceptionMapping` for every network call so the
@@ -293,7 +291,7 @@ class BaseEmbeddingProvider(_ProviderBase):
 
 
 class BaseRerankerProvider(_ProviderBase):
-    """Abstract reranker provider (used by Phase 7.4).
+    """Abstract reranker provider.
 
     Reranking is a post-retrieval re-ordering of a short candidate
     list.  Subclasses call the vendor's rerank endpoint and return

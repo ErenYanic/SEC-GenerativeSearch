@@ -1,11 +1,11 @@
-"""Tests for :mod:`sec_generative_search.core.security` (Phase 3).
+"""Tests for :mod:`sec_generative_search.core.security`.
 
-Covers every Phase 3 primitive landed in the core layer:
+Covers the core security primitives:
 
-* Data classification model (``DataTier`` enum) — Phase 3.1.
-* Secret masking (``mask_secret``) — Phase 3.6, 9.5.
-* Constant-time secret comparison (``secure_compare``) — Phase 3.7.
-* Prompt-injection neutralisation (``sanitize_retrieved_context``) — Phase 3.9.
+* Data classification model (``DataTier`` enum).
+* Secret masking (``mask_secret``).
+* Constant-time secret comparison (``secure_compare``).
+* Prompt-injection neutralisation (``sanitize_retrieved_context``).
 
 Security-focused checks are marked with ``@pytest.mark.security`` so that
 ``pytest -m security`` can isolate the controls during audits.
@@ -25,13 +25,13 @@ from sec_generative_search.core.security import (
 )
 
 # ---------------------------------------------------------------------------
-# DataTier — Phase 3.1
+# DataTier
 # ---------------------------------------------------------------------------
 
 
 class TestDataTier:
     def test_members_match_tier_model(self) -> None:
-        """The three tiers from TODO.md Phase 3.1 must be represented."""
+        """The three security tiers must be represented."""
         assert {t.name for t in DataTier} == {
             "PUBLIC",
             "APP_GENERATED",
@@ -53,7 +53,7 @@ class TestDataTier:
 
 
 # ---------------------------------------------------------------------------
-# mask_secret — Phase 3.6, 9.5
+# mask_secret
 # ---------------------------------------------------------------------------
 
 
@@ -106,7 +106,7 @@ class TestMaskSecret:
 
 
 # ---------------------------------------------------------------------------
-# secure_compare — Phase 3.7
+# secure_compare
 # ---------------------------------------------------------------------------
 
 
@@ -141,7 +141,7 @@ class TestSecureCompare:
 
 
 # ---------------------------------------------------------------------------
-# sanitize_retrieved_context — Phase 3.9
+# sanitize_retrieved_context
 # ---------------------------------------------------------------------------
 
 

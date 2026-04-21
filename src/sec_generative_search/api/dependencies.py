@@ -141,7 +141,7 @@ async def verify_admin_key(
 ) -> None:
     """Validate the ``X-Admin-Key`` header for destructive operations.
 
-    Two-tier access control (see ``docs/DEPLOYMENT.md`` §4.8):
+        Two-tier access control:
         - If ``ADMIN_API_KEY`` is not configured → unrestricted (Scenario A).
         - If configured → the caller must supply a matching ``X-Admin-Key``
           header; mismatches return 403.

@@ -46,17 +46,17 @@ dependencies = [
     # HTTP client (used by provider adapters and test client)
     "httpx>=0.28",
 
-    # LLM providers (Phase 5B onwards).  `openai` is the canonical SDK
-    # for OpenAI itself and every OpenAI-compatible vendor (Mistral, Kimi,
-    # DeepSeek, Qwen, OpenRouter — Phase 5D).  `tiktoken` powers exact
+    # LLM providers. `openai` is the canonical SDK for OpenAI itself
+    # and every OpenAI-compatible vendor (Mistral, Kimi, DeepSeek,
+    # Qwen, OpenRouter). `tiktoken` powers exact
     # token counting and cost accounting; treating it as a hard dep keeps
     # the price surface honest instead of silently degrading to
     # whitespace heuristics.
     "openai>=1",
     "tiktoken>=0.7",
 
-    # Phase 5C: Anthropic and Google Gemini first-party SDKs.  Each
-    # vendor has a deliberately distinct exception hierarchy and
+    # Anthropic and Google Gemini first-party SDKs. Each vendor has a
+    # deliberately distinct exception hierarchy and
     # streaming shape, so we do not route them through the OpenAI wire
     # protocol; they get their own adapters in ``providers/anthropic.py``
     # and ``providers/gemini.py`` and plug into the same
@@ -71,7 +71,7 @@ encryption = [
     "pysqlcipher3>=1.2",
 ]
 
-# Local embedding provider (Phase 5E).  Pulls torch + sentence-transformers
+# Local embedding provider. Pulls torch + sentence-transformers
 # (~2 GB install) — kept optional so cloud deployments that rely on hosted
 # embedding APIs (OpenAI, Gemini, Mistral, Qwen) do not carry the payload.
 # Install with: `uv pip install -e ".[local-embeddings]"`.
@@ -106,14 +106,9 @@ src = ["src", "tests"]
 line-length = 100
 
 # Exclude modules that are migrated from SEC-SemanticSearch but not yet
-# adapted for the generative-search roadmap.  Each entry is removed from
-# this list as its owning phase lands, at which point it becomes subject
-# to the same lint rules as the rest of the project.
-#
-#   api/       -> Phase 10
-#   cli/       -> Phase 12
-#   database/  -> Phase 6
-#   search/    -> Phase 7
+# adapted for the current generative-search code style. Each entry is
+# removed from this list once the module is brought up to the same lint
+# standard as the rest of the project.
 extend-exclude = [
     "src/sec_generative_search/api",
     "src/sec_generative_search/cli",

@@ -1,11 +1,11 @@
-"""OpenAI provider adapters (Phase 5B.3).
+"""OpenAI provider adapters.
 
 Concrete subclasses of the OpenAI-compatible bases that target
 ``api.openai.com`` directly.  No ``base_url`` override; relies on the
 SDK's default endpoint.
 
 The ``MODEL_CATALOGUE`` and ``MODEL_DIMENSIONS`` mappings serve as the
-cheap capability probe (Phase 5B.4): no extra network round-trip is
+cheap capability probe: no extra network round-trip is
 needed to know which models support streaming, structured output, and
 prompt caching, which keeps registration startup fast and offline-
 testable.
@@ -37,13 +37,52 @@ class OpenAIProvider(OpenAICompatibleLLMProvider):
     """Chat-completion provider for OpenAI's hosted models."""
 
     provider_name = "openai"
-    default_model = "gpt-4o-mini"
+    default_model = "gpt-5.4-mini"
 
     # The catalogue is intentionally narrow — only the families v1
     # supports.  Adding a model later is a one-line addition; the SDK
     # will gracefully refuse unknown slugs at call time so a missing
     # entry never silently degrades.
     MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
+        "gpt-5.4": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                vision=True,
+                context_window_tokens=1_000_000,
+                max_output_tokens=128_000,
+                pricing_tier=PricingTier.PREMIUM,
+            ),
+        ),
+        "gpt-5.4-mini": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                vision=True,
+                context_window_tokens=400_000,
+                max_output_tokens=128_000,
+                pricing_tier=PricingTier.LOW,
+            ),
+        ),
+        "gpt-5.4-nano": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                vision=True,
+                context_window_tokens=400_000,
+                max_output_tokens=128_000,
+                pricing_tier=PricingTier.LOW,
+            ),
+        ),
         "gpt-4o": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
@@ -105,7 +144,7 @@ class OpenAIEmbeddingProvider(OpenAICompatibleEmbeddingProvider):
 
     # Native dimensions (OpenAI also supports the ``dimensions`` request
     # parameter for shrinking; v1 sticks to the native sizes for
-    # ChromaDB collection stability — see AGENT.md "Embeddings").
+    # ChromaDB collection stability).
     MODEL_DIMENSIONS: ClassVar[dict[str, int]] = {
         "text-embedding-3-small": 1536,
         "text-embedding-3-large": 3072,

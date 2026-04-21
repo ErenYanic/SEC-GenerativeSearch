@@ -1,17 +1,16 @@
-"""Security and privacy primitives for SEC-GenerativeSearch (Phase 3).
+"""Security and privacy primitives for SEC-GenerativeSearch.
 
 This module centralises small, dependency-free helpers that every other
-module can import without pulling in the full settings hierarchy.  It is
+module can import without pulling in the full settings hierarchy. It is
 intentionally light on state so that it can be imported from logging,
-config, and future API modules alike (see AGENT.md "Must-follow
-constraints").
+config, and future API modules alike.
 
 Contents:
-    - :class:`DataTier` — formal data classification model (Phase 3.1).
-    - :func:`mask_secret` — partial masking for log/error output (Phase 3.6, 9.5).
-    - :func:`secure_compare` — constant-time secret comparison (Phase 3.7).
+        - :class:`DataTier` — formal data classification model.
+        - :func:`mask_secret` — partial masking for log/error output.
+        - :func:`secure_compare` — constant-time secret comparison.
     - :func:`sanitize_retrieved_context` — neutralise prompt-injection
-      control tokens in retrieved filing text (Phase 3.9).
+            control tokens in retrieved filing text.
 
 Design notes:
     - No runtime dependency on :mod:`pydantic_settings` — avoids a
@@ -46,8 +45,8 @@ __all__ = [
 class DataTier(Enum):
     """Formal data classification for every record handled by the system.
 
-    Carried from TODO Phase 3.1 into code so downstream modules can
-    reason about tiers by identity (``DataTier.USER_GENERATED``) instead
+    Captured in code so downstream modules can reason about tiers by
+    identity (``DataTier.USER_GENERATED``) instead
     of stringly-typed comparisons.  The tier that a value carries
     determines which controls apply — redaction at log sites, encryption
     at rest, allowed persistence sinks, and so on.
@@ -75,7 +74,7 @@ class DataTier(Enum):
 
 
 # ---------------------------------------------------------------------------
-# Secret masking (Phase 3.6, 9.5)
+# Secret masking
 # ---------------------------------------------------------------------------
 
 # Number of trailing characters kept visible when a secret is masked.
@@ -125,7 +124,7 @@ def mask_secret(value: str | None, *, placeholder: str = "***") -> str:
 
 
 # ---------------------------------------------------------------------------
-# Constant-time secret comparison (Phase 3.7)
+# Constant-time secret comparison
 # ---------------------------------------------------------------------------
 
 
@@ -158,12 +157,12 @@ def secure_compare(a: str | bytes | None, b: str | bytes | None) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Prompt-injection neutralisation for retrieved context (Phase 3.9)
+# Prompt-injection neutralisation for retrieved context
 # ---------------------------------------------------------------------------
 
 # Chat-template and instruction-control tokens that commonly appear in
 # prompt-injection payloads.  Sourced from the public templates of the
-# providers we target in Phase 5 (OpenAI, Anthropic, Google) and from
+# providers we target (OpenAI, Anthropic, Google) and from
 # common open-source chat formats (Llama, Mistral, ChatML).  We
 # neutralise — not strip — so the rewritten text remains readable in
 # the UI's source panel while no longer being executable as a control
@@ -195,7 +194,7 @@ _TRUNCATION_SUFFIX = "\n[sanitised-truncated]"
 def sanitize_retrieved_context(text: str) -> str:
     """Neutralise prompt-injection control tokens in a retrieved chunk.
 
-    Designed for use by the Phase 8 RAG orchestrator on every retrieved
+    Designed for use by the RAG orchestrator on every retrieved
     chunk **before** it is interpolated into a prompt template.  The
     transform is purely textual and reversible by inspection — nothing
     is silently dropped.

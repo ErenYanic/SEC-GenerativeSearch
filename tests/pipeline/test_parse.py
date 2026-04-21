@@ -1,4 +1,4 @@
-"""Tests for :mod:`sec_generative_search.pipeline.parse` (Phase 4.3).
+"""Tests for :mod:`sec_generative_search.pipeline.parse`.
 
 These tests avoid coupling to the exact doc2dict output format by
 monkeypatching ``html2dict`` with controlled dict fixtures and by

@@ -2,7 +2,7 @@ name: CI
 
 # Continuous integration gates for SEC-GenerativeSearch.
 #
-# Design principles (per TODO.md Phase 15.7, 15.8, 16.9):
+# Design principles:
 #   - Parallel jobs (lint + test) so failures are surfaced independently.
 #   - No GCP credentials here — deployment lives in a separate workflow.
 #   - Actions pinned by full commit SHA (supply-chain hardening).
@@ -65,7 +65,7 @@ jobs:
       - name: Install core + test dependencies
         # Intentionally exclude ``[encryption]`` — pysqlcipher3 requires a
         # system library that is slow to install on CI and is covered by
-        # a dedicated integration workflow in later phases.
+        # a dedicated integration workflow.
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[test]"
@@ -74,7 +74,7 @@ jobs:
         run: pytest --cov=sec_generative_search --cov-report=term-missing
 
   dependency-scan:
-    # Phase 3.10 — scan installed dependencies for known CVEs.
+    # Scan installed dependencies for known CVEs.
     # ``pip-audit`` queries the PyPI advisory database.  Failures are
     # treated as hard-fail: a new CVE on a pinned transitive is the
     # signal to bump or pin around, not to merge through.
@@ -107,7 +107,7 @@ jobs:
         run: python -m pip_audit --skip-editable
 
   secret-scan:
-    # Phase 3.10 — scan the working tree for accidentally-committed
+    # Scan the working tree for accidentally-committed
     # credentials.  Uses ``detect-secrets`` (pure Python, installed from
     # PyPI) so no third-party GitHub Action SHA has to be pinned here;
     # the supply-chain surface is the same as the other Python steps.

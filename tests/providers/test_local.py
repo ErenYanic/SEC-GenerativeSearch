@@ -1,4 +1,4 @@
-"""Tests for :mod:`sec_generative_search.providers.local` (Phase 5E).
+"""Tests for :mod:`sec_generative_search.providers.local`.
 
 Every test injects a stub loader — the real
 :class:`sentence_transformers.SentenceTransformer` is never touched, so

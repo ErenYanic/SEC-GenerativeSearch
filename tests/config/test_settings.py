@@ -1,8 +1,8 @@
 """Tests for hierarchical Pydantic Settings.
 
-Covers Phase 1.3: the three new nested settings classes (LLMSettings,
-ProviderSettings, RAGSettings) and the security-relevant behaviours of
-DatabaseSettings (path traversal guard, encryption key resolution).
+Covers the nested settings classes (LLMSettings, ProviderSettings,
+RAGSettings) and the security-relevant behaviours of DatabaseSettings
+(path traversal guard, encryption key resolution).
 """
 
 from __future__ import annotations
@@ -89,7 +89,7 @@ class TestRAGSettings:
         assert s.default_answer_mode == "concise"
         assert s.refusal_enabled is True
         assert s.chunk_overlap_tokens == 50
-        # Chat history MUST default to off (security/privacy baseline, Phase 3.3).
+        # Chat history MUST default to off by default.
         assert s.chat_history_enabled is False
         assert s.chat_history_max_turns == 10
 
@@ -123,7 +123,7 @@ class TestSettingsComposition:
         assert s.log_file is not None
         assert s.hugging_face is not None
         assert s.api is not None
-        # New sections (Phase 1.3)
+        # New sections
         assert isinstance(s.llm, LLMSettings)
         assert isinstance(s.provider, ProviderSettings)
         assert isinstance(s.rag, RAGSettings)
@@ -213,7 +213,7 @@ class TestDatabasePathSecurity:
 class TestEncryptionKeyResolution:
     """Security: DB_ENCRYPTION_KEY / DB_ENCRYPTION_KEY_FILE mutual exclusion
     and file validation — prevents silent misconfiguration of the at-rest
-    encryption key (Phase 3.5).
+    encryption key.
     """
 
     def test_direct_key_used(self) -> None:

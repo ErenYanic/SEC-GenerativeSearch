@@ -1,4 +1,4 @@
-"""Tests for :mod:`sec_generative_search.providers.registry` (Phase 5F).
+"""Tests for :mod:`sec_generative_search.providers.registry`.
 
 Covers:
 
@@ -169,7 +169,7 @@ class TestListings:
         assert tuple(names) == _EXPECTED_EMBEDDING_NAMES
 
     def test_reranker_surface_is_empty(self) -> None:
-        # Phase 7.4 will populate this surface.  An empty list today is
+        # No first-party reranker ships yet. An empty list today is
         # both correct and the contract callers should expect.
         assert ProviderRegistry.list_providers(ProviderSurface.RERANKER) == []
 
@@ -416,10 +416,10 @@ class TestGetCapability:
         assert cap.streaming is True
 
     def test_default_model_used_when_none_passed(self) -> None:
-        # ``OpenAIProvider.default_model`` is ``"gpt-4o-mini"`` per the
-        # Phase 5B catalogue.  The registry must fall through to it.
+        # ``OpenAIProvider.default_model`` is ``"gpt-5.4-mini"``. The
+        # registry must fall through to it.
         cap = ProviderRegistry.get_capability("openai", ProviderSurface.LLM)
-        expected = OpenAIProvider.MODEL_CATALOGUE["gpt-4o-mini"].capability
+        expected = OpenAIProvider.MODEL_CATALOGUE["gpt-5.4-mini"].capability
         assert cap == expected
 
     def test_known_embedding_slug_returns_embeddings_capability(self) -> None:
@@ -626,7 +626,7 @@ _SECRET_FIELD_HINTS = (
 
 @pytest.mark.security
 class TestRegistryHoldsNoSecrets:
-    """Phase 5F adds a registry — make sure it doesn't accidentally
+    """The registry must not accidentally
     become a credential store the way a naive cache layer would."""
 
     def test_provider_entry_has_no_credential_fields(self) -> None:

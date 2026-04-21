@@ -1,4 +1,4 @@
-"""Xiaomi MiMo provider adapter (Phase 5G.4).
+"""Xiaomi MiMo provider adapter.
 
 Xiaomi ships an OpenAI-compatible Chat Completions surface at
 ``https://api.xiaomimimo.com/v1``.  The service sits behind the
@@ -9,8 +9,8 @@ Xiaomi ships an OpenAI-compatible Chat Completions surface at
 The catalogue covers the text-only MiMo-V2 slugs.  ``MiMo-V2-Omni``
 (multimodal) and ``MiMo-V2-TTS`` (speech synthesis) are intentionally
 excluded: the project's current surface is grounded SEC text analysis
-and neither modality contributes to that pipeline today.  When a
-phase introduces voice or vision in the orchestrator, those slugs can
+and neither modality contributes to that pipeline today. If voice or
+vision support is added to the orchestrator, those slugs can
 be added with the appropriate capability flags.
 """
 
@@ -32,12 +32,12 @@ class MimoProvider(OpenAICompatibleLLMProvider):
 
     provider_name = "mimo"
     default_base_url = "https://api.xiaomimimo.com/v1"
-    default_model = "MiMo-V2-Flash"
+    default_model = "MiMo-V2-Pro"
 
     # Xiaomi's published slugs preserve the ``MiMo-V2-*`` casing — the
-    # API is case-sensitive.  ``MiMo-V2-Pro`` is the reasoning-capable
-    # flagship with a 1M-token context window; ``MiMo-V2-Flash`` is the
-    # cheap-fast default.
+    # API is case-sensitive. ``MiMo-V2-Pro`` is the reasoning-capable
+    # flagship with a 1M-token context window; ``MiMo-V2-Flash`` remains
+    # available as the cheaper fast tier.
     MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
         "MiMo-V2-Pro": ModelInfo(
             capability=ProviderCapability(

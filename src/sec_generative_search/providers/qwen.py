@@ -1,4 +1,4 @@
-"""Qwen (Alibaba DashScope) provider adapters (Phase 5D.4).
+"""Qwen (Alibaba DashScope) provider adapters.
 
 Alibaba's DashScope exposes an OpenAI-compatible surface at
 ``https://dashscope-intl.aliyuncs.com/compatible-mode/v1`` for
@@ -31,7 +31,7 @@ class QwenProvider(OpenAICompatibleLLMProvider):
 
     provider_name = "qwen"
     default_base_url = _QWEN_BASE_URL
-    default_model = "qwen-turbo"
+    default_model = "qwen3.5-flash"
 
     MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
         "qwen3-max": ModelInfo(
@@ -46,7 +46,7 @@ class QwenProvider(OpenAICompatibleLLMProvider):
                 pricing_tier=PricingTier.PREMIUM,
             ),
         ),
-        "qwen3-plus": ModelInfo(
+        "qwen3.5-plus": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
                 streaming=True,
@@ -56,6 +56,18 @@ class QwenProvider(OpenAICompatibleLLMProvider):
                 context_window_tokens=1_000_000,
                 max_output_tokens=8_192,
                 pricing_tier=PricingTier.STANDARD,
+            ),
+        ),
+        "qwen3.5-flash": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=False,
+                context_window_tokens=1_000_000,
+                max_output_tokens=8_192,
+                pricing_tier=PricingTier.LOW,
             ),
         ),
         "qwen-max": ModelInfo(
@@ -82,6 +94,18 @@ class QwenProvider(OpenAICompatibleLLMProvider):
                 pricing_tier=PricingTier.STANDARD,
             ),
         ),
+        "qwen-flash": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=False,
+                context_window_tokens=1_000_000,
+                max_output_tokens=8_192,
+                pricing_tier=PricingTier.LOW,
+            ),
+        ),
         "qwen-turbo": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
@@ -102,10 +126,11 @@ class QwenEmbeddingProvider(OpenAICompatibleEmbeddingProvider):
 
     provider_name = "qwen"
     default_base_url = _QWEN_BASE_URL
-    default_model = "text-embedding-v3"
+    default_model = "text-embedding-v4"
 
     MODEL_DIMENSIONS: ClassVar[dict[str, int]] = {
         "text-embedding-v1": 1536,
         "text-embedding-v2": 1536,
+        "text-embedding-v4": 1024,
         "text-embedding-v3": 1024,
     }

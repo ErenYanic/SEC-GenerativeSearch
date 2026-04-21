@@ -1,4 +1,4 @@
-"""xAI Grok provider adapter (Phase 5G.2).
+"""xAI Grok provider adapter.
 
 xAI exposes an OpenAI-compatible Chat Completions surface at
 ``https://api.x.ai/v1`` — the SDK works unchanged via a ``base_url``

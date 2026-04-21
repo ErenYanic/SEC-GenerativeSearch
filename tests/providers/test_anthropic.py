@@ -1,4 +1,4 @@
-"""Tests for :mod:`sec_generative_search.providers.anthropic` (Phase 5C.2/5C.4/5C.5).
+"""Tests for :mod:`sec_generative_search.providers.anthropic`.
 
 Covers the Anthropic-specific provider surface:
 
@@ -194,7 +194,7 @@ class TestProviderMetadata:
 
 
 # ---------------------------------------------------------------------------
-# Capability probe (Phase 5C.4)
+# Capability probe
 # ---------------------------------------------------------------------------
 
 
@@ -202,7 +202,7 @@ class TestCapabilityProbe:
     def test_known_model_cheap_probe(self, provider: AnthropicProvider) -> None:
         caps = provider.get_capabilities("claude-sonnet-4-6")
         assert caps.streaming is True
-        assert caps.context_window_tokens == 200_000
+        assert caps.context_window_tokens == 1_000_000
         # No SDK call required — catalogue lookup is O(1).
         provider._fake_client.messages.create.assert_not_called()
         provider._fake_client.models.list.assert_not_called()

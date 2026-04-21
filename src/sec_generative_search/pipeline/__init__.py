@@ -4,9 +4,8 @@ Public API re-exported here so callers can do::
 
     from sec_generative_search.pipeline import FilingFetcher, FilingParser, TextChunker
 
-The embedding step is deliberately absent — Phase 5 introduces a
-provider-backed embedder that the orchestrator consumes via
-:class:`ChunkEmbedder`.
+The embedding step is deliberately absent here — the orchestrator
+consumes any provider-backed embedder via :class:`ChunkEmbedder`.
 """
 
 from sec_generative_search.pipeline.chunk import TextChunker
