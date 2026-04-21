@@ -1,4 +1,4 @@
-"""Provider registry — curated discovery and capability lookup (Phase 5F).
+"""Provider registry — curated discovery and capability lookup.
 
 The registry is the single source of truth for "which providers ship
 with this build, which surfaces (LLM / embedding / reranker) do they
@@ -19,10 +19,9 @@ Design notes:
   adapter).  Callers ask for one surface at a time.
 
 - The capability probe is **O(1) and credential-free**: it reads the
-  static ``MODEL_CATALOGUE`` / ``MODEL_DIMENSIONS`` ClassVars on the
-  provider class, never instantiates anything, and never touches the
-  network.  This matches the contract documented in ``AGENT.md``
-  ("Capability probes are O(1)").
+    static ``MODEL_CATALOGUE`` / ``MODEL_DIMENSIONS`` ClassVars on the
+    provider class, never instantiates anything, and never touches the
+    network.
 
 - :meth:`ProviderRegistry.validate_key` is the only method that
   instantiates a provider.  It accepts the key as a positional argument
@@ -91,7 +90,7 @@ class ProviderSurface(StrEnum):
 
     Inheriting from :class:`StrEnum` keeps the values trivially
     serialisable for any future API or CLI surface that wants to expose
-    them as strings (Phase 9.3 / 12.7) without an extra coercion layer.
+    them as strings without an extra coercion layer.
     """
 
     LLM = "llm"
@@ -188,8 +187,8 @@ class ProviderRegistry:
             requires_extras=("sentence_transformers",),
         ),
         # --- Reranker surface ---
-        # Phase 7.4 will populate this list once a reranker adapter
-        # lands.  An empty surface is a valid registry state.
+        # No first-party reranker ships yet. An empty surface is a
+        # valid registry state.
     )
 
     # Per-process cache of optional-extras availability.  ``find_spec``
@@ -317,7 +316,7 @@ class ProviderRegistry:
         Reads the provider class's static catalogue directly — never
         instantiates the class, never makes a network call, never needs
         an API key.  This is the canonical pre-flight probe used by
-        Phase 7 / 8 to decide which provider to route a request to.
+        routing code before generation.
 
         For LLM providers, unknown slugs receive the same permissive
         ``ProviderCapability(chat=True, streaming=True)`` default that
@@ -354,16 +353,16 @@ class ProviderRegistry:
                 )
             return ProviderCapability(embeddings=True)
 
-        # Reranker — no first-party adapters yet.  When Phase 7.4 lands
-        # the concrete reranker class will surface its own capability.
+        # Reranker — no first-party adapters yet. A future concrete
+        # reranker class will surface its own capability.
         return ProviderCapability()
 
     @classmethod
     def get_dimension(cls, name: str, model: str | None = None) -> int:
         """Return the embedding dimension for ``(name, model)``.
 
-        Convenience wrapper for the storage layer (Phase 6) which needs
-        to stamp the collection dimension before any embed call.  Always
+        Convenience wrapper for the storage layer, which needs to stamp
+        the collection dimension before any embed call. Always
         operates on the embedding surface; raises :class:`ValueError` for
         unknown slugs (same contract as :meth:`get_capability`).
         """

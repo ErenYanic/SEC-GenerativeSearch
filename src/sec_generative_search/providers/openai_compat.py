@@ -1,11 +1,11 @@
-"""OpenAI-compatible provider adapters (Phase 5B.2).
+"""OpenAI-compatible provider adapters.
 
 Every vendor that speaks the OpenAI Chat Completions / Embeddings wire
 protocol — OpenAI itself, Mistral, Kimi, DeepSeek, Qwen, OpenRouter —
 shares the same client construction, error normalisation, and request
 shape.  This module captures that shared surface so each concrete
-vendor in Phase 5B-5D differs only by ``provider_name``, an optional
-``base_url``, and its model catalogue.
+vendor differs only by ``provider_name``, an optional ``base_url``, and
+its model catalogue.
 
 Design notes:
 
@@ -186,7 +186,7 @@ class _OpenAIClientMixin:
 class OpenAICompatibleLLMProvider(_OpenAIClientMixin, BaseLLMProvider):
     """Chat-completion provider over the OpenAI wire protocol.
 
-    Subclasses (Phase 5B-5D) override ``provider_name``,
+    Subclasses override ``provider_name``,
     optionally ``default_base_url``, and supply a ``MODEL_CATALOGUE``
     mapping model slug -> :class:`ModelInfo`.
 

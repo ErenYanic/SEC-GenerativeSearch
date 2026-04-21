@@ -1,15 +1,9 @@
 """Provider abstraction layer for SEC-GenerativeSearch.
 
-Phase 5A lands the abstract base classes and supporting types; Phase 5B
-introduces the OpenAI wire-compatible plumbing; Phase 5C adds first-
-party Anthropic and Google Gemini adapters; Phase 5D ships concrete
-OpenAI-compatible subclasses for Mistral, Kimi (Moonshot), DeepSeek,
-Qwen (DashScope), and OpenRouter; Phase 5E adds the on-device
-``LocalEmbeddingProvider`` backed by ``sentence-transformers``; Phase 5F
-adds the curated :class:`ProviderRegistry` for capability lookup, model
-listings, and key validation; Phase 5G extends the LLM surface with
-four more OpenAI-compatible vendors — Z.ai (GLM family), xAI (Grok),
-MiniMax, and Xiaomi MiMo.
+Exports the abstract provider contracts, the concrete hosted-vendor
+adapters, the optional on-device embedding provider, and the curated
+registry used for capability lookup, model listings, and key
+validation.
 """
 
 from sec_generative_search.providers.anthropic import AnthropicProvider

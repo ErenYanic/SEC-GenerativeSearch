@@ -1,4 +1,4 @@
-"""Tests for :mod:`sec_generative_search.pipeline.orchestrator` (Phase 4.5).
+"""Tests for :mod:`sec_generative_search.pipeline.orchestrator`.
 
 The orchestrator is a coordination layer — it wires together
 :class:`FilingFetcher`, :class:`FilingParser`, :class:`TextChunker`, and
@@ -182,7 +182,7 @@ class TestProcessFiling:
         assert result.ingest_result.chunk_count == 2
 
     def test_embedder_none_yields_none_embeddings(self, filing_id: FilingIdentifier) -> None:
-        # Phase 4 default — no embedder wired.  The orchestrator must
+        # No embedder wired. The orchestrator must
         # still return a ProcessedFiling with embeddings=None rather
         # than failing or silently embedding via a default.
         orchestrator = PipelineOrchestrator(
@@ -305,8 +305,8 @@ class TestOrchestratorSecurity:
     def test_embedder_not_called_when_none(self, filing_id: FilingIdentifier) -> None:
         # Security-adjacent: when embedder is None, nothing in the
         # orchestrator should attempt to hit an embedding provider —
-        # Phase 5 will wire this up.  We assert this by passing an
-        # embedder whose method would raise if ever invoked.
+        # we assert this by passing an embedder whose method would
+        # raise if ever invoked.
 
         class ForbiddenEmbedder:
             def embed_chunks(self, chunks: list[Chunk], *, show_progress: bool = False):

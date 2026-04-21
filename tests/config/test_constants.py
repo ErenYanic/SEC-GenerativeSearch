@@ -1,7 +1,7 @@
 """Tests for config/constants.py.
 
-Covers Phase 1.7: existing SEC filing constants (carried over) and the
-new RAG-specific constants added for Phase 1.
+Covers the existing SEC filing constants and the RAG-specific
+constants added for this project.
 """
 
 from __future__ import annotations

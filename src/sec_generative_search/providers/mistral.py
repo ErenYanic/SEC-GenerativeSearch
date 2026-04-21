@@ -1,4 +1,4 @@
-"""Mistral provider adapters (Phase 5D.1).
+"""Mistral provider adapters.
 
 Mistral's La Plateforme exposes an OpenAI-compatible Chat Completions
 and Embeddings surface at ``https://api.mistral.ai/v1``.  Both the chat
@@ -33,22 +33,22 @@ class MistralProvider(OpenAICompatibleLLMProvider):
 
     provider_name = "mistral"
     default_base_url = "https://api.mistral.ai/v1"
-    default_model = "mistral-small-latest"
+    default_model = "ministral-3b-2512"
 
     MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
-        "mistral-large-latest": ModelInfo(
+        "mistral-large-2512": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
                 streaming=True,
                 tool_use=True,
                 structured_output=True,
                 prompt_caching=False,
-                context_window_tokens=128_000,
+                context_window_tokens=256_000,
                 max_output_tokens=32_000,
                 pricing_tier=PricingTier.PREMIUM,
             ),
         ),
-        "mistral-medium-latest": ModelInfo(
+        "mistral-medium-2508": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
                 streaming=True,
@@ -60,26 +60,26 @@ class MistralProvider(OpenAICompatibleLLMProvider):
                 pricing_tier=PricingTier.STANDARD,
             ),
         ),
-        "mistral-small-latest": ModelInfo(
+        "mistral-small-2603": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
                 streaming=True,
                 tool_use=True,
                 structured_output=True,
                 prompt_caching=False,
-                context_window_tokens=128_000,
+                context_window_tokens=256_000,
                 max_output_tokens=32_000,
                 pricing_tier=PricingTier.LOW,
             ),
         ),
-        "ministral-8b-latest": ModelInfo(
+        "ministral-3b-2512": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
                 streaming=True,
                 tool_use=True,
                 structured_output=True,
                 prompt_caching=False,
-                context_window_tokens=128_000,
+                context_window_tokens=256_000,
                 max_output_tokens=32_000,
                 pricing_tier=PricingTier.LOW,
             ),

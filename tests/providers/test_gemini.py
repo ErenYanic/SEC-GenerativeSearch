@@ -1,4 +1,4 @@
-"""Tests for :mod:`sec_generative_search.providers.gemini` (Phase 5C.3/5C.4/5C.5).
+"""Tests for :mod:`sec_generative_search.providers.gemini`.
 
 Covers both the chat and embedding surfaces:
 
@@ -186,16 +186,16 @@ class TestProviderMetadata:
         assert GeminiEmbeddingProvider.provider_name == "gemini"
 
     def test_default_models(self) -> None:
-        assert GeminiProvider.default_model == "gemini-2.5-flash"
-        assert GeminiEmbeddingProvider.default_model == "text-embedding-004"
+        assert GeminiProvider.default_model == "gemini-2.5-flash-lite"
+        assert GeminiEmbeddingProvider.default_model == "gemini-embedding-2-preview"
 
     def test_catalogue_has_tiered_models(self) -> None:
         cat = GeminiProvider.MODEL_CATALOGUE
         assert cat["gemini-2.5-pro"].capability.pricing_tier == PricingTier.PREMIUM
-        assert cat["gemini-2.5-flash"].capability.pricing_tier == PricingTier.LOW
+        assert cat["gemini-2.5-flash-lite"].capability.pricing_tier == PricingTier.LOW
 
     def test_embedding_dimensions(self) -> None:
-        assert GeminiEmbeddingProvider.MODEL_DIMENSIONS["text-embedding-004"] == 768
+        assert GeminiEmbeddingProvider.MODEL_DIMENSIONS["gemini-embedding-2-preview"] == 3072
         assert GeminiEmbeddingProvider.MODEL_DIMENSIONS["gemini-embedding-001"] == 3072
 
     def test_sdk_client_constructed_with_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -218,13 +218,13 @@ class TestProviderMetadata:
 
 
 # ---------------------------------------------------------------------------
-# Capability probe (Phase 5C.4)
+# Capability probe
 # ---------------------------------------------------------------------------
 
 
 class TestCapabilityProbe:
     def test_known_model_cheap_probe(self, provider: GeminiProvider) -> None:
-        caps = provider.get_capabilities("gemini-2.5-flash")
+        caps = provider.get_capabilities("gemini-2.5-flash-lite")
         assert caps.streaming is True
         assert caps.context_window_tokens == 1_048_576
         provider._fake_client.models.generate_content.assert_not_called()
@@ -261,7 +261,7 @@ class TestGenerate:
         provider._fake_client.models.generate_content.return_value = _make_response()
         provider.generate(GenerationRequest(prompt="hi", model=""))
         kwargs = provider._fake_client.models.generate_content.call_args.kwargs
-        assert kwargs["model"] == "gemini-2.5-flash"
+        assert kwargs["model"] == "gemini-2.5-flash-lite"
 
     def test_system_prompt_is_passed_on_config(self, provider: GeminiProvider) -> None:
         provider._fake_client.models.generate_content.return_value = _make_response()
@@ -442,40 +442,40 @@ class TestValidation:
 class TestEmbeddings:
     def test_empty_input_avoids_network(self, embedder: GeminiEmbeddingProvider) -> None:
         out = embedder.embed_texts([])
-        assert out.shape == (0, 768)
+        assert out.shape == (0, 3072)
         embedder._fake_client.models.embed_content.assert_not_called()
 
     def test_embed_texts_returns_array(self, embedder: GeminiEmbeddingProvider) -> None:
         item_a = MagicMock()
-        item_a.values = [0.1] * 768
+        item_a.values = [0.1] * 3072
         item_b = MagicMock()
-        item_b.values = [0.2] * 768
+        item_b.values = [0.2] * 3072
         response = MagicMock()
         response.embeddings = [item_a, item_b]
         embedder._fake_client.models.embed_content.return_value = response
 
         out = embedder.embed_texts(["one", "two"])
-        assert out.shape == (2, 768)
+        assert out.shape == (2, 3072)
         assert out.dtype == np.float32
 
     def test_embed_query_returns_1d_vector(self, embedder: GeminiEmbeddingProvider) -> None:
         item = MagicMock()
-        item.values = [0.3] * 768
+        item.values = [0.3] * 3072
         response = MagicMock()
         response.embeddings = [item]
         embedder._fake_client.models.embed_content.return_value = response
         out = embedder.embed_query("hello")
-        assert out.shape == (768,)
+        assert out.shape == (3072,)
 
     def test_embed_passes_correct_model(self, embedder: GeminiEmbeddingProvider) -> None:
         item = MagicMock()
-        item.values = [0.0] * 768
+        item.values = [0.0] * 3072
         response = MagicMock()
         response.embeddings = [item]
         embedder._fake_client.models.embed_content.return_value = response
         embedder.embed_texts(["x"])
         assert embedder._fake_client.models.embed_content.call_args.kwargs["model"] == (
-            "text-embedding-004"
+            "gemini-embedding-2-preview"
         )
 
     def test_embed_auth_error_terminal(self, embedder: GeminiEmbeddingProvider) -> None:

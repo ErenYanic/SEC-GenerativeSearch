@@ -1,4 +1,4 @@
-"""Z.ai / Zhipu AI GLM provider adapter (Phase 5G.1).
+"""Z.ai / Zhipu AI GLM provider adapter.
 
 Z.ai ships an OpenAI-compatible Chat Completions surface at
 ``https://api.z.ai/api/paas/v4`` (the general-purpose PaaS endpoint; a
@@ -35,14 +35,13 @@ class ZaiProvider(OpenAICompatibleLLMProvider):
 
     provider_name = "zai"
     default_base_url = "https://api.z.ai/api/paas/v4"
-    default_model = "glm-4.5-air"
+    default_model = "glm-4.7"
 
     # Catalogue captures the slugs Z.ai currently serves on the general
-    # PaaS endpoint.  ``glm-5.1`` is the post-training upgrade to
+    # PaaS endpoint. ``glm-5.1`` is the post-training upgrade to
     # ``glm-5`` (same 754B-param / 40B-activated MoE, sharper coding);
-    # ``glm-4.5-air`` is the cheap-fast default so omitting ``model``
-    # on a request still reaches a live endpoint without surprising the
-    # caller with premium pricing.
+    # ``glm-4.7`` is the lowest-cost current general-purpose entry in
+    # the published family.
     MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
         "glm-5.1": ModelInfo(
             capability=ProviderCapability(
@@ -52,7 +51,7 @@ class ZaiProvider(OpenAICompatibleLLMProvider):
                 structured_output=True,
                 prompt_caching=False,
                 context_window_tokens=200_000,
-                max_output_tokens=98_304,
+                max_output_tokens=128_000,
                 pricing_tier=PricingTier.PREMIUM,
             ),
         ),
@@ -64,7 +63,7 @@ class ZaiProvider(OpenAICompatibleLLMProvider):
                 structured_output=True,
                 prompt_caching=False,
                 context_window_tokens=200_000,
-                max_output_tokens=98_304,
+                max_output_tokens=128_000,
                 pricing_tier=PricingTier.STANDARD,
             ),
         ),
@@ -76,7 +75,7 @@ class ZaiProvider(OpenAICompatibleLLMProvider):
                 structured_output=True,
                 prompt_caching=False,
                 context_window_tokens=200_000,
-                max_output_tokens=98_304,
+                max_output_tokens=128_000,
                 pricing_tier=PricingTier.STANDARD,
             ),
         ),

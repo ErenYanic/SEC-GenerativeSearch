@@ -1,4 +1,4 @@
-"""Tests for :mod:`sec_generative_search.pipeline.fetch` (Phase 4.1).
+"""Tests for :mod:`sec_generative_search.pipeline.fetch`.
 
 These tests cover the fetcher's pure helpers and the identity
 configuration surface without touching EDGAR.  The edgartools

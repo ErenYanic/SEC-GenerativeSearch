@@ -1,4 +1,4 @@
-"""Tests for :mod:`sec_generative_search.providers.openai` (Phase 5B.3/5B.4).
+"""Tests for :mod:`sec_generative_search.providers.openai`.
 
 The OpenAI-compatible plumbing is exhaustively covered in
 ``test_openai_compat``; this suite focuses on the OpenAI-specific
@@ -12,7 +12,7 @@ surface:
 - ``OpenAIEmbeddingProvider`` exposes the documented native dimensions
   for ``text-embedding-3-{small,large}``.
 - Capability probing populates ``ProviderCapability`` *without* a
-  network call (Phase 5B.4 cheap-probe contract).
+    network call.
 - The OpenAI key never leaks through repr/str/log emissions.
 """
 
@@ -61,25 +61,26 @@ class TestProviderMetadata:
         OpenAIProvider(_LONG_KEY)
         assert _patch_openai_client["kwargs"]["base_url"] is None
 
-    def test_default_model_is_gpt_4o_mini(self) -> None:
-        assert OpenAIProvider.default_model == "gpt-4o-mini"
+    def test_default_model_is_gpt_5_4_mini(self) -> None:
+        assert OpenAIProvider.default_model == "gpt-5.4-mini"
 
     def test_catalogue_includes_required_models(self) -> None:
-        for slug in ("gpt-4o", "gpt-4o-mini", "o3", "o4-mini"):
+        for slug in ("gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-4o", "o3", "o4-mini"):
             assert slug in OpenAIProvider.MODEL_CATALOGUE, (
                 f"OpenAIProvider missing required model '{slug}' in MODEL_CATALOGUE"
             )
 
     def test_pricing_tiers_set(self) -> None:
-        # gpt-4o-mini should be the cheapest production option
-        assert OpenAIProvider.MODEL_CATALOGUE["gpt-4o-mini"].capability.pricing_tier == (
+        assert OpenAIProvider.MODEL_CATALOGUE["gpt-5.4-mini"].capability.pricing_tier == (
             PricingTier.LOW
         )
-        assert OpenAIProvider.MODEL_CATALOGUE["o3"].capability.pricing_tier == PricingTier.PREMIUM
+        assert OpenAIProvider.MODEL_CATALOGUE["gpt-5.4"].capability.pricing_tier == (
+            PricingTier.PREMIUM
+        )
 
 
 # ---------------------------------------------------------------------------
-# Capability probe (Phase 5B.4)
+# Capability probe
 # ---------------------------------------------------------------------------
 
 
@@ -141,9 +142,9 @@ class TestTokenCounting:
         import tiktoken
 
         provider = OpenAIProvider(_LONG_KEY)
-        encoder = tiktoken.encoding_for_model("gpt-4o-mini")
+        encoder = tiktoken.get_encoding("cl100k_base")
         text = "Apple Inc. reported strong revenues in Q4 2023."
-        assert provider.count_tokens(text, model="gpt-4o-mini") == len(encoder.encode(text))
+        assert provider.count_tokens(text, model="gpt-5.4-mini") == len(encoder.encode(text))
 
 
 # ---------------------------------------------------------------------------

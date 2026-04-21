@@ -1,4 +1,4 @@
-"""Tests for :mod:`sec_generative_search.pipeline.chunk` (Phase 4.4).
+"""Tests for :mod:`sec_generative_search.pipeline.chunk`.
 
 Covers the chunker's core guarantees:
     - Sentence-boundary aware splitting stays within the token budget

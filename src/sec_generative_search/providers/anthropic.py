@@ -1,4 +1,4 @@
-"""Anthropic provider adapter (Phase 5C.2/5C.4).
+"""Anthropic provider adapter.
 
 Concrete :class:`BaseLLMProvider` that targets Anthropic's Messages API
 via the first-party ``anthropic`` SDK.  The SDK's retry loop is disabled
@@ -11,7 +11,7 @@ Key notes:
 - Anthropic does not ship a hosted embedding model; the embedding path
   is out of scope.  Callers needing embeddings pair this with an
   embedding-only provider (OpenAI, Gemini) — the ``ProviderRegistry``
-  in Phase 5F handles the dual-provider wiring.
+  in handles the dual-provider wiring.
 - The Messages API returns a ``stop_reason`` of ``"refusal"`` when the
   safety system blocks the response.  We treat that as terminal and
   surface it as :class:`ProviderContentFilterError` — same shape as the
@@ -20,7 +20,7 @@ Key notes:
   behaviour: refusals come back as valid HTTP 200 responses.
 - ``count_tokens`` approximates with :mod:`tiktoken` ``cl100k_base``.
   The SDK ships an accurate ``messages.count_tokens`` but it is a
-  network call; the Phase 7 context-window packer budgets prompts
+  network call; the context-window packer budgets prompts
   *before* the generation call, so it needs an offline counter.  The
   approximation is conservative (slightly over-counts), which is the
   right direction for a budget guard.
@@ -115,8 +115,8 @@ class AnthropicProvider(BaseLLMProvider):
                 structured_output=True,
                 prompt_caching=True,
                 vision=True,
-                context_window_tokens=200_000,
-                max_output_tokens=32_000,
+                context_window_tokens=1_000_000,
+                max_output_tokens=128_000,
                 pricing_tier=PricingTier.PREMIUM,
             ),
         ),
@@ -128,7 +128,7 @@ class AnthropicProvider(BaseLLMProvider):
                 structured_output=True,
                 prompt_caching=True,
                 vision=True,
-                context_window_tokens=200_000,
+                context_window_tokens=1_000_000,
                 max_output_tokens=64_000,
                 pricing_tier=PricingTier.STANDARD,
             ),
@@ -142,7 +142,7 @@ class AnthropicProvider(BaseLLMProvider):
                 prompt_caching=True,
                 vision=True,
                 context_window_tokens=200_000,
-                max_output_tokens=8_192,
+                max_output_tokens=64_000,
                 pricing_tier=PricingTier.LOW,
             ),
         ),
@@ -336,7 +336,7 @@ class AnthropicProvider(BaseLLMProvider):
         """Return an offline token count for *text*.
 
         Uses :mod:`tiktoken`'s ``cl100k_base`` encoding as a conservative
-        approximation.  The Phase 7 context-window packer only needs
+        approximation.  The context-window packer only needs
         the count to stay *below* the model's window — a slight
         over-count biases towards safety.  The SDK's own
         ``messages.count_tokens`` is exact but a network call; we

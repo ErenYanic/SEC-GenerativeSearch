@@ -1,7 +1,7 @@
 """Shared pytest fixtures for SEC-GenerativeSearch.
 
-Currently focused on Phase 1 (foundation) tests.  As later phases land
-(providers, RAG orchestrator, API), fixtures for HTTP clients, mocked
+Currently focused on foundation tests. As more subsystems land,
+fixtures for HTTP clients, mocked
 providers, and temporary ChromaDB/SQLite stores will be added here.
 """
 

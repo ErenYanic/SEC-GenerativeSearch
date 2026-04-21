@@ -1,4 +1,4 @@
-"""Tests for logging configuration (Phase 1.5)."""
+"""Tests for logging configuration."""
 
 from __future__ import annotations
 

@@ -1,7 +1,7 @@
-"""Tests for core domain types (Phase 1.6 and Phase 2).
+"""Tests for core domain types.
 
 Covers the carried-over ingestion types (:class:`FilingIdentifier`,
-:class:`Chunk`, etc.) and the RAG additions introduced in Phase 2
+:class:`Chunk`, etc.) and the RAG-specific additions
 (:class:`RetrievalResult`, :class:`Citation`, :class:`TokenUsage`,
 :class:`GenerationResult`, :class:`ConversationTurn`,
 :class:`ProviderCapability`).
@@ -138,7 +138,7 @@ class TestIngestResult:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 — RAG domain types
+# RAG domain types
 # ---------------------------------------------------------------------------
 
 
@@ -269,7 +269,7 @@ class TestTokenUsage:
 
 class TestGenerationResult:
     def test_separates_retrieved_and_cited(self, filing_id: FilingIdentifier) -> None:
-        """AGENT.md requirement: retrieved chunks and citations are distinct collections."""
+        """Retrieved chunks and citations are distinct collections."""
         chunk_a = RetrievalResult.from_search_result(_make_search_result())
         citation = Citation(
             chunk_id="AAPL_10-K_2023-11-03_042",
@@ -405,7 +405,7 @@ _SECRET_FIELD_HINTS = (
 
 @pytest.mark.security
 class TestNoCredentialFieldsOnDomainTypes:
-    """Phase 3 baseline: secrets must never travel through core domain types.
+    """Secrets must never travel through core domain types.
 
     This test fails fast if a future change introduces a field whose name
     looks like it carries a credential.  It is intentionally noisy — a
@@ -435,5 +435,5 @@ class TestNoCredentialFieldsOnDomainTypes:
             for hint in _SECRET_FIELD_HINTS:
                 assert hint not in lowered, (
                     f"{cls.__name__}.{f.name} looks credential-bearing; "
-                    f"domain types must not carry secrets (Phase 3.1 classification)."
+                    "domain types must not carry secrets."
                 )

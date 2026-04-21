@@ -1,4 +1,4 @@
-"""DeepSeek provider adapter (Phase 5D.3).
+"""DeepSeek provider adapter.
 
 DeepSeek's API is OpenAI-compatible at ``https://api.deepseek.com/v1``.
 Only the chat surface is exposed — DeepSeek does not ship a first-party

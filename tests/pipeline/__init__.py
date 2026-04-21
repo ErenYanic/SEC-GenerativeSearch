@@ -1,1 +1,1 @@
-"""Tests for the SEC filing ingestion pipeline (Phase 4)."""
+"""Tests for the SEC filing ingestion pipeline."""

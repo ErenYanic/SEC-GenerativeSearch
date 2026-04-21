@@ -1,4 +1,4 @@
-"""Kimi (Moonshot AI) provider adapter (Phase 5D.2).
+"""Kimi (Moonshot AI) provider adapter.
 
 Moonshot AI ships an OpenAI-compatible Chat Completions surface at
 ``https://api.moonshot.ai/v1`` (international) — Mainland callers use the
@@ -27,7 +27,7 @@ class KimiProvider(OpenAICompatibleLLMProvider):
 
     provider_name = "kimi"
     default_base_url = "https://api.moonshot.ai/v1"
-    default_model = "moonshot-v1-32k"
+    default_model = "moonshot-v1-8k"
 
     MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
         "kimi-k2.6": ModelInfo(

@@ -1,4 +1,4 @@
-"""Tests for :mod:`sec_generative_search.core.resilience` (Phase 5A.4/5A.5).
+"""Tests for :mod:`sec_generative_search.core.resilience`.
 
 Covers:
 

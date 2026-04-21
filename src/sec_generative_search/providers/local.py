@@ -1,4 +1,4 @@
-"""Local embedding provider backed by ``sentence-transformers`` (Phase 5E).
+"""Local embedding provider backed by ``sentence-transformers``.
 
 Runs entirely on the user's machine — no outbound network call once the
 model weights are cached locally.  Suits the Scenario A (local) and
@@ -6,8 +6,7 @@ Scenario B (team) profiles where operators would rather pay a one-off
 model-download cost than stream SEC filings through a hosted embedding
 endpoint.
 
-Key design choices (see ``docs/AGENT.md`` "Embeddings" and
-"Architectural Decisions > Providers"):
+Key design choices:
 
 - ``sentence-transformers`` and :mod:`torch` are **optional** runtime
   dependencies (`[local-embeddings]` extra).  Every import of them is
@@ -76,8 +75,7 @@ class LocalEmbeddingProvider(BaseEmbeddingProvider):
     The provider owns the model handle, the resolved device, and the
     timestamp of the last successful call.  None of these travel with
     the :class:`GenerationRequest` / :class:`GenerationResponse`
-    dataclasses, which remain credential-free as required by the
-    Phase 2 and Phase 5A security tests.
+    dataclasses, which remain credential-free.
 
     The public surface mirrors the other embedding providers so that
     callers can swap one in via the :class:`ChunkEmbedder` protocol
@@ -99,7 +97,7 @@ class LocalEmbeddingProvider(BaseEmbeddingProvider):
     # Native output dimension for each supported model.  Models must be
     # listed here so the collection dimension can be stamped before the
     # first embed call (ChromaDB collections are dimension-locked on
-    # creation — see AGENT.md "Embeddings").
+    # creation).
     #
     # Adding a model is a one-line change; unknown models are rejected
     # at construction rather than silently permitted.

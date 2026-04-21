@@ -1,12 +1,12 @@
-"""Parametrised vendor tests for the Phase 5D OpenAI-compatible subclasses.
+"""Parametrised vendor tests for the OpenAI-compatible subclasses.
 
-Every vendor in Phase 5D ships by configuring the shared
+Every vendor ships by configuring the shared
 :mod:`providers.openai_compat` surface with nothing more than a
 ``provider_name``, a ``default_base_url``, a ``default_model``, and a
 static catalogue.  The heavy behaviour — retry/circuit-breaker, content-
 filter handling, streaming, token accounting — is already exhaustively
 covered in ``test_openai_compat``; this suite therefore focuses on the
-Phase 5D-specific contract:
+vendor-specific contract:
 
 - Each provider declares a non-empty, reachable-looking ``base_url``.
 - Each provider's ``default_model`` is present in its catalogue (or the
@@ -98,13 +98,13 @@ _LLM_VENDORS: list[tuple[type, str, str, str]] = [
         MistralProvider,
         "mistral",
         "https://api.mistral.ai/v1",
-        "mistral-small-latest",
+        "ministral-3b-2512",
     ),
     (
         KimiProvider,
         "kimi",
         "https://api.moonshot.ai/v1",
-        "moonshot-v1-32k",
+        "moonshot-v1-8k",
     ),
     (
         DeepSeekProvider,
@@ -116,13 +116,13 @@ _LLM_VENDORS: list[tuple[type, str, str, str]] = [
         QwenProvider,
         "qwen",
         "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-        "qwen-turbo",
+        "qwen3.5-flash",
     ),
     (
         ZaiProvider,
         "zai",
         "https://api.z.ai/api/paas/v4",
-        "glm-4.5-air",
+        "glm-4.7",
     ),
     (
         GrokProvider,
@@ -134,19 +134,19 @@ _LLM_VENDORS: list[tuple[type, str, str, str]] = [
         MiniMaxProvider,
         "minimax",
         "https://api.minimax.io/v1",
-        "MiniMax-M2.7-highspeed",
+        "MiniMax-M2.5",
     ),
     (
         MimoProvider,
         "mimo",
         "https://api.xiaomimimo.com/v1",
-        "MiMo-V2-Flash",
+        "MiMo-V2-Pro",
     ),
     (
         OpenRouterProvider,
         "openrouter",
         "https://openrouter.ai/api/v1",
-        "openai/gpt-4o-mini",
+        "openai/gpt-5.4-mini",
     ),
 ]
 
@@ -155,14 +155,14 @@ _LLM_VENDORS: list[tuple[type, str, str, str]] = [
 # the parametrisation trivially introspectable and avoids an in-test
 # ``pytest.skip`` branch for the meta-provider.
 _LLM_VENDORS_WITH_CATALOGUE: list[tuple[type, str]] = [
-    (MistralProvider, "mistral-large-latest"),
+    (MistralProvider, "mistral-large-2512"),
     (KimiProvider, "kimi-k2"),
     (DeepSeekProvider, "deepseek-reasoner"),
-    (QwenProvider, "qwen-max"),
-    (ZaiProvider, "glm-5.1"),
+    (QwenProvider, "qwen3-max"),
+    (ZaiProvider, "glm-5"),
     (GrokProvider, "grok-4.20-0309-reasoning"),
     (MiniMaxProvider, "MiniMax-M2"),
-    (MimoProvider, "MiMo-V2-Pro"),
+    (MimoProvider, "MiMo-V2-Flash"),
 ]
 
 
@@ -178,7 +178,7 @@ _EMBED_VENDORS: list[tuple[type, str, str, str, int]] = [
         QwenEmbeddingProvider,
         "qwen",
         "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-        "text-embedding-v3",
+        "text-embedding-v4",
         1024,
     ),
 ]
@@ -314,9 +314,9 @@ def test_capability_probe_is_offline(
 def test_openrouter_accepts_any_slug(patched_openai: dict[str, Any]) -> None:
     """OpenRouter's meta-provider contract: unknown slug → permissive default.
 
-    This is the Phase 5D.5 "accepts any model slug; lazy validation
+    This is the "accepts any model slug; lazy validation
     against OpenRouter's model list" contract.  Validation against the
-    live model list is delegated to ``validate_key``/the Phase 5F
+    live model list is delegated to ``validate_key``/the registry
     registry; the capability probe deliberately stays permissive so the
     SDK call can proceed and the upstream API produces the authoritative
     error if the slug is unserviceable.

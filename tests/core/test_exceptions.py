@@ -1,4 +1,4 @@
-"""Tests for the exception hierarchy (Phase 1.4)."""
+"""Tests for the exception hierarchy."""
 
 from __future__ import annotations
 

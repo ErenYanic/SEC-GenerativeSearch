@@ -1,4 +1,4 @@
-"""Tests for :mod:`sec_generative_search.providers.openai_compat` (Phase 5B.2/5B.5).
+"""Tests for :mod:`sec_generative_search.providers.openai_compat`.
 
 Covers the shared OpenAI-compatible plumbing used by every vendor that
 speaks the OpenAI Chat Completions / Embeddings wire protocol:
@@ -495,7 +495,7 @@ class TestEmbeddings:
 
 
 # ---------------------------------------------------------------------------
-# Mapping sanity (Phase 5B.5 — explicit allow list, no SDK leakage)
+# Mapping sanity
 # ---------------------------------------------------------------------------
 
 

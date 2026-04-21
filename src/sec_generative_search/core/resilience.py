@@ -2,9 +2,9 @@
 
 This module is deliberately dependency-free: it imports only from the
 standard library and :mod:`core.exceptions` / :mod:`core.logging`.  The
-Phase 5 provider adapters compose these primitives (Phase 5A.4 / 5A.5),
-and the Phase 7 retrieval service will reuse the same building blocks,
-so no piece of this file may reach into any SDK.
+provider adapters compose these primitives, and the retrieval service
+reuses the same building blocks, so no piece of this file may reach
+into any SDK.
 
 Contents:
 
@@ -242,7 +242,7 @@ class CircuitBreaker:
 class ExceptionMapping:
     """Declarative mapping from SDK-specific exception types to :class:`ProviderError`.
 
-    Each concrete provider (Phase 5B+) constructs one at module load
+    Each concrete provider constructs one at module load
     using the SDK's public exception hierarchy.  The resilience layer
     consults the mapping to translate every failure into the small set
     of types that the RAG orchestrator and UI can reason about.

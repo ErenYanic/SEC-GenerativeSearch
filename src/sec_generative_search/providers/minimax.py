@@ -1,4 +1,4 @@
-"""MiniMax provider adapter (Phase 5G.3).
+"""MiniMax provider adapter.
 
 MiniMax exposes an OpenAI-compatible Chat Completions surface at
 ``https://api.minimax.io/v1`` (international).  The mainland mirror
@@ -36,7 +36,7 @@ class MiniMaxProvider(OpenAICompatibleLLMProvider):
 
     provider_name = "minimax"
     default_base_url = "https://api.minimax.io/v1"
-    default_model = "MiniMax-M2.7-highspeed"
+    default_model = "MiniMax-M2.5"
 
     # MiniMax slugs preserve the vendor's published casing
     # (``MiniMax-M2.7`` rather than a normalised lower-case form) —

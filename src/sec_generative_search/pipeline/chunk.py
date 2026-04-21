@@ -7,7 +7,7 @@ It uses sentence-boundary splitting to ensure chunks don't cut mid-sentence.
 Section boundaries are preserved implicitly: the parser produces one
 :class:`Segment` per section path (e.g. ``"Part I > Item 1A > Risk
 Factors"``), and chunking is performed **per-segment** — chunks never
-span across sections.  See Phase 4.4 in ``docs/TODO.md``.
+span across sections.
 
 Usage:
     from sec_generative_search.pipeline import TextChunker
@@ -38,9 +38,8 @@ class TextChunker:
         2. Otherwise, split on sentence boundaries (. ! ?)
         3. Accumulate sentences until adding another would exceed limit
         4. Tolerance band allows slight overrun to avoid tiny final chunks
-        5. Optional sentence-level overlap carries the tail of the
-           previous chunk into the next one for context continuity
-           (Phase 4.4)
+          5. Optional sentence-level overlap carries the tail of the
+              previous chunk into the next one for context continuity
 
     Table segments (``ContentType.TABLE``) are never split — table
     structure is preserved as a single chunk even when the token count
