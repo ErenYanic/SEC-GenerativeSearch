@@ -186,7 +186,7 @@ class TestProviderMetadata:
         assert GeminiEmbeddingProvider.provider_name == "gemini"
 
     def test_default_models(self) -> None:
-        assert GeminiProvider.default_model == "gemini-3.1-flash-lite-preview"
+        assert GeminiProvider.default_model == "gemini-3-flash-preview"
         assert GeminiEmbeddingProvider.default_model == "gemini-embedding-2-preview"
 
     def test_catalogue_has_tiered_models(self) -> None:
@@ -194,6 +194,7 @@ class TestProviderMetadata:
         assert cat["gemini-3.1-pro-preview"].capability.pricing_tier == PricingTier.PREMIUM
         assert cat["gemini-3.1-pro-preview-customtools"].capability.tool_use is True
         assert cat["gemini-3.1-flash-lite-preview"].capability.pricing_tier == PricingTier.LOW
+        assert cat["gemini-3-flash-preview"].capability.pricing_tier == PricingTier.LOW
         assert cat["gemini-2.5-pro"].capability.pricing_tier == PricingTier.PREMIUM
         assert cat["gemini-2.5-flash-lite"].capability.pricing_tier == PricingTier.LOW
 

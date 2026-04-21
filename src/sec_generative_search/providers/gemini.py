@@ -214,7 +214,7 @@ class GeminiProvider(_GeminiClientMixin, BaseLLMProvider):
     """Chat-completion provider for Google's Gemini models."""
 
     provider_name: ClassVar[str] = "gemini"
-    default_model: ClassVar[str] = "gemini-3.1-flash-lite-preview"
+    default_model: ClassVar[str] = "gemini-3-flash-preview"
 
     # Static capability probe — O(1) lookup, no network call at
     # registration.  Context window / max-output figures come from the
@@ -249,6 +249,19 @@ class GeminiProvider(_GeminiClientMixin, BaseLLMProvider):
             ),
         ),
         "gemini-3.1-flash-lite-preview": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                vision=True,
+                context_window_tokens=1_048_576,
+                max_output_tokens=65_536,
+                pricing_tier=PricingTier.LOW,
+            ),
+        ),
+        "gemini-3-flash-preview": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
                 streaming=True,
