@@ -39,6 +39,8 @@ from sec_generative_search.core.types import (
 if TYPE_CHECKING:
     import numpy as np
 
+    from sec_generative_search.providers.openrouter import OpenRouterRoutingHints
+
 
 __all__ = [
     "BaseEmbeddingProvider",
@@ -71,6 +73,14 @@ class GenerationRequest:
         temperature: Sampling temperature.  Defaults to 0.1 for factual
             filings analysis.
         max_output_tokens: Upper bound on the response length.
+        routing_hints: Optional upstream-routing hints consumed only by
+            :class:`~sec_generative_search.providers.openrouter.OpenRouterProvider`.
+            Every other provider ignores the field — the OpenAI-compatible
+            base's ``_extra_request_kwargs`` hook returns an empty dict by
+            default, so unrelated vendors never see the hint reach their
+            SDK call.  The hint object is pass-through and carries no
+            credential material; it is a *routing* channel, not an
+            authentication one.
     """
 
     prompt: str
@@ -78,6 +88,7 @@ class GenerationRequest:
     system: str | None = None
     temperature: float = 0.1
     max_output_tokens: int = 2048
+    routing_hints: OpenRouterRoutingHints | None = None
 
 
 @dataclass

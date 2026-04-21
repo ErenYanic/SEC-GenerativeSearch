@@ -391,6 +391,53 @@ class TestArbitraryModels:
 
 
 # ---------------------------------------------------------------------------
+# Upstream-routing flag (Phase 5H)
+# ---------------------------------------------------------------------------
+
+
+class TestUpstreamRoutingFlag:
+    """Only OpenRouter honours
+    :class:`~sec_generative_search.providers.openrouter.OpenRouterRoutingHints`.
+
+    The flag is what CLI and web UI keys off to decide whether to
+    surface an upstream-provider picker.  A direct upstream (OpenAI,
+    Anthropic, …) would render the picker as a no-op at best and a
+    misleading UX at worst — the non-OpenRouter subclasses silently
+    ignore ``routing_hints`` via the OpenAI-compatible base's empty
+    default ``_extra_request_kwargs`` hook.
+    """
+
+    def test_openrouter_supports_upstream_routing(self) -> None:
+        assert ProviderRegistry.supports_upstream_routing("openrouter", ProviderSurface.LLM) is True
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "openai",
+            "anthropic",
+            "gemini",
+            "deepseek",
+            "kimi",
+            "mistral",
+            "qwen",
+            "zai",
+            "grok",
+            "minimax",
+            "mimo",
+        ],
+    )
+    def test_direct_upstreams_do_not(self, name: str) -> None:
+        assert ProviderRegistry.supports_upstream_routing(name, ProviderSurface.LLM) is False
+
+    def test_entry_flag_matches_classmethod(self) -> None:
+        """Single source of truth: the entry's flag and the registry
+        classmethod never disagree."""
+        entry = ProviderRegistry.get_entry("openrouter", ProviderSurface.LLM)
+        assert entry.supports_upstream_routing is True
+        assert ProviderRegistry.supports_upstream_routing(entry.name, entry.surface) is True
+
+
+# ---------------------------------------------------------------------------
 # Capability lookup
 # ---------------------------------------------------------------------------
 
