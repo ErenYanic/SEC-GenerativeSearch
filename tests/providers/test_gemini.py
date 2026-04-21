@@ -186,7 +186,7 @@ class TestProviderMetadata:
         assert GeminiEmbeddingProvider.provider_name == "gemini"
 
     def test_default_models(self) -> None:
-        assert GeminiProvider.default_model == "gemini-2.5-flash-lite"
+        assert GeminiProvider.default_model == "gemini-3.1-flash-lite-preview"
         assert GeminiEmbeddingProvider.default_model == "gemini-embedding-2-preview"
 
     def test_catalogue_has_tiered_models(self) -> None:
@@ -264,7 +264,7 @@ class TestGenerate:
         provider._fake_client.models.generate_content.return_value = _make_response()
         provider.generate(GenerationRequest(prompt="hi", model=""))
         kwargs = provider._fake_client.models.generate_content.call_args.kwargs
-        assert kwargs["model"] == "gemini-2.5-flash-lite"
+        assert kwargs["model"] == "gemini-3.1-flash-lite-preview"
 
     def test_system_prompt_is_passed_on_config(self, provider: GeminiProvider) -> None:
         provider._fake_client.models.generate_content.return_value = _make_response()
