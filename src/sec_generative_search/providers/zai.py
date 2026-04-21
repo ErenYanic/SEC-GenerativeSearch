@@ -87,7 +87,7 @@ class ZaiProvider(OpenAICompatibleLLMProvider):
                 structured_output=True,
                 prompt_caching=False,
                 context_window_tokens=128_000,
-                max_output_tokens=8_192,
+                max_output_tokens=96_000,
                 pricing_tier=PricingTier.LOW,
             ),
         ),
