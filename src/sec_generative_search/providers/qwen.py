@@ -129,8 +129,6 @@ class QwenEmbeddingProvider(OpenAICompatibleEmbeddingProvider):
     default_model = "text-embedding-v4"
 
     MODEL_DIMENSIONS: ClassVar[dict[str, int]] = {
-        "text-embedding-v1": 1536,
-        "text-embedding-v2": 1536,
         "text-embedding-v4": 1024,
         "text-embedding-v3": 1024,
     }
