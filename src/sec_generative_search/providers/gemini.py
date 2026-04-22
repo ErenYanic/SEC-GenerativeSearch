@@ -595,7 +595,6 @@ class GeminiEmbeddingProvider(_GeminiClientMixin, BaseEmbeddingProvider):
     # time projections; the registry uses the native default.
     MODEL_DIMENSIONS: ClassVar[dict[str, int]] = {
         "gemini-embedding-2-preview": 3072,
-        "text-embedding-004": 768,
         "gemini-embedding-001": 3072,
     }
 
