@@ -8,6 +8,7 @@ from sec_generative_search.core.exceptions import (
     CitationError,
     ConfigurationError,
     DatabaseError,
+    EmbeddingCollectionMismatchError,
     FetchError,
     FilingLimitExceededError,
     GenerationError,
@@ -20,6 +21,7 @@ from sec_generative_search.core.exceptions import (
     SearchError,
     SECGenerativeSearchError,
 )
+from sec_generative_search.core.types import EmbedderStamp
 
 
 class TestBaseException:
@@ -44,6 +46,7 @@ class TestHierarchy:
             ConfigurationError,
             FetchError,
             DatabaseError,
+            EmbeddingCollectionMismatchError,
             SearchError,
             ProviderError,
             ProviderAuthError,
@@ -105,3 +108,67 @@ class TestProviderError:
         with pytest.raises(ProviderError) as exc_info:
             raise ProviderAuthError("bad key", provider="gemini")
         assert exc_info.value.provider == "gemini"
+
+
+class TestEmbeddingCollectionMismatchError:
+    def _stamps(self) -> tuple[EmbedderStamp, EmbedderStamp]:
+        expected = EmbedderStamp(provider="openai", model="text-embedding-3-small", dimension=1536)
+        actual = EmbedderStamp(provider="local", model="google/embeddinggemma-300m", dimension=768)
+        return expected, actual
+
+    def test_still_a_database_error(self) -> None:
+        expected, actual = self._stamps()
+        err = EmbeddingCollectionMismatchError(expected=expected, actual=actual)
+        assert isinstance(err, DatabaseError)
+        assert isinstance(err, SECGenerativeSearchError)
+
+    def test_message_names_both_stamps(self) -> None:
+        expected, actual = self._stamps()
+        err = EmbeddingCollectionMismatchError(expected=expected, actual=actual)
+        message = str(err)
+        # Expected triple
+        assert "openai" in message
+        assert "text-embedding-3-small" in message
+        assert "1536" in message
+        # Actual triple
+        assert "local" in message
+        assert "google/embeddinggemma-300m" in message
+        assert "768" in message
+
+    def test_stamps_preserved_as_attributes(self) -> None:
+        expected, actual = self._stamps()
+        err = EmbeddingCollectionMismatchError(expected=expected, actual=actual)
+        assert err.expected is expected
+        assert err.actual is actual
+
+    def test_hint_is_uniform_across_deployments(self) -> None:
+        """The hint is deliberately scenario-unaware.
+
+        Two instances with different stamps must share the same hint
+        string — the storage layer does not branch on deployment
+        profile, and any future change that introduces branching would
+        trip this assertion.
+        """
+        expected_a, actual_a = self._stamps()
+        err_a = EmbeddingCollectionMismatchError(expected=expected_a, actual=actual_a)
+
+        expected_b = EmbedderStamp(provider="gemini", model="text-embedding-004", dimension=768)
+        actual_b = EmbedderStamp(provider="mistral", model="mistral-embed", dimension=1024)
+        err_b = EmbeddingCollectionMismatchError(expected=expected_b, actual=actual_b)
+        assert err_a.hint == err_b.hint
+        # Spot-check the hint is the "reindex" guidance, not e.g. a
+        # sanitised empty string.
+        assert "reindex" in err_a.hint.lower()
+
+
+@pytest.mark.security
+class TestEmbeddingCollectionMismatchErrorCredentialHygiene:
+    """The mismatch error must never echo a secret-shaped string."""
+
+    def test_no_credential_words_in_hint_or_message(self) -> None:
+        expected = EmbedderStamp(provider="openai", model="text-embedding-3-small", dimension=1536)
+        actual = EmbedderStamp(provider="gemini", model="text-embedding-004", dimension=768)
+        err = EmbeddingCollectionMismatchError(expected=expected, actual=actual)
+        rendered = f"{err.message} {err.hint}".lower()
+        for needle in ("api_key", "apikey", "secret", "password", "bearer"):
+            assert needle not in rendered

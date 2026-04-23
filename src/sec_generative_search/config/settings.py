@@ -48,14 +48,90 @@ class EdgarSettings(BaseSettings):
 
 
 class EmbeddingSettings(BaseSettings):
-    """Embedding model configuration."""
+    """Embedding model configuration.
 
+    ``provider`` selects the embedding backend and is validated against
+    :class:`~sec_generative_search.providers.registry.ProviderRegistry` so
+    typos surface at settings load rather than at first embed call.  The
+    local-only knobs (``device``, ``batch_size``, ``idle_timeout_minutes``)
+    have no meaning for hosted providers; a ``model_validator`` rejects
+    non-default values whenever ``provider != "local"``.
+
+    Credentials never live here — :mod:`sec_generative_search.providers.factory`
+    resolves them at construction time via an injected ``api_key_resolver``.
+    """
+
+    provider: str = "local"
     model_name: str = "google/embeddinggemma-300m"
     device: str = "auto"  # "cuda", "cpu", or "auto"
     batch_size: int = 32
     idle_timeout_minutes: int = 0  # 0 = disabled; auto-unload model after idle
 
     model_config = SettingsConfigDict(env_prefix="EMBEDDING_")
+
+    @field_validator("provider")
+    @classmethod
+    def _validate_provider(cls, value: str) -> str:
+        """Reject names not registered on the embedding surface.
+
+        ``include_unavailable=True`` accepts providers whose optional
+        extras are not installed (e.g. ``"local"`` without
+        ``[local-embeddings]``) — settings load must not depend on the
+        extras being present.  The factory raises a clear install-hint
+        error at construction time if the extra is still missing when an
+        embedder is actually built.
+
+        The import is deferred to keep ``config`` free of a top-level
+        dependency on ``providers`` — loading every adapter at settings
+        import would be wasteful and couples two otherwise-independent
+        layers.
+        """
+        from sec_generative_search.providers.registry import (
+            ProviderRegistry,
+            ProviderSurface,
+        )
+
+        known = {
+            entry.name
+            for entry in ProviderRegistry.all_entries(
+                ProviderSurface.EMBEDDING,
+                include_unavailable=True,
+            )
+        }
+        if value not in known:
+            raise ValueError(
+                f"Unknown EMBEDDING_PROVIDER '{value}'. Known embedding providers: {sorted(known)}."
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _validate_local_only_knobs(self) -> "EmbeddingSettings":
+        """Reject non-default local-only knobs when the provider is hosted.
+
+        ``device``, ``batch_size``, and ``idle_timeout_minutes`` are only
+        meaningful for :class:`LocalEmbeddingProvider`.  Silently
+        accepting them with a hosted provider would invite
+        misconfiguration where an operator thinks they have tuned a
+        hosted embedder — fail loudly and name every offending field.
+        """
+        if self.provider == "local":
+            return self
+
+        offenders: list[str] = []
+        if self.device != "auto":
+            offenders.append(f"device={self.device!r}")
+        if self.batch_size != 32:
+            offenders.append(f"batch_size={self.batch_size!r}")
+        if self.idle_timeout_minutes != 0:
+            offenders.append(f"idle_timeout_minutes={self.idle_timeout_minutes!r}")
+
+        if offenders:
+            raise ValueError(
+                f"EMBEDDING_PROVIDER='{self.provider}' is a hosted provider "
+                f"but local-only knobs were set: {', '.join(offenders)}. "
+                f"Remove these env vars or switch to EMBEDDING_PROVIDER=local."
+            )
+        return self
 
 
 class ChunkingSettings(BaseSettings):

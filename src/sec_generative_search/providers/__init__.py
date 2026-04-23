@@ -16,6 +16,11 @@ from sec_generative_search.providers.base import (
     RerankResult,
 )
 from sec_generative_search.providers.deepseek import DeepSeekProvider
+from sec_generative_search.providers.factory import (
+    ApiKeyResolver,
+    build_embedder,
+    default_api_key_resolver,
+)
 from sec_generative_search.providers.gemini import (
     GeminiEmbeddingProvider,
     GeminiProvider,
@@ -47,6 +52,7 @@ from sec_generative_search.providers.zai import ZaiProvider
 
 __all__ = [
     "AnthropicProvider",
+    "ApiKeyResolver",
     "BaseEmbeddingProvider",
     "BaseLLMProvider",
     "BaseRerankerProvider",
@@ -72,4 +78,6 @@ __all__ = [
     "QwenProvider",
     "RerankResult",
     "ZaiProvider",
+    "build_embedder",
+    "default_api_key_resolver",
 ]

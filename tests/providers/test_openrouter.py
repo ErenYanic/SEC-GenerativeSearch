@@ -1,8 +1,8 @@
-"""Tests for :mod:`sec_generative_search.providers.openrouter` — Phase 5H.
+"""Tests for :mod:`sec_generative_search.providers.openrouter`.
 
-Covers the OpenRouter-specific routing-hint channel introduced in
-Phase 5H.  Catalogue / base-url / repr-redaction behaviour already lives
-in ``test_openai_compat_vendors`` — this file focuses on:
+Covers the OpenRouter-specific routing-hint channel.  Catalogue /
+base-url / repr-redaction behaviour already lives in
+``test_openai_compat_vendors`` — this file focuses on:
 
 - :class:`OpenRouterRoutingHints` shape and pass-through serialisation.
 - :class:`OpenRouterProvider` forwards hints into the SDK call via

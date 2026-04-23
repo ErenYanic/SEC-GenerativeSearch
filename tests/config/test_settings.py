@@ -10,9 +10,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from sec_generative_search.config.settings import (
     DatabaseSettings,
+    EmbeddingSettings,
     LLMSettings,
     ProviderSettings,
     RAGSettings,
@@ -104,6 +106,192 @@ class TestRAGSettings:
         assert s.citation_mode == "footnote"
         assert s.default_answer_mode == "analytical"
         assert s.refusal_enabled is False
+
+
+# ---------------------------------------------------------------------------
+# EmbeddingSettings — provider validator + local-only knob guard
+# ---------------------------------------------------------------------------
+
+
+class TestEmbeddingSettingsDefaults:
+    def test_defaults(self, clean_env: pytest.MonkeyPatch) -> None:
+        s = EmbeddingSettings()
+        # ``local`` is the default so an out-of-the-box install does not
+        # require a hosted-provider credential to construct the settings.
+        assert s.provider == "local"
+        assert s.model_name == "google/embeddinggemma-300m"
+        assert s.device == "auto"
+        assert s.batch_size == 32
+        assert s.idle_timeout_minutes == 0
+
+    def test_env_override_hosted_provider(self, clean_env: pytest.MonkeyPatch) -> None:
+        clean_env.setenv("EMBEDDING_PROVIDER", "openai")
+        clean_env.setenv("EMBEDDING_MODEL_NAME", "text-embedding-3-small")
+        s = EmbeddingSettings()
+        assert s.provider == "openai"
+        assert s.model_name == "text-embedding-3-small"
+
+
+class TestEmbeddingSettingsProviderValidator:
+    """The ``provider`` field must refuse unknown registry names."""
+
+    def test_unknown_provider_rejected(self, clean_env: pytest.MonkeyPatch) -> None:
+        clean_env.setenv("EMBEDDING_PROVIDER", "acme-corp")
+        with pytest.raises(ValidationError) as exc_info:
+            EmbeddingSettings()
+        # The error names the offending value and includes the
+        # registry's list so a typo is fixable without hunting through
+        # docs.
+        message = str(exc_info.value)
+        assert "acme-corp" in message
+        assert "Known embedding providers" in message
+
+    def test_empty_string_rejected(self, clean_env: pytest.MonkeyPatch) -> None:
+        clean_env.setenv("EMBEDDING_PROVIDER", "")
+        with pytest.raises(ValidationError):
+            EmbeddingSettings()
+
+    def test_local_accepted_even_when_extra_missing(
+        self,
+        clean_env: pytest.MonkeyPatch,
+    ) -> None:
+        """``include_unavailable=True`` is what makes this work.
+
+        A user may configure ``EMBEDDING_PROVIDER=local`` in ``.env``
+        before installing ``[local-embeddings]``.  Settings load must
+        still succeed — the factory surfaces a clear install hint when
+        an embedder is actually built.
+        """
+        import importlib.util
+
+        from sec_generative_search.providers.registry import ProviderRegistry
+
+        real_find_spec = importlib.util.find_spec
+        clean_env.setattr(
+            importlib.util,
+            "find_spec",
+            lambda name, *a, **kw: (
+                None if name == "sentence_transformers" else real_find_spec(name, *a, **kw)
+            ),
+        )
+        ProviderRegistry._reset_availability_cache()
+
+        clean_env.setenv("EMBEDDING_PROVIDER", "local")
+        # No error — the validator accepts gated entries.
+        s = EmbeddingSettings()
+        assert s.provider == "local"
+
+    def test_registry_is_the_source_of_truth(self, clean_env: pytest.MonkeyPatch) -> None:
+        """Every registry-known embedding provider loads cleanly."""
+        from sec_generative_search.providers.registry import (
+            ProviderRegistry,
+            ProviderSurface,
+        )
+
+        registered = {
+            entry.name
+            for entry in ProviderRegistry.all_entries(
+                ProviderSurface.EMBEDDING, include_unavailable=True
+            )
+        }
+        # A future new vendor must not require a manual test edit here —
+        # the loop covers whatever the registry advertises.
+        for name in registered:
+            clean_env.setenv("EMBEDDING_PROVIDER", name)
+            # Hosted providers need a compatible model slug; using the
+            # provider's default removes the coupling with this test.
+            clean_env.delenv("EMBEDDING_MODEL_NAME", raising=False)
+            # For hosted providers we also need to use a valid model
+            # from the provider's catalogue — use the local default for
+            # 'local' and the registry-known default otherwise.
+            cls = ProviderRegistry.all_entries(ProviderSurface.EMBEDDING, include_unavailable=True)
+            model = next(
+                (
+                    e.provider_cls.default_model
+                    for e in cls
+                    if e.name == name and e.provider_cls.default_model
+                ),
+                None,
+            )
+            if model is not None:
+                clean_env.setenv("EMBEDDING_MODEL_NAME", model)
+            s = EmbeddingSettings()
+            assert s.provider == name
+
+
+class TestEmbeddingSettingsLocalOnlyKnobGuard:
+    """Non-default local-only knobs must be rejected for hosted providers."""
+
+    def test_local_provider_accepts_local_knobs(self, clean_env: pytest.MonkeyPatch) -> None:
+        clean_env.setenv("EMBEDDING_PROVIDER", "local")
+        clean_env.setenv("EMBEDDING_DEVICE", "cuda")
+        clean_env.setenv("EMBEDDING_BATCH_SIZE", "64")
+        clean_env.setenv("EMBEDDING_IDLE_TIMEOUT_MINUTES", "5")
+        s = EmbeddingSettings()
+        assert s.device == "cuda"
+        assert s.batch_size == 64
+        assert s.idle_timeout_minutes == 5
+
+    def test_hosted_provider_rejects_device(self, clean_env: pytest.MonkeyPatch) -> None:
+        clean_env.setenv("EMBEDDING_PROVIDER", "openai")
+        clean_env.setenv("EMBEDDING_MODEL_NAME", "text-embedding-3-small")
+        clean_env.setenv("EMBEDDING_DEVICE", "cuda")
+        with pytest.raises(ValidationError, match="device='cuda'"):
+            EmbeddingSettings()
+
+    def test_hosted_provider_rejects_batch_size(self, clean_env: pytest.MonkeyPatch) -> None:
+        clean_env.setenv("EMBEDDING_PROVIDER", "openai")
+        clean_env.setenv("EMBEDDING_MODEL_NAME", "text-embedding-3-small")
+        clean_env.setenv("EMBEDDING_BATCH_SIZE", "128")
+        with pytest.raises(ValidationError, match="batch_size=128"):
+            EmbeddingSettings()
+
+    def test_hosted_provider_rejects_idle_timeout(self, clean_env: pytest.MonkeyPatch) -> None:
+        clean_env.setenv("EMBEDDING_PROVIDER", "openai")
+        clean_env.setenv("EMBEDDING_MODEL_NAME", "text-embedding-3-small")
+        clean_env.setenv("EMBEDDING_IDLE_TIMEOUT_MINUTES", "5")
+        with pytest.raises(ValidationError, match="idle_timeout_minutes=5"):
+            EmbeddingSettings()
+
+    def test_hosted_provider_error_names_every_offender(
+        self, clean_env: pytest.MonkeyPatch
+    ) -> None:
+        """Multiple non-default knobs must all appear in the error."""
+        clean_env.setenv("EMBEDDING_PROVIDER", "gemini")
+        clean_env.setenv("EMBEDDING_MODEL_NAME", "text-embedding-004")
+        clean_env.setenv("EMBEDDING_DEVICE", "cuda")
+        clean_env.setenv("EMBEDDING_BATCH_SIZE", "128")
+        clean_env.setenv("EMBEDDING_IDLE_TIMEOUT_MINUTES", "5")
+        with pytest.raises(ValidationError) as exc_info:
+            EmbeddingSettings()
+        message = str(exc_info.value)
+        assert "device='cuda'" in message
+        assert "batch_size=128" in message
+        assert "idle_timeout_minutes=5" in message
+
+    def test_hosted_provider_with_all_defaults_passes(self, clean_env: pytest.MonkeyPatch) -> None:
+        """The guard only fires for *non-default* knobs."""
+        clean_env.setenv("EMBEDDING_PROVIDER", "openai")
+        clean_env.setenv("EMBEDDING_MODEL_NAME", "text-embedding-3-small")
+        # device/batch_size/idle_timeout_minutes all left at defaults.
+        s = EmbeddingSettings()
+        assert s.provider == "openai"
+
+
+@pytest.mark.security
+class TestEmbeddingSettingsCredentialHygiene:
+    """``EmbeddingSettings`` must never expose credential-shaped fields."""
+
+    def test_no_credential_fields(self, clean_env: pytest.MonkeyPatch) -> None:
+        # The same hint list the core-types security test uses — keep in
+        # sync so a future rename can only widen the guard.
+        bad = ("api_key", "secret", "password", "credential", "bearer", "auth_token")
+        for name in EmbeddingSettings.model_fields:
+            for hint in bad:
+                assert hint not in name.lower(), (
+                    f"EmbeddingSettings.{name} looks credential-bearing; "
+                    f"credentials must not live on settings."
+                )
 
 
 # ---------------------------------------------------------------------------

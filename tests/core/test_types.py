@@ -22,6 +22,7 @@ from sec_generative_search.core.types import (
     Citation,
     ContentType,
     ConversationTurn,
+    EmbedderStamp,
     FilingIdentifier,
     GenerationResult,
     IngestResult,
@@ -386,6 +387,81 @@ class TestProviderCapability:
 
 
 # ---------------------------------------------------------------------------
+# EmbedderStamp — digital seal on every ChromaDB collection
+# ---------------------------------------------------------------------------
+
+
+class TestEmbedderStamp:
+    def test_frozen(self) -> None:
+        stamp = EmbedderStamp(provider="openai", model="text-embedding-3-small", dimension=1536)
+        with pytest.raises(FrozenInstanceError):
+            stamp.provider = "anthropic"  # type: ignore[misc]
+
+    def test_to_metadata_keys_and_coercion(self) -> None:
+        stamp = EmbedderStamp(provider="openai", model="text-embedding-3-small", dimension=1536)
+        metadata = stamp.to_metadata()
+        assert metadata == {
+            "embedding_provider": "openai",
+            "embedding_model": "text-embedding-3-small",
+            "embedding_dimension": "1536",
+        }
+        # ChromaDB treats every metadata value as JSON; the dimension
+        # MUST be serialised as a string so backends do not disagree
+        # about integer representation.
+        assert isinstance(metadata["embedding_dimension"], str)
+
+    def test_round_trip(self) -> None:
+        stamp = EmbedderStamp(provider="local", model="google/embeddinggemma-300m", dimension=768)
+        assert EmbedderStamp.from_metadata(stamp.to_metadata()) == stamp
+
+    @pytest.mark.parametrize(
+        "missing_key",
+        ["embedding_provider", "embedding_model", "embedding_dimension"],
+    )
+    def test_from_metadata_rejects_missing_key(self, missing_key: str) -> None:
+        good = EmbedderStamp(
+            provider="openai", model="text-embedding-3-small", dimension=1536
+        ).to_metadata()
+        del good[missing_key]
+        with pytest.raises(ValueError, match="missing required key"):
+            EmbedderStamp.from_metadata(good)
+
+    def test_from_metadata_rejects_non_integer_dimension(self) -> None:
+        metadata = {
+            "embedding_provider": "openai",
+            "embedding_model": "text-embedding-3-small",
+            "embedding_dimension": "not-a-number",
+        }
+        with pytest.raises(ValueError, match="non-integer dimension"):
+            EmbedderStamp.from_metadata(metadata)
+
+    def test_from_metadata_rejects_non_positive_dimension(self) -> None:
+        metadata = EmbedderStamp(
+            provider="openai", model="text-embedding-3-small", dimension=1536
+        ).to_metadata()
+        metadata["embedding_dimension"] = "0"
+        with pytest.raises(ValueError, match="non-positive dimension"):
+            EmbedderStamp.from_metadata(metadata)
+
+    def test_from_metadata_rejects_non_string_provider(self) -> None:
+        metadata = {
+            "embedding_provider": 42,
+            "embedding_model": "text-embedding-3-small",
+            "embedding_dimension": "1536",
+        }
+        with pytest.raises(ValueError, match="non-string"):
+            EmbedderStamp.from_metadata(metadata)
+
+    def test_hashability(self) -> None:
+        """Frozen dataclasses hash by field values — useful for
+        deduping collection stamps across registries."""
+        a = EmbedderStamp(provider="openai", model="text-embedding-3-small", dimension=1536)
+        b = EmbedderStamp(provider="openai", model="text-embedding-3-small", dimension=1536)
+        assert hash(a) == hash(b)
+        assert {a, b} == {a}
+
+
+# ---------------------------------------------------------------------------
 # Security — no domain type may carry a credential
 # ---------------------------------------------------------------------------
 
@@ -427,6 +503,7 @@ class TestNoCredentialFieldsOnDomainTypes:
             ConversationTurn,
             ProviderCapability,
             IngestResult,
+            EmbedderStamp,
         ],
     )
     def test_no_secret_looking_fields(self, cls: type) -> None:
