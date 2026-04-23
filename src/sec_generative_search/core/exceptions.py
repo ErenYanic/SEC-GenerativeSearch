@@ -4,6 +4,11 @@ Custom exception hierarchy for SEC-GenerativeSearch.
 All exceptions inherit from SECGenerativeSearchError, allowing callers to catch
 all project-specific errors with a single except clause when desired.
 
+``EmbeddingCollectionMismatchError`` references :class:`EmbedderStamp` only in
+its signature; the ``TYPE_CHECKING`` guard keeps this module free of a runtime
+dependency on :mod:`core.types`, preserving the exceptions module's position
+low in the import graph.
+
 Exception hierarchy:
     SECGenerativeSearchError (base)
     ├── ConfigurationError — Invalid or missing configuration
@@ -12,7 +17,8 @@ Exception hierarchy:
     ├── ChunkingError — Text chunking failures
     ├── EmbeddingError — Embedding generation failures
     ├── DatabaseError — ChromaDB or SQLite failures
-    │   └── FilingLimitExceededError — Maximum filing count reached
+    │   ├── FilingLimitExceededError — Maximum filing count reached
+    │   └── EmbeddingCollectionMismatchError — Collection stamp disagrees with configured embedder
     ├── SearchError — Search operation failures
     ├── ProviderError — External LLM/embedding provider failures
     │   ├── ProviderAuthError — Invalid or expired API key
@@ -23,6 +29,13 @@ Exception hierarchy:
     ├── PromptError — Prompt template or injection-detection failures
     └── CitationError — Citation extraction or validation failures
 """
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from sec_generative_search.core.types import EmbedderStamp
 
 
 class SECGenerativeSearchError(Exception):
@@ -130,6 +143,57 @@ class FilingLimitExceededError(DatabaseError):
         message = (
             f"Filing limit exceeded: {current_count}/{max_filings} filings stored. "
             f"Remove existing filings or increase DB_MAX_FILINGS."
+        )
+        super().__init__(message, details)
+
+
+class EmbeddingCollectionMismatchError(DatabaseError):
+    """
+    Raised when a ChromaDB collection's embedder stamp disagrees with
+    the configured embedder.
+
+    The storage layer stamps every collection with its ``(provider,
+    model, dimension)`` triple at creation and verifies that the
+    configured embedder matches at every subsequent initialisation.  A
+    mismatch means the configured embedder would produce vectors that
+    are incompatible with the stored vectors — retrieval would silently
+    return garbage results, which is the failure mode this error exists
+    to prevent.
+
+    The ``hint`` text is deliberately a **single uniform string**
+    applicable across local, team, and cloud deployments — the storage
+    layer stays scenario-unaware.  The API lifespan hook is the only
+    place that is scenario-aware; it translates this exception into a
+    503 sentinel with a redacted body for team/cloud.
+
+    Attributes:
+        expected: The stamp the configured embedder would produce.
+        actual: The stamp read from the collection's metadata.
+        hint: Uniform operator guidance for all three deployment
+            profiles.
+    """
+
+    _UNIFORM_HINT = (
+        "Rebuild the collection with 'sec-rag manage reindex' so it matches the "
+        "configured embedder. In shared deployments an operator runs the same "
+        "command on the server; never point the application at a mismatched "
+        "collection — retrieval results would be silently wrong."
+    )
+
+    def __init__(
+        self,
+        expected: EmbedderStamp,
+        actual: EmbedderStamp,
+        details: str | None = None,
+    ) -> None:
+        self.expected = expected
+        self.actual = actual
+        self.hint = self._UNIFORM_HINT
+        message = (
+            f"Embedding collection stamp mismatch: expected "
+            f"({expected.provider}, {expected.model}, dim={expected.dimension}) "
+            f"but collection is stamped "
+            f"({actual.provider}, {actual.model}, dim={actual.dimension})."
         )
         super().__init__(message, details)
 

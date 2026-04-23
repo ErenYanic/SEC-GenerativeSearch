@@ -12,6 +12,7 @@ This module defines the domain objects used throughout the pipeline:
     - TokenUsage: Input/output token counts for a provider call or session
     - GenerationResult: Outcome of a RAG generation request with traceability
     - ConversationTurn: Session-scoped audit record of a query/answer pair
+    - EmbedderStamp: Digital seal linking a Chroma collection to its embedder
     - ProviderCapability: Feature matrix for an LLM/embedding provider-model pair
     - PricingTier: Coarse pricing classification for providers
 
@@ -489,6 +490,94 @@ class PricingTier(Enum):
     STANDARD = "standard"
     PREMIUM = "premium"
     UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class EmbedderStamp:
+    """
+    Digital seal stamped on a ChromaDB collection at creation time.
+
+    Records the exact ``(provider, model, dimension)`` triple that
+    produced the vectors stored in the collection.  The storage layer
+    reads the stamp at initialisation and refuses to serve traffic when
+    the configured embedder disagrees — running a retrieval against a
+    collection embedded by a different model silently returns garbage
+    results, which is the failure mode this stamp exists to prevent.
+
+    Frozen and credential-free by design; rendered to a small flat dict
+    via :meth:`to_metadata` for storage in the collection's metadata
+    (ChromaDB metadata values must be primitive JSON types, so the
+    integer dimension is serialised as a string).
+
+    Attributes:
+        provider: Registered provider key (e.g. ``"openai"``, ``"local"``).
+            Matches ``ProviderEntry.name`` on the embedding surface.
+        model: Model slug (e.g. ``"text-embedding-3-small"``,
+            ``"google/embeddinggemma-300m"``).
+        dimension: Vector dimension the model emits.  ChromaDB
+            collections are dimension-locked on creation, so a mismatch
+            here is a hard error, not a warning.
+    """
+
+    provider: str
+    model: str
+    dimension: int
+
+    _METADATA_PROVIDER_KEY = "embedding_provider"
+    _METADATA_MODEL_KEY = "embedding_model"
+    _METADATA_DIMENSION_KEY = "embedding_dimension"
+
+    def to_metadata(self) -> dict[str, str]:
+        """Render the stamp for ChromaDB collection metadata.
+
+        Three string-valued keys; ``dimension`` is coerced to ``str``
+        because ChromaDB persists metadata as JSON and round-tripping a
+        Python ``int`` through a foreign backend is one more invariant
+        than this project needs to own.
+        """
+        return {
+            self._METADATA_PROVIDER_KEY: self.provider,
+            self._METADATA_MODEL_KEY: self.model,
+            self._METADATA_DIMENSION_KEY: str(self.dimension),
+        }
+
+    @classmethod
+    def from_metadata(cls, metadata: dict[str, object]) -> "EmbedderStamp":
+        """Reconstruct a stamp from collection metadata.
+
+        Raises :class:`ValueError` when any of the three keys is missing
+        or when ``embedding_dimension`` does not parse as a positive
+        integer.  The storage layer treats a malformed stamp the same as
+        a missing one — either way, the collection is untrusted.
+        """
+        try:
+            provider = metadata[cls._METADATA_PROVIDER_KEY]
+            model = metadata[cls._METADATA_MODEL_KEY]
+            raw_dimension = metadata[cls._METADATA_DIMENSION_KEY]
+        except KeyError as missing:
+            raise ValueError(
+                f"EmbedderStamp metadata is missing required key {missing!s}. "
+                f"Collection was not stamped by this project; refuse to use it."
+            ) from None
+
+        if not isinstance(provider, str) or not isinstance(model, str):
+            raise ValueError(
+                "EmbedderStamp metadata has non-string provider/model; "
+                "collection metadata is corrupt."
+            )
+        try:
+            dimension = int(raw_dimension)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as cause:
+            raise ValueError(
+                f"EmbedderStamp metadata has non-integer dimension "
+                f"{raw_dimension!r}; collection metadata is corrupt."
+            ) from cause
+        if dimension <= 0:
+            raise ValueError(
+                f"EmbedderStamp metadata has non-positive dimension {dimension}; "
+                f"collection metadata is corrupt."
+            )
+        return cls(provider=provider, model=model, dimension=dimension)
 
 
 @dataclass(frozen=True)

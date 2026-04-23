@@ -18,7 +18,7 @@ OpenRouter slugs use the ``vendor/model`` form (e.g. ``openai/gpt-4o``,
 widely-available slug so omitting ``model`` on a request still reaches a
 live endpoint.
 
-Upstream-provider routing (Phase 5H):
+Upstream-provider routing:
 
 - OpenRouter accepts an optional ``provider`` block in the request body
   that pins, allowlists, or blocklists the upstream providers it routes
