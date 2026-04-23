@@ -112,7 +112,6 @@ line-length = 100
 extend-exclude = [
     "src/sec_generative_search/api",
     "src/sec_generative_search/cli",
-    "src/sec_generative_search/database",
     "src/sec_generative_search/search",
 ]
 
