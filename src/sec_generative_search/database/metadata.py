@@ -415,7 +415,9 @@ class MetadataRegistry:
             return set()
 
         placeholders = ", ".join("?" for _ in accession_numbers)
-        sql = f"SELECT accession_number FROM filings WHERE accession_number IN ({placeholders})"
+        # Only ``?`` placeholders are interpolated; values flow through
+        # sqlite3's parameter binding below. Safe against SQL injection.
+        sql = f"SELECT accession_number FROM filings WHERE accession_number IN ({placeholders})"  # noqa: S608
         try:
             with self._lock:
                 rows = self._conn.execute(sql, accession_numbers).fetchall()
@@ -615,7 +617,9 @@ class MetadataRegistry:
         for i in range(0, len(accession_numbers), chunk_size):
             batch = accession_numbers[i : i + chunk_size]
             placeholders = ", ".join("?" for _ in batch)
-            sql = f"DELETE FROM filings WHERE accession_number IN ({placeholders})"
+            # Only ``?`` placeholders are interpolated; values flow through
+            # sqlite3's parameter binding below. Safe against SQL injection.
+            sql = f"DELETE FROM filings WHERE accession_number IN ({placeholders})"  # noqa: S608
             try:
                 with self._lock, self._conn:
                     cursor = self._conn.execute(sql, batch)
@@ -718,7 +722,9 @@ class MetadataRegistry:
         for i in range(0, len(accession_numbers), chunk_size):
             batch = accession_numbers[i : i + chunk_size]
             placeholders = ", ".join("?" for _ in batch)
-            sql = f"SELECT * FROM filings WHERE accession_number IN ({placeholders})"
+            # Only ``?`` placeholders are interpolated; values flow through
+            # sqlite3's parameter binding below. Safe against SQL injection.
+            sql = f"SELECT * FROM filings WHERE accession_number IN ({placeholders})"  # noqa: S608
             try:
                 with self._lock:
                     rows = self._conn.execute(sql, batch).fetchall()
