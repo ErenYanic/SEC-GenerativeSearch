@@ -3,21 +3,25 @@ SQLite metadata registry for tracking ingested SEC filings.
 
 This module provides a lightweight relational layer for operations that
 ChromaDB does not handle well: duplicate detection, listing with filters,
-aggregation statistics, and filing limit enforcement.
+aggregation statistics, task-history persistence, and filing limit
+enforcement.
 
-When ``DB_ENCRYPTION_KEY`` is set, the module uses ``pysqlcipher3`` (a
-drop-in replacement for Python's ``sqlite3``) and issues ``PRAGMA key``
-immediately after opening the connection.  When the key is unset **or**
-``pysqlcipher3`` is not installed, standard ``sqlite3`` is used — this
-is the default for local development (Scenario A).
+When ``DB_ENCRYPTION_KEY`` (or ``DB_ENCRYPTION_KEY_FILE``) is set, the
+module uses ``pysqlcipher3`` (a drop-in replacement for Python's
+``sqlite3``) and issues ``PRAGMA key`` immediately after opening the
+connection.  When the key is unset **or** ``pysqlcipher3`` is not
+installed, standard ``sqlite3`` is used — this is the default for local
+development (Scenario A).
 
 Usage:
-    from sec_semantic_search.database import MetadataRegistry
+    from sec_generative_search.database import MetadataRegistry
 
     registry = MetadataRegistry()
     registry.register_filing(filing_id, chunk_count=59)
     filings = registry.list_filings(ticker="AAPL")
 """
+
+from __future__ import annotations
 
 import json
 import os
@@ -30,13 +34,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sec_semantic_search.config import get_settings
-from sec_semantic_search.core import (
-    DatabaseError,
-    FilingIdentifier,
-    FilingLimitExceededError,
-    get_logger,
+from sec_generative_search.config.settings import (
+    get_settings,
+    resolve_encryption_key_from_values,
 )
+from sec_generative_search.core.exceptions import (
+    DatabaseError,
+    FilingLimitExceededError,
+)
+from sec_generative_search.core.logging import get_logger
+from sec_generative_search.core.types import FilingIdentifier
 
 logger = get_logger(__name__)
 
@@ -57,7 +64,7 @@ def _get_sqlite_module(encryption_key: str | None) -> types.ModuleType:
         except ImportError:
             logger.warning(
                 "DB_ENCRYPTION_KEY is set but pysqlcipher3 is not installed. "
-                "Install it with: pip install sec-semantic-search[encryption]. "
+                "Install it with: uv pip install -e '.[encryption]'. "
                 "Falling back to unencrypted sqlite3."
             )
     return sqlite3
@@ -72,8 +79,6 @@ def _resolve_runtime_encryption_key(default_key: str | None) -> str | None:
     need the encryption key fields, so resolve them directly from the current
     process environment and fall back to the already-loaded settings value.
     """
-    from sec_semantic_search.config.settings import resolve_encryption_key_from_values
-
     env_key = os.environ.get("DB_ENCRYPTION_KEY")
     env_key_file = os.environ.get("DB_ENCRYPTION_KEY_FILE")
 
