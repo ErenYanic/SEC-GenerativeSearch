@@ -28,6 +28,7 @@ from sec_generative_search.core.types import (
     IngestResult,
     PricingTier,
     ProviderCapability,
+    ReindexReport,
     RetrievalResult,
     SearchResult,
     Segment,
@@ -504,6 +505,7 @@ class TestNoCredentialFieldsOnDomainTypes:
             ProviderCapability,
             IngestResult,
             EmbedderStamp,
+            ReindexReport,
         ],
     )
     def test_no_secret_looking_fields(self, cls: type) -> None:

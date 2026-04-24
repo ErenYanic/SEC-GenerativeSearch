@@ -218,8 +218,8 @@ class TestStoreFiling:
         """Default path writes ChromaDB *before* SQLite.
 
         Verified by recording the invocation order of both ``store_*``
-        methods — the test is the canonical check that Phase 6.7's
-        documented ordering is what runs on the wire.
+        methods — the test is the canonical check that the documented
+        ordering is what runs on the wire.
         """
         pf = _make_processed_filing(stamp)
         order: list[str] = []
@@ -605,8 +605,8 @@ class TestSecurity:
     ) -> None:
         """FilingStore must not grow credential-bearing attributes.
 
-        Mirrors the Phase 2 / 5A credential field-name checks.  Guards
-        against a future refactor that adds a secret-shaped
+        Mirrors the credential field-name checks used elsewhere.
+        Guards against a future refactor that adds a secret-shaped
         attribute.  ``_chroma`` and ``_registry`` are intentionally
         excluded — they are collaborators, not credential slots.
         """
