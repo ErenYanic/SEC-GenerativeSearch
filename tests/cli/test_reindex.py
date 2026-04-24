@@ -168,7 +168,7 @@ def patch_build_embedder(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     instantiating a provider directly.
     """
     calls: list[EmbeddingSettings] = []
-    
+
     def _stub(settings: EmbeddingSettings, *_: Any, **__: Any) -> _FakeEmbedder:
         calls.append(settings)
         return _FakeEmbedder(dimension=1536)  # matches openai text-embedding-3-small
@@ -548,7 +548,7 @@ class TestSecurity:
         includes settings or env values in the rendered confirmation /
         completion banner.
         """
-        secret = "sk-TEST-DO-NOT-LEAK-abcdef1234567890"
+        secret = "sk-TEST-DO-NOT-LEAK-abcdef1234567890"  # pragma: allowlist secret
         monkeypatch.setenv("OPENAI_API_KEY", secret)
 
         result = runner.invoke(
