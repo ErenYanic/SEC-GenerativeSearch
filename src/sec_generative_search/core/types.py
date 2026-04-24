@@ -581,6 +581,39 @@ class EmbedderStamp:
 
 
 @dataclass(frozen=True)
+class ReindexReport:
+    """
+    Audit record for a successful :class:`ReindexService.run` operation.
+
+    Carries the before/after stamps plus the total chunk count copied and
+    the wall-clock duration.  Frozen because a reindex is a one-shot,
+    non-idempotent administrative event — once reported, the record must
+    not be rewritten by a subsequent operation.  Credential-free by
+    design; the parametrised security test in ``tests/core/test_types.py``
+    picks it up automatically via the no-credential-field-name check.
+
+    Attributes:
+        source_stamp: The stamp present on the collection before the
+            reindex started, read from the collection's metadata and
+            preserved here for logging and operator-side verification.
+        target_stamp: The stamp that now seals the live collection — the
+            ``(provider, model, dimension)`` triple the new embeddings
+            were produced against.
+        chunks_copied: Number of chunks successfully re-embedded and
+            written into the new collection.  Matches the source
+            collection's count on success.
+        duration_seconds: Wall-clock duration of the reindex call.  Used
+            by operator-facing surfaces to surface progress and cost
+            attribution.
+    """
+
+    source_stamp: EmbedderStamp
+    target_stamp: EmbedderStamp
+    chunks_copied: int
+    duration_seconds: float
+
+
+@dataclass(frozen=True)
 class ProviderCapability:
     """
     Feature matrix for a concrete provider + model pair.

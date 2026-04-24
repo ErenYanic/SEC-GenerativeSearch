@@ -454,7 +454,7 @@ class TestPersistentConnection:
 
 
 # ---------------------------------------------------------------------------
-# Task history persistence (Phase 6.6 — also referenced by Phase 11)
+# Task history persistence and privacy controls
 # ---------------------------------------------------------------------------
 
 
