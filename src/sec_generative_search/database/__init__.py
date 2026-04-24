@@ -7,11 +7,13 @@ from sec_generative_search.database.metadata import (
     MetadataRegistry,
     TickerStatistics,
 )
+from sec_generative_search.database.store import FilingStore
 
 __all__ = [
     "ChromaDBClient",
     "DatabaseStatistics",
     "FilingRecord",
+    "FilingStore",
     "MetadataRegistry",
     "TickerStatistics",
 ]
