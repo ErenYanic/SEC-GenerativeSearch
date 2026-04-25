@@ -136,7 +136,7 @@ class ZaiProvider(OpenAICompatibleLLMProvider):
                 prompt_caching=True,
                 context_window_tokens=128_000,
                 max_output_tokens=96_000,
-                pricing_tier=PricingTier.HIGH,  # Not a typo; this tier is more expensive than the standard-tier 4.5 and 4.6 models
+                pricing_tier=PricingTier.HIGH,
             ),
         ),
         "glm-4.5-air": ModelInfo(
