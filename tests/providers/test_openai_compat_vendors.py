@@ -98,7 +98,7 @@ _LLM_VENDORS: list[tuple[type, str, str, str]] = [
         MistralProvider,
         "mistral",
         "https://api.mistral.ai/v1",
-        "ministral-3b-2512",
+        "mistral-small-2603",
     ),
     (
         KimiProvider,
@@ -109,14 +109,14 @@ _LLM_VENDORS: list[tuple[type, str, str, str]] = [
     (
         DeepSeekProvider,
         "deepseek",
-        "https://api.deepseek.com/v1",
-        "deepseek-chat",
+        "https://api.deepseek.com",
+        "deepseek-v4-flash",
     ),
     (
         QwenProvider,
         "qwen",
         "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-        "qwen3.5-flash",
+        "qwen3.5-plus",
     ),
     (
         ZaiProvider,
@@ -134,19 +134,19 @@ _LLM_VENDORS: list[tuple[type, str, str, str]] = [
         MiniMaxProvider,
         "minimax",
         "https://api.minimax.io/v1",
-        "MiniMax-M2.5",
+        "minimax-m2.7",
     ),
     (
         MimoProvider,
         "mimo",
         "https://api.xiaomimimo.com/v1",
-        "MiMo-V2-Pro",
+        "mimo-v2.5-pro",
     ),
     (
         OpenRouterProvider,
         "openrouter",
         "https://openrouter.ai/api/v1",
-        "openai/gpt-5.4-mini",
+        "qwen/qwen3.6-plus",
     ),
 ]
 
@@ -156,13 +156,13 @@ _LLM_VENDORS: list[tuple[type, str, str, str]] = [
 # ``pytest.skip`` branch for the meta-provider.
 _LLM_VENDORS_WITH_CATALOGUE: list[tuple[type, str]] = [
     (MistralProvider, "mistral-large-2512"),
-    (KimiProvider, "kimi-k2"),
-    (DeepSeekProvider, "deepseek-reasoner"),
+    (KimiProvider, "kimi-k2.6"),
+    (DeepSeekProvider, "deepseek-v4-pro"),
     (QwenProvider, "qwen3-max"),
     (ZaiProvider, "glm-5"),
     (GrokProvider, "grok-4.20-0309-reasoning"),
-    (MiniMaxProvider, "MiniMax-M2"),
-    (MimoProvider, "MiMo-V2-Flash"),
+    (MiniMaxProvider, "minimax-m2"),
+    (MimoProvider, "mimo-v2-flash"),
 ]
 
 

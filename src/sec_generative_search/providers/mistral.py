@@ -33,7 +33,7 @@ class MistralProvider(OpenAICompatibleLLMProvider):
 
     provider_name = "mistral"
     default_base_url = "https://api.mistral.ai/v1"
-    default_model = "ministral-small-2603"
+    default_model = "mistral-small-2603"
 
     MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
         "magistral-medium-2509": ModelInfo(
