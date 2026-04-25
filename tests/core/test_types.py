@@ -22,7 +22,9 @@ from sec_generative_search.core.types import (
     Citation,
     ContentType,
     ConversationTurn,
+    DeploymentProfile,
     EmbedderStamp,
+    EvictionReport,
     FilingIdentifier,
     GenerationResult,
     IngestResult,
@@ -366,6 +368,7 @@ class TestProviderCapability:
             "free",
             "low",
             "standard",
+            "high",
             "premium",
             "unknown",
         }
@@ -463,6 +466,60 @@ class TestEmbedderStamp:
 
 
 # ---------------------------------------------------------------------------
+# Deployment profile + eviction report (Phase 6.11)
+# ---------------------------------------------------------------------------
+
+
+class TestDeploymentProfile:
+    """``DeploymentProfile`` is a ``StrEnum`` so its values double as
+    settings strings and JSON / log-friendly identifiers without an
+    extra ``.value`` access on every read.
+    """
+
+    def test_string_values(self) -> None:
+        assert DeploymentProfile.LOCAL == "local"
+        assert DeploymentProfile.TEAM == "team"
+        assert DeploymentProfile.CLOUD == "cloud"
+
+    def test_membership(self) -> None:
+        valid = {profile.value for profile in DeploymentProfile}
+        assert valid == {"local", "team", "cloud"}
+
+
+class TestEvictionReport:
+    """Audit shape returned by :meth:`FilingStore.evict_expired`."""
+
+    def test_basic_construction(self) -> None:
+        report = EvictionReport(
+            filings_evicted=4,
+            chunks_evicted=237,
+            max_age_days=90,
+        )
+        assert report.filings_evicted == 4
+        assert report.chunks_evicted == 237
+        assert report.max_age_days == 90
+
+    def test_frozen(self) -> None:
+        report = EvictionReport(
+            filings_evicted=0,
+            chunks_evicted=0,
+            max_age_days=30,
+        )
+        with pytest.raises(FrozenInstanceError):
+            report.filings_evicted = 99  # type: ignore[misc]
+
+    def test_zero_eviction_is_a_valid_report(self) -> None:
+        """A successful sweep that found nothing returns this shape;
+        it must not be confused with a failure (no exception is raised)."""
+        report = EvictionReport(
+            filings_evicted=0,
+            chunks_evicted=0,
+            max_age_days=7,
+        )
+        assert report.filings_evicted == 0
+
+
+# ---------------------------------------------------------------------------
 # Security — no domain type may carry a credential
 # ---------------------------------------------------------------------------
 
@@ -506,6 +563,7 @@ class TestNoCredentialFieldsOnDomainTypes:
             IngestResult,
             EmbedderStamp,
             ReindexReport,
+            EvictionReport,
         ],
     )
     def test_no_secret_looking_fields(self, cls: type) -> None:
