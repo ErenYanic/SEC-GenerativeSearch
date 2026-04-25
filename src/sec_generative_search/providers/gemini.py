@@ -271,7 +271,7 @@ class GeminiProvider(_GeminiClientMixin, BaseLLMProvider):
                 vision=True,
                 context_window_tokens=1_048_576,
                 max_output_tokens=65_536,
-                pricing_tier=PricingTier.LOW,
+                pricing_tier=PricingTier.STANDARD,
             ),
         ),
         "gemini-2.5-pro": ModelInfo(
@@ -310,20 +310,7 @@ class GeminiProvider(_GeminiClientMixin, BaseLLMProvider):
                 vision=True,
                 context_window_tokens=1_048_576,
                 max_output_tokens=65_536,
-                pricing_tier=PricingTier.LOW,
-            ),
-        ),
-        "gemini-2.0-flash": ModelInfo(
-            capability=ProviderCapability(
-                chat=True,
-                streaming=True,
-                tool_use=True,
-                structured_output=True,
-                prompt_caching=True,
-                vision=True,
-                context_window_tokens=1_048_576,
-                max_output_tokens=8_192,
-                pricing_tier=PricingTier.LOW,
+                pricing_tier=PricingTier.STANDARD,
             ),
         ),
     }

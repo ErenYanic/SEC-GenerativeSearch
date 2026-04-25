@@ -140,7 +140,7 @@ class OpenRouterProvider(OpenAICompatibleLLMProvider):
 
     provider_name = "openrouter"
     default_base_url = "https://openrouter.ai/api/v1"
-    default_model = "openai/gpt-5.4-mini"
+    default_model = "qwen/qwen3.6-plus"
 
     # Intentionally empty — see module docstring.  The base class
     # :meth:`get_capabilities` returns a permissive default for any slug

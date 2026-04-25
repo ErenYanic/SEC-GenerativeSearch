@@ -23,32 +23,32 @@ class DeepSeekProvider(OpenAICompatibleLLMProvider):
     """Chat-completion provider targeting DeepSeek's hosted models."""
 
     provider_name = "deepseek"
-    default_base_url = "https://api.deepseek.com/v1"
-    default_model = "deepseek-chat"
+    default_base_url = "https://api.deepseek.com"
+    default_model = "deepseek-v4-flash"
 
     MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
-        "deepseek-chat": ModelInfo(
+        "deepseek-v4-flash": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
                 streaming=True,
                 tool_use=True,
                 structured_output=True,
                 prompt_caching=True,
-                context_window_tokens=128_000,
-                max_output_tokens=8_192,
-                pricing_tier=PricingTier.STANDARD,
+                context_window_tokens=1_000_000,
+                max_output_tokens=384_000,
+                pricing_tier=PricingTier.LOW,
             ),
         ),
-        "deepseek-reasoner": ModelInfo(
+        "deepseek-v4-pro": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
                 streaming=True,
                 tool_use=False,
                 structured_output=False,
                 prompt_caching=True,
-                context_window_tokens=128_000,
-                max_output_tokens=65_536,
-                pricing_tier=PricingTier.PREMIUM,
+                context_window_tokens=1_000_000,
+                max_output_tokens=384_000,
+                pricing_tier=PricingTier.STANDARD,
             ),
         ),
     }

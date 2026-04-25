@@ -33,19 +33,43 @@ class MistralProvider(OpenAICompatibleLLMProvider):
 
     provider_name = "mistral"
     default_base_url = "https://api.mistral.ai/v1"
-    default_model = "ministral-3b-2512"
+    default_model = "ministral-small-2603"
 
     MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
+        "magistral-medium-2509": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                context_window_tokens=128_000,
+                max_output_tokens=128_000,
+                pricing_tier=PricingTier.HIGH,
+            ),
+        ),
+        "magistral-small-2509": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                context_window_tokens=128_000,
+                max_output_tokens=128_000,
+                pricing_tier=PricingTier.LOW,
+            ),
+        ),
         "mistral-large-2512": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
                 streaming=True,
                 tool_use=True,
                 structured_output=True,
-                prompt_caching=False,
+                prompt_caching=True,
                 context_window_tokens=256_000,
-                max_output_tokens=32_000,
-                pricing_tier=PricingTier.PREMIUM,
+                max_output_tokens=256_000,
+                pricing_tier=PricingTier.LOW,
             ),
         ),
         "mistral-medium-2508": ModelInfo(
@@ -54,9 +78,9 @@ class MistralProvider(OpenAICompatibleLLMProvider):
                 streaming=True,
                 tool_use=True,
                 structured_output=True,
-                prompt_caching=False,
+                prompt_caching=True,
                 context_window_tokens=128_000,
-                max_output_tokens=32_000,
+                max_output_tokens=128_000,
                 pricing_tier=PricingTier.STANDARD,
             ),
         ),
@@ -66,9 +90,45 @@ class MistralProvider(OpenAICompatibleLLMProvider):
                 streaming=True,
                 tool_use=True,
                 structured_output=True,
-                prompt_caching=False,
+                prompt_caching=True,
                 context_window_tokens=256_000,
-                max_output_tokens=32_000,
+                max_output_tokens=256_000,
+                pricing_tier=PricingTier.LOW,
+            ),
+        ),
+        "mistral-small-2506": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                context_window_tokens=256_000,
+                max_output_tokens=256_000,
+                pricing_tier=PricingTier.LOW,
+            ),
+        ),
+        "ministral-14b-2512": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                context_window_tokens=256_000,
+                max_output_tokens=256_000,
+                pricing_tier=PricingTier.LOW,
+            ),
+        ),
+        "ministral-8b-2512": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                context_window_tokens=256_000,
+                max_output_tokens=256_000,
                 pricing_tier=PricingTier.LOW,
             ),
         ),
@@ -78,21 +138,33 @@ class MistralProvider(OpenAICompatibleLLMProvider):
                 streaming=True,
                 tool_use=True,
                 structured_output=True,
-                prompt_caching=False,
+                prompt_caching=True,
                 context_window_tokens=256_000,
-                max_output_tokens=32_000,
+                max_output_tokens=256_000,
                 pricing_tier=PricingTier.LOW,
             ),
         ),
-        "codestral-latest": ModelInfo(
+        "codestral-2508": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
                 streaming=True,
                 tool_use=True,
                 structured_output=True,
-                prompt_caching=False,
+                prompt_caching=True,
+                context_window_tokens=128_000,
+                max_output_tokens=128_000,
+                pricing_tier=PricingTier.LOW,
+            ),
+        ),
+        "devstral-2512": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
                 context_window_tokens=256_000,
-                max_output_tokens=32_000,
+                max_output_tokens=256_000,
                 pricing_tier=PricingTier.STANDARD,
             ),
         ),

@@ -36,57 +36,93 @@ class MiniMaxProvider(OpenAICompatibleLLMProvider):
 
     provider_name = "minimax"
     default_base_url = "https://api.minimax.io/v1"
-    default_model = "MiniMax-M2.5"
+    default_model = "minimax-m2.7"
 
     # MiniMax slugs preserve the vendor's published casing
-    # (``MiniMax-M2.7`` rather than a normalised lower-case form) —
+    # (``minimax-m2.7`` rather than a normalised lower-case form) —
     # the API is case-sensitive and rejects renamed aliases.
     MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
-        "MiniMax-M2.7": ModelInfo(
+        "minimax-m2.7": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
                 streaming=True,
                 tool_use=True,
                 structured_output=True,
-                prompt_caching=False,
+                prompt_caching=True,
                 context_window_tokens=204_800,
-                max_output_tokens=131_072,
-                pricing_tier=PricingTier.PREMIUM,
+                max_output_tokens=204_800,
+                pricing_tier=PricingTier.LOW,
             ),
         ),
-        "MiniMax-M2.7-highspeed": ModelInfo(
+        "minimax-m2.7-highspeed": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
                 streaming=True,
                 tool_use=True,
                 structured_output=True,
-                prompt_caching=False,
+                prompt_caching=True,
                 context_window_tokens=204_800,
-                max_output_tokens=131_072,
+                max_output_tokens=204_800,
                 pricing_tier=PricingTier.STANDARD,
             ),
         ),
-        "MiniMax-M2.5": ModelInfo(
+        "minimax-m2.5": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
                 streaming=True,
                 tool_use=True,
                 structured_output=True,
-                prompt_caching=False,
+                prompt_caching=True,
                 context_window_tokens=204_800,
-                max_output_tokens=131_072,
+                max_output_tokens=204_800,
+                pricing_tier=PricingTier.LOW,
+            ),
+        ),
+        "minimax-m2.5-highspeed": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                context_window_tokens=204_800,
+                max_output_tokens=204_800,
                 pricing_tier=PricingTier.STANDARD,
             ),
         ),
-        "MiniMax-M2": ModelInfo(
+        "minimax-m2.1": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
                 streaming=True,
                 tool_use=True,
                 structured_output=True,
-                prompt_caching=False,
+                prompt_caching=True,
                 context_window_tokens=204_800,
-                max_output_tokens=131_072,
+                max_output_tokens=204_800,
+                pricing_tier=PricingTier.LOW,
+            ),
+        ),
+        "minimax-m2.1-highspeed": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                context_window_tokens=204_800,
+                max_output_tokens=204_800,
+                pricing_tier=PricingTier.STANDARD,
+            ),
+        ),
+        "minimax-m2": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                context_window_tokens=204_800,
+                max_output_tokens=204_800,
                 pricing_tier=PricingTier.LOW,
             ),
         ),
