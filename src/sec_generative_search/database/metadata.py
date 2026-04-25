@@ -44,6 +44,10 @@ from sec_generative_search.core.exceptions import (
 )
 from sec_generative_search.core.logging import get_logger
 from sec_generative_search.core.types import FilingIdentifier
+from sec_generative_search.database.migrations import (
+    apply_pending_migrations,
+    bootstrap_schema_version,
+)
 
 logger = get_logger(__name__)
 
@@ -290,8 +294,11 @@ class MetadataRegistry:
         self._db_error = self._sqlite_module.Error
         self._db_integrity_error = self._sqlite_module.IntegrityError
 
-        # Create table on init (idempotent)
-        self._create_table()
+        # Bootstrap schema_version, run unapplied migrations, then create
+        # the v1 tables idempotently.  All three steps share one lock
+        # acquisition and one transaction so a crash partway through
+        # never leaves a half-stamped database.
+        self._initialise_schema()
 
         logger.debug(
             "MetadataRegistry initialised: %s (encrypted=%s)",
@@ -309,8 +316,19 @@ class MetadataRegistry:
         """Whether the database connection is using SQLCipher encryption."""
         return self._encrypted
 
-    def _create_table(self) -> None:
-        """Create the filings and task_history tables if they do not exist."""
+    def _initialise_schema(self) -> None:
+        """Bootstrap the schema-version table, run migrations, create tables.
+
+        Bootstrap, migration loop, and idempotent ``CREATE TABLE`` all
+        share a single lock acquisition and a single transaction so a
+        crash partway through never leaves the database at a
+        half-stamped version.
+
+        :class:`DatabaseError` raised by the bootstrap (a malformed
+        unstamped database) propagates directly; driver-level errors
+        from the table-creation block are wrapped in
+        :class:`DatabaseError` so callers see a consistent surface.
+        """
         filings_sql = """
             CREATE TABLE IF NOT EXISTS filings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -344,12 +362,19 @@ class MetadataRegistry:
         """
         try:
             with self._lock, self._conn:
+                bootstrap_schema_version(self._conn)
+                apply_pending_migrations(self._conn)
                 self._conn.execute(filings_sql)
                 self._conn.execute(index_sql)
                 self._conn.execute(task_history_sql)
+        except DatabaseError:
+            # Bootstrap or migration apply already produced an actionable
+            # message.  Re-raise verbatim — wrapping would shadow the
+            # operator hint.
+            raise
         except self._db_error as e:
             raise DatabaseError(
-                "Failed to create metadata tables",
+                "Failed to initialise metadata schema",
                 details=str(e),
             ) from e
 
