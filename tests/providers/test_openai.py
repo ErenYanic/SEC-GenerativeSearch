@@ -90,7 +90,7 @@ class TestProviderMetadata:
 
     def test_pricing_tiers_set(self) -> None:
         assert OpenAIProvider.MODEL_CATALOGUE["gpt-5.4-mini"].capability.pricing_tier == (
-            PricingTier.LOW
+            PricingTier.STANDARD
         )
         assert OpenAIProvider.MODEL_CATALOGUE["gpt-5.4"].capability.pricing_tier == (
             PricingTier.PREMIUM
@@ -100,6 +100,9 @@ class TestProviderMetadata:
         )
         assert OpenAIProvider.MODEL_CATALOGUE["gpt-5.4-pro"].capability.pricing_tier == (
             PricingTier.PREMIUM
+        )
+        assert OpenAIProvider.MODEL_CATALOGUE["gpt-4.1"].capability.pricing_tier == (
+            PricingTier.HIGH
         )
 
 

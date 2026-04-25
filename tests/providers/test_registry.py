@@ -451,7 +451,7 @@ class TestGetCapability:
         assert cap == OpenAIProvider.MODEL_CATALOGUE["gpt-4o"].capability
         assert cap.chat is True
         assert cap.streaming is True
-        assert cap.pricing_tier == PricingTier.STANDARD
+        assert cap.pricing_tier == PricingTier.PREMIUM
 
     def test_unknown_llm_slug_returns_permissive_default(self) -> None:
         cap = ProviderRegistry.get_capability("openai", ProviderSurface.LLM, "gpt-future-x")

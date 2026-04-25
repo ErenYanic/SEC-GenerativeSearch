@@ -194,9 +194,10 @@ class TestProviderMetadata:
         assert cat["gemini-3.1-pro-preview"].capability.pricing_tier == PricingTier.PREMIUM
         assert cat["gemini-3.1-pro-preview-customtools"].capability.tool_use is True
         assert cat["gemini-3.1-flash-lite-preview"].capability.pricing_tier == PricingTier.LOW
-        assert cat["gemini-3-flash-preview"].capability.pricing_tier == PricingTier.LOW
+        assert cat["gemini-3-flash-preview"].capability.pricing_tier == PricingTier.STANDARD
         assert cat["gemini-2.5-pro"].capability.pricing_tier == PricingTier.PREMIUM
         assert cat["gemini-2.5-flash-lite"].capability.pricing_tier == PricingTier.LOW
+        assert cat["gemini-2.5-flash"].capability.pricing_tier == PricingTier.STANDARD
 
     def test_embedding_dimensions(self) -> None:
         assert GeminiEmbeddingProvider.MODEL_DIMENSIONS["gemini-embedding-2-preview"] == 3072
