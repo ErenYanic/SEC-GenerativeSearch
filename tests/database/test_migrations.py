@@ -179,10 +179,7 @@ class TestBootstrapBrandNew:
     def test_no_migration_body_run(self, tmp_db_path: str) -> None:
         """v1 is the baseline — nothing in :data:`MIGRATIONS` to execute.
 
-        Asserting on ``MIGRATIONS == ()`` is the v1-phase shape of "no
-        body run".  When v2 lands, this test will need an injected-fake
-        body that records its execution; for v1 the empty tuple is the
-        contract.
+        The empty tuple is the contract for "no body run".
         """
         assert MIGRATIONS == ()
 

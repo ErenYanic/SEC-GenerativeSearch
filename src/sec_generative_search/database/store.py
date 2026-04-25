@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING
 
 from sec_generative_search.core.exceptions import DatabaseError
 from sec_generative_search.core.logging import get_logger
+from sec_generative_search.core.types import EvictionReport
 
 if TYPE_CHECKING:
     from sec_generative_search.database.client import ChromaDBClient
@@ -274,6 +275,74 @@ class FilingStore:
         chunks_removed = self._chroma.clear_collection()
         filings_removed = self._registry.clear_all()
         return chunks_removed, filings_removed
+
+    def evict_expired(self, max_age_days: int) -> EvictionReport:
+        """Drop filings older than the cutoff from both stores.
+
+        Composes :meth:`MetadataRegistry.list_expired_filings` (read)
+        with :meth:`delete_filings_batch` (write), so all of the
+        existing ChromaDB-first ordering and rollback semantics are
+        inherited verbatim — a ChromaDB failure leaves the SQLite rows
+        untouched and the caller can retry idempotently.
+
+        Empty-list short-circuits without touching either store and
+        returns a zero report (success, nothing to evict).  This is
+        the expected hot path on a healthy retention sweep.
+
+        Args:
+            max_age_days: Cutoff age in days; must be strictly
+                positive.  Forwarded to
+                :meth:`MetadataRegistry.list_expired_filings`, which
+                rejects ``<= 0`` with :class:`ValueError` — eviction
+                is disabled at the *settings* layer (set
+                ``DB_RETENTION_MAX_AGE_DAYS=0``), not by passing zero
+                here.
+
+        Returns:
+            :class:`EvictionReport` carrying the filing count, chunk
+            count (summed from the registry's ``chunk_count`` column
+            for the listed filings), and the cutoff applied.
+
+        Raises:
+            ValueError: ``max_age_days <= 0``.
+            DatabaseError: Either store failed during the batched delete.
+        """
+        expired = self._registry.list_expired_filings(max_age_days)
+        if not expired:
+            return EvictionReport(
+                filings_evicted=0,
+                chunks_evicted=0,
+                max_age_days=max_age_days,
+            )
+
+        accessions = [record.accession_number for record in expired]
+        chunks_total = sum(record.chunk_count for record in expired)
+
+        filings_removed = self.delete_filings_batch(accessions)
+
+        if filings_removed != len(accessions):
+            # Defensive: registry listed N rows, but the delete removed
+            # M (M != N).  The most plausible cause is a parallel evictor
+            # racing on the same cutoff; log and report what was actually
+            # removed so an operator can correlate against another job.
+            logger.warning(
+                "Eviction count mismatch: listed %d filings, removed %d "
+                "(concurrent eviction or external delete?)",
+                len(accessions),
+                filings_removed,
+            )
+
+        logger.info(
+            "Evicted %d filing(s) older than %d days (%d chunk(s))",
+            filings_removed,
+            max_age_days,
+            chunks_total,
+        )
+        return EvictionReport(
+            filings_evicted=filings_removed,
+            chunks_evicted=chunks_total,
+            max_age_days=max_age_days,
+        )
 
     # ------------------------------------------------------------------
     # Internal rollback helpers

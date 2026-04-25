@@ -25,6 +25,7 @@ from sec_generative_search.core.types import (
     Chunk,
     ContentType,
     EmbedderStamp,
+    EvictionReport,
     FilingIdentifier,
     IngestResult,
 )
@@ -545,6 +546,184 @@ class TestClearAll:
         pf = _filing_with_suffix(stamp, "111")
         store.store_filing(pf)
         assert chroma.collection_count() == 2
+
+
+# ---------------------------------------------------------------------------
+# Eviction
+# ---------------------------------------------------------------------------
+
+
+def _backdate_filing(registry: MetadataRegistry, accession: str, days: int) -> None:
+    """Rewrite ``ingested_at`` so a registered filing reads as ``days`` old.
+
+    Mirrors the helper used in :mod:`tests.database.test_metadata`; we
+    duplicate it here rather than cross-importing because the test
+    packages avoid sharing private helpers.
+    """
+    sql = (
+        "UPDATE filings SET ingested_at = datetime('now', '-' || ? || ' days') "
+        "WHERE accession_number = ?"
+    )
+    with registry._lock, registry._conn:
+        registry._conn.execute(sql, (days, accession))
+
+
+class TestEvictExpired:
+    """``FilingStore.evict_expired`` composes the registry's expired-list
+    reader with the existing batched delete; ChromaDB-first ordering
+    and rollback semantics are inherited from ``delete_filings_batch``.
+    """
+
+    def test_empty_registry_returns_zero_report(
+        self,
+        store: FilingStore,
+        chroma: ChromaDBClient,
+        registry: MetadataRegistry,
+    ) -> None:
+        report = store.evict_expired(max_age_days=30)
+        assert isinstance(report, EvictionReport)
+        assert report.filings_evicted == 0
+        assert report.chunks_evicted == 0
+        assert report.max_age_days == 30
+        # Empty-list short-circuit must not have touched either store.
+        assert chroma.collection_count() == 0
+        assert registry.count() == 0
+
+    def test_nothing_expired_short_circuits(
+        self,
+        store: FilingStore,
+        chroma: ChromaDBClient,
+        registry: MetadataRegistry,
+        stamp: EmbedderStamp,
+    ) -> None:
+        pf = _filing_with_suffix(stamp, "077")
+        store.store_filing(pf)
+
+        report = store.evict_expired(max_age_days=30)
+        assert report.filings_evicted == 0
+        assert report.chunks_evicted == 0
+        # The fresh filing is untouched.
+        assert chroma.collection_count() == 2
+        assert registry.count() == 1
+
+    def test_expired_rows_removed_from_both_stores(
+        self,
+        store: FilingStore,
+        chroma: ChromaDBClient,
+        registry: MetadataRegistry,
+        stamp: EmbedderStamp,
+    ) -> None:
+        pf_old = _filing_with_suffix(stamp, "077")
+        pf_fresh = _filing_with_suffix(stamp, "088")
+        store.store_filing(pf_old)
+        store.store_filing(pf_fresh)
+        _backdate_filing(registry, pf_old.filing_id.accession_number, days=120)
+
+        report = store.evict_expired(max_age_days=90)
+        assert report.filings_evicted == 1
+        # Each fixture filing has 2 chunks (the helper default).
+        assert report.chunks_evicted == 2
+        assert report.max_age_days == 90
+
+        # Fresh filing survives both stores.
+        assert chroma.collection_count() == 2
+        assert registry.count() == 1
+        assert registry.is_duplicate(pf_fresh.filing_id.accession_number) is True
+        assert registry.is_duplicate(pf_old.filing_id.accession_number) is False
+
+    def test_chroma_failure_leaves_sqlite_untouched(
+        self,
+        store: FilingStore,
+        chroma: ChromaDBClient,
+        registry: MetadataRegistry,
+        stamp: EmbedderStamp,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Eviction inherits the ChromaDB-first delete contract — a
+        Chroma failure must leave the SQLite rows intact so the caller
+        can retry idempotently."""
+        pf = _filing_with_suffix(stamp, "077")
+        store.store_filing(pf)
+        _backdate_filing(registry, pf.filing_id.accession_number, days=120)
+
+        def _raise(*args: Any, **kwargs: Any) -> None:
+            raise DatabaseError("simulated ChromaDB failure")
+
+        monkeypatch.setattr(chroma, "delete_filings_batch", _raise)
+
+        with pytest.raises(DatabaseError):
+            store.evict_expired(max_age_days=90)
+
+        assert registry.count() == 1
+
+    def test_chroma_first_ordering(
+        self,
+        store: FilingStore,
+        chroma: ChromaDBClient,
+        registry: MetadataRegistry,
+        stamp: EmbedderStamp,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        pf = _filing_with_suffix(stamp, "077")
+        store.store_filing(pf)
+        _backdate_filing(registry, pf.filing_id.accession_number, days=120)
+
+        order: list[str] = []
+        real_chroma_delete = chroma.delete_filings_batch
+        real_registry_remove = registry.remove_filings_batch
+
+        def _chroma_spy(accs: list[str]) -> None:
+            order.append("chroma")
+            real_chroma_delete(accs)
+
+        def _registry_spy(accs: list[str]) -> int:
+            order.append("sqlite")
+            return real_registry_remove(accs)
+
+        monkeypatch.setattr(chroma, "delete_filings_batch", _chroma_spy)
+        monkeypatch.setattr(registry, "remove_filings_batch", _registry_spy)
+
+        store.evict_expired(max_age_days=90)
+        assert order == ["chroma", "sqlite"]
+
+    def test_chunks_summed_from_listed_records(
+        self,
+        store: FilingStore,
+        registry: MetadataRegistry,
+        stamp: EmbedderStamp,
+    ) -> None:
+        """``EvictionReport.chunks_evicted`` aggregates the registry's
+        ``chunk_count`` column for every listed filing."""
+        pf_a = _filing_with_suffix(stamp, "077")
+        pf_b = _filing_with_suffix(stamp, "088")
+        store.store_filing(pf_a)
+        store.store_filing(pf_b)
+        _backdate_filing(registry, pf_a.filing_id.accession_number, days=120)
+        _backdate_filing(registry, pf_b.filing_id.accession_number, days=200)
+
+        report = store.evict_expired(max_age_days=90)
+        # Each fixture has 2 chunks.
+        assert report.filings_evicted == 2
+        assert report.chunks_evicted == 4
+
+    @pytest.mark.security
+    def test_zero_cutoff_rejected_via_registry(
+        self,
+        store: FilingStore,
+    ) -> None:
+        """The registry primitive rejects non-positive cutoffs;
+        ``FilingStore`` must propagate that error verbatim so the
+        defence-in-depth contract holds at every layer."""
+        with pytest.raises(ValueError, match="must be positive"):
+            store.evict_expired(max_age_days=0)
+
+    @pytest.mark.security
+    def test_negative_cutoff_rejected_via_registry(
+        self,
+        store: FilingStore,
+    ) -> None:
+        with pytest.raises(ValueError, match="must be positive"):
+            store.evict_expired(max_age_days=-30)
 
 
 # ---------------------------------------------------------------------------

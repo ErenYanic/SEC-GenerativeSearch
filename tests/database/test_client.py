@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import chromadb
 import numpy as np
@@ -448,11 +449,18 @@ class TestClearCollection:
 
 
 # ---------------------------------------------------------------------------
-# Migration flag preserved from SEC-SemanticSearch
+# Migration flag preserved
 # ---------------------------------------------------------------------------
 
 
 class TestMigrationFlag:
+    """``_MIGRATION_FLAG`` keeps the ``filing_date_int`` backfill O(1)
+    after the first scan.  These tests are tagged ``@pytest.mark.security``
+    because the flag is the load-bearing seal that prevents the migration
+    from re-running on every startup; drift here means latent
+    data-touching work on a hot path."""
+
+    @pytest.mark.security
     def test_migration_flag_set_on_fresh_collection(
         self, chroma_path: str, openai_stamp: EmbedderStamp
     ) -> None:
@@ -460,6 +468,7 @@ class TestMigrationFlag:
         meta = client._collection.metadata or {}
         assert meta.get(ChromaDBClient._MIGRATION_FLAG) is True
 
+    @pytest.mark.security
     def test_migration_is_o1_after_first_run(
         self, chroma_path: str, openai_stamp: EmbedderStamp
     ) -> None:
@@ -469,6 +478,48 @@ class TestMigrationFlag:
         second = ChromaDBClient(openai_stamp, chroma_path=chroma_path)
         meta = second._collection.metadata or {}
         assert meta.get(ChromaDBClient._MIGRATION_FLAG) is True
+
+    @pytest.mark.security
+    def test_migration_short_circuits_on_stamped_open(
+        self,
+        chroma_path: str,
+        openai_stamp: EmbedderStamp,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A second open with the flag already set must not execute the
+        body of ``_migrate_filing_date_int``.
+
+        We spy on Chroma's ``get`` (the first read inside the
+        migration body) and assert it is never invoked on the second
+        open.  The flag check happens before any data-touching
+        operation, so this directly pins the O(1) startup contract.
+        """
+        # First open seals the flag.
+        first = ChromaDBClient(openai_stamp, chroma_path=chroma_path)
+        meta = first._collection.metadata or {}
+        assert meta.get(ChromaDBClient._MIGRATION_FLAG) is True
+
+        # Spy on Chroma's ``get`` — the migration body's first call.
+        # Patching the class method makes the spy survive the new
+        # ``ChromaDBClient`` constructing its own collection handle.
+        from chromadb.api.models.Collection import Collection
+
+        get_calls: list[tuple[Any, ...]] = []
+        original_get = Collection.get
+
+        def _spy(self: Any, *args: Any, **kwargs: Any) -> Any:
+            get_calls.append((args, kwargs))
+            return original_get(self, *args, **kwargs)
+
+        monkeypatch.setattr(Collection, "get", _spy)
+
+        # Second open — flag is set, so the migration body must skip.
+        ChromaDBClient(openai_stamp, chroma_path=chroma_path)
+
+        assert get_calls == [], (
+            "Migration body executed on a stamped collection; the O(1) "
+            "startup invariant is broken."
+        )
 
 
 # ---------------------------------------------------------------------------

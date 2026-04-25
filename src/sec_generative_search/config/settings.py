@@ -20,6 +20,8 @@ from dotenv import load_dotenv
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from sec_generative_search.core.types import DeploymentProfile
+
 # Load .env into os.environ BEFORE nested BaseSettings classes are
 # instantiated as default values in the Settings class body.  Without
 # this, EdgarSettings() (which has required fields and no defaults)
@@ -176,12 +178,42 @@ def resolve_encryption_key_from_values(key: str | None, key_file: str | None) ->
     return None
 
 
-class DatabaseSettings(BaseSettings):
-    """Database configuration."""
+_DEPLOYMENT_PROFILE_DEFAULTS: dict[str, tuple[int, int]] = {
+    DeploymentProfile.LOCAL.value: (2500, 0),
+    DeploymentProfile.TEAM.value: (10000, 90),
+    DeploymentProfile.CLOUD.value: (10000, 30),
+}
+"""Profile → (max_filings, retention_max_age_days) defaults.
 
+Local matches the historical static defaults (2500 filings, no
+time-based eviction) so an existing operator who never sets
+``DB_DEPLOYMENT_PROFILE`` sees zero behavioural change.  Team and cloud
+ship eviction enabled by default — operators who want eviction off can
+override with ``DB_RETENTION_MAX_AGE_DAYS=0``.  Both knobs are
+individually overridable; the profile only fills *unset* fields.
+"""
+
+
+class DatabaseSettings(BaseSettings):
+    """Database configuration.
+
+    ``deployment_profile`` selects between local / team / cloud
+    presets that drive the default ceilings on filing count and
+    retention age.  Explicit env vars (``DB_MAX_FILINGS``,
+    ``DB_RETENTION_MAX_AGE_DAYS``) always win — the profile only
+    fills in fields the operator did not set.
+    """
+
+    deployment_profile: str = DeploymentProfile.LOCAL.value
     chroma_path: str = "./data/chroma_db"
     metadata_db_path: str = "./data/metadata.sqlite"
     max_filings: int = 2500
+
+    # Time-based retention.  ``0`` disables eviction; the value is the
+    # ``ingested_at`` cutoff applied by ``MetadataRegistry.list_expired_filings``
+    # and ``FilingStore.evict_expired``.  Defaults are profile-driven; see
+    # ``_DEPLOYMENT_PROFILE_DEFAULTS``.
+    retention_max_age_days: int = 0
 
     # SQLCipher encryption key; unset = plain sqlite3 (local dev).
     encryption_key: str | None = None
@@ -197,6 +229,62 @@ class DatabaseSettings(BaseSettings):
     task_history_persist_tickers: bool = False
 
     model_config = SettingsConfigDict(env_prefix="DB_")
+
+    @field_validator("deployment_profile")
+    @classmethod
+    def _validate_deployment_profile(cls, value: str) -> str:
+        """Reject unknown profile names at settings load.
+
+        Values must match one of :class:`DeploymentProfile`'s members.
+        Case is preserved verbatim to keep the env var unambiguous.
+        """
+        valid = {profile.value for profile in DeploymentProfile}
+        if value not in valid:
+            raise ValueError(
+                f"Unknown DB_DEPLOYMENT_PROFILE '{value}'. Valid profiles: {sorted(valid)}."
+            )
+        return value
+
+    @field_validator("retention_max_age_days")
+    @classmethod
+    def _validate_retention_non_negative(cls, value: int) -> int:
+        """Reject negative retention values.
+
+        A negative cutoff would invert the SQL WHERE clause and delete
+        recent filings — defence-in-depth against an operator typo.
+        ``0`` (disabled) is the only special-cased non-positive value.
+        """
+        if value < 0:
+            raise ValueError(
+                f"DB_RETENTION_MAX_AGE_DAYS must be >= 0; got {value}. "
+                f"Use 0 to disable time-based eviction."
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _apply_profile_defaults(self) -> "DatabaseSettings":
+        """Fill ``max_filings`` / ``retention_max_age_days`` from the profile.
+
+        Runs only against fields the operator did not set explicitly
+        (probed via ``model_fields_set``).  Pydantic-settings includes
+        env-var sourced values in that set, so an explicit
+        ``DB_MAX_FILINGS=20000`` always wins over the profile baseline.
+
+        Local profile preserves the historical static defaults; the
+        method is a no-op for ``LOCAL`` operators who never opt in.
+        """
+        defaults = _DEPLOYMENT_PROFILE_DEFAULTS.get(self.deployment_profile)
+        if defaults is None:
+            # Field validator already rejected unknown profiles; this is
+            # defensive against future enum additions without table updates.
+            return self
+
+        default_max, default_retention = defaults
+        if "max_filings" not in self.model_fields_set:
+            self.max_filings = default_max
+        if "retention_max_age_days" not in self.model_fields_set:
+            self.retention_max_age_days = default_retention
+        return self
 
     @model_validator(mode="after")
     def _resolve_encryption_key(self) -> "DatabaseSettings":

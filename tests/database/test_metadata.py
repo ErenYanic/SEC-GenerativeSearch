@@ -261,6 +261,103 @@ class TestListOldestFilings:
         assert [r.accession_number for r in oldest] == ["ACC-A", "ACC-B"]
 
 
+def _backdate_ingested_at(
+    registry: MetadataRegistry,
+    accession_number: str,
+    days_ago: int,
+) -> None:
+    """Rewrite a filing's ``ingested_at`` so it appears ``days_ago`` old.
+
+    The registry stamps ``ingested_at`` with ``datetime.now(UTC)`` at
+    insertion, so the only way to test retention thresholds without
+    sleeping is to backdate the column in-place.  Goes through the
+    same persistent connection the registry holds so the writes are
+    visible to subsequent registry calls.
+    """
+    sql = (
+        "UPDATE filings SET ingested_at = datetime('now', '-' || ? || ' days') "
+        "WHERE accession_number = ?"
+    )
+    with registry._lock, registry._conn:
+        registry._conn.execute(sql, (days_ago, accession_number))
+
+
+class TestListExpiredFilings:
+    """Cutoff-driven retention enumeration; the read primitive consumed
+    by :meth:`FilingStore.evict_expired`."""
+
+    def test_returns_only_rows_older_than_cutoff(
+        self,
+        registry: MetadataRegistry,
+    ) -> None:
+        fresh = FilingIdentifier("AAPL", "10-K", date(2024, 1, 1), "ACC-FRESH")
+        old = FilingIdentifier("AAPL", "10-Q", date(2024, 1, 1), "ACC-OLD")
+        registry.register_filing(fresh, chunk_count=10)
+        registry.register_filing(old, chunk_count=5)
+
+        # Backdate "old" to 100 days ago.
+        _backdate_ingested_at(registry, "ACC-OLD", days_ago=100)
+
+        result = registry.list_expired_filings(max_age_days=90)
+        assert [r.accession_number for r in result] == ["ACC-OLD"]
+
+    def test_orders_oldest_first(self, registry: MetadataRegistry) -> None:
+        fid_a = FilingIdentifier("AAPL", "10-K", date(2024, 1, 1), "ACC-A")
+        fid_b = FilingIdentifier("AAPL", "10-Q", date(2024, 1, 1), "ACC-B")
+        registry.register_filing(fid_a, chunk_count=1)
+        registry.register_filing(fid_b, chunk_count=1)
+
+        _backdate_ingested_at(registry, "ACC-A", days_ago=120)
+        _backdate_ingested_at(registry, "ACC-B", days_ago=200)
+
+        result = registry.list_expired_filings(max_age_days=90)
+        assert [r.accession_number for r in result] == ["ACC-B", "ACC-A"]
+
+    def test_empty_when_nothing_expired(self, registry: MetadataRegistry) -> None:
+        fresh = FilingIdentifier("AAPL", "10-K", date(2024, 1, 1), "ACC-FRESH")
+        registry.register_filing(fresh, chunk_count=10)
+
+        assert registry.list_expired_filings(max_age_days=30) == []
+
+    def test_empty_database_returns_empty_list(
+        self,
+        registry: MetadataRegistry,
+    ) -> None:
+        assert registry.list_expired_filings(max_age_days=30) == []
+
+    def test_record_carries_chunk_count_for_eviction_report(
+        self,
+        registry: MetadataRegistry,
+    ) -> None:
+        """``FilingStore.evict_expired`` sums ``chunk_count`` across the
+        listed records to populate :class:`EvictionReport`; this test
+        pins that the column survives the round-trip."""
+        fid = FilingIdentifier("AAPL", "10-K", date(2024, 1, 1), "ACC-OLD")
+        registry.register_filing(fid, chunk_count=37)
+        _backdate_ingested_at(registry, "ACC-OLD", days_ago=100)
+
+        records = registry.list_expired_filings(max_age_days=90)
+        assert len(records) == 1
+        assert records[0].chunk_count == 37
+
+    @pytest.mark.security
+    def test_zero_max_age_rejected(self, registry: MetadataRegistry) -> None:
+        """Defence-in-depth: zero would invert the WHERE clause and
+        delete every recent filing.  Eviction is disabled at the
+        settings layer (DB_RETENTION_MAX_AGE_DAYS=0), not by passing 0
+        through the registry primitive."""
+        with pytest.raises(ValueError, match="must be positive"):
+            registry.list_expired_filings(max_age_days=0)
+
+    @pytest.mark.security
+    def test_negative_max_age_rejected(
+        self,
+        registry: MetadataRegistry,
+    ) -> None:
+        with pytest.raises(ValueError, match="must be positive"):
+            registry.list_expired_filings(max_age_days=-30)
+
+
 class TestCount:
     def test_filters_apply(self, registry: MetadataRegistry) -> None:
         fid1 = FilingIdentifier("AAPL", "10-K", date(2024, 1, 1), "ACC-1")

@@ -30,7 +30,33 @@ Design notes:
 
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from enum import Enum
+from enum import Enum, StrEnum
+
+
+class DeploymentProfile(StrEnum):
+    """
+    Coarse classification of how the storage layer is deployed.
+
+    Drives the default ceilings on filing count and retention age in
+    :class:`~sec_generative_search.config.settings.DatabaseSettings`.
+    Operators set ``DB_DEPLOYMENT_PROFILE`` once per deployment;
+    individual env vars (``DB_MAX_FILINGS``,
+    ``DB_RETENTION_MAX_AGE_DAYS``) always override the profile defaults
+    so an operator can, for example, run a team-sized deployment with
+    eviction disabled.
+
+    Members:
+        LOCAL: Single-user workstation (Scenario A).  No eviction by
+            default.
+        TEAM: Shared internal deployment (Scenario B).  Time-based
+            retention enabled by default.
+        CLOUD: Internet-facing deployment (Scenario C).  Stricter
+            retention policy by default to bound disk growth.
+    """
+
+    LOCAL = "local"
+    TEAM = "team"
+    CLOUD = "cloud"
 
 
 class ContentType(Enum):
@@ -488,6 +514,7 @@ class PricingTier(Enum):
     FREE = "free"
     LOW = "low"
     STANDARD = "standard"
+    HIGH = "high"
     PREMIUM = "premium"
     UNKNOWN = "unknown"
 
@@ -611,6 +638,41 @@ class ReindexReport:
     target_stamp: EmbedderStamp
     chunks_copied: int
     duration_seconds: float
+
+
+@dataclass(frozen=True)
+class EvictionReport:
+    """
+    Audit record for a retention-eviction sweep.
+
+    Returned by :class:`FilingStore.evict_expired` so operators (CLI,
+    admin API, future scheduled task) get a uniform shape to log,
+    render, and aggregate.  Frozen because eviction is a non-idempotent
+    administrative event — once reported, the count must not be
+    rewritten by a subsequent operation.  Credential-free; the
+    parametrised security test in ``tests/core/test_types.py`` picks it
+    up automatically.
+
+    A zero-eviction report (no expired rows found) is the success
+    return for an empty sweep and is distinct from a failure — callers
+    log both but should not surface the empty case as a warning.
+
+    Attributes:
+        filings_evicted: Number of filing rows removed from the
+            metadata registry.  Matches the accession-number count
+            deleted from ChromaDB on the success path.
+        chunks_evicted: Total chunk count summed from the evicted
+            rows via the registry's ``chunk_count`` column.  Used for
+            operator-facing surface metrics only — never for
+            authorisation.
+        max_age_days: The ``ingested_at`` cutoff applied to this sweep
+            (e.g. ``90`` means rows older than 90 days were evicted),
+            preserved for audit trail and log correlation.
+    """
+
+    filings_evicted: int
+    chunks_evicted: int
+    max_age_days: int
 
 
 @dataclass(frozen=True)
