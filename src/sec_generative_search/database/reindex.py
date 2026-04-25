@@ -187,9 +187,9 @@ class ReindexService:
                 :func:`providers.factory.build_embedder`.  The service
                 never constructs its own embedder; credential
                 resolution stays on the factory seam.
-            progress_callback: Optional ``(step, current, total)``
+                progress_callback: Optional ``(step, current, total)``
                 callback.  Emitted as ``"reindex"`` throughout the
-                embedding phase so CLI / API / UI wrappers can show a
+                embedding work so CLI / API / UI wrappers can show a
                 single unified progress surface.
 
         Returns:
@@ -486,8 +486,7 @@ class ReindexService:
                 details=str(exc),
             ) from exc
 
-        # Paginate staging → live.  ``peek=False``-semantics pagination
-        # is the same pattern the embedding phase uses; reuse for
+        # Paginate staging → live.  Reuse the same paging pattern for
         # symmetry and to avoid loading the whole staging collection
         # into memory on large SEC deployments.
         copied = 0

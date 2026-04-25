@@ -247,12 +247,12 @@ class TestRun:
         )
 
         steps = {e[0] for e in events}
-        # Embedding phase emits "reindex"; swap phase emits
+        # The re-embedding step emits "reindex" and the swap step emits
         # "reindex-swap" — both must fire for a multi-batch run.
         assert "reindex" in steps
         assert "reindex-swap" in steps
-        # Final "reindex" event must report completion of the embedding
-        # pass at the full chunk count.
+        # The final "reindex" event must report completion of the
+        # re-embedding pass at the full chunk count.
         embed_events = [e for e in events if e[0] == "reindex"]
         assert embed_events[-1] == ("reindex", total, total)
 
@@ -461,7 +461,7 @@ class TestRunFailures:
         target_stamp: EmbedderStamp,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A swap-phase failure is operator-scope; staging still dropped.
+        """A swap failure is operator-scope; staging is still dropped.
 
         We do not restore the live collection automatically.  What we
         do guarantee is that staging does not survive, so a retry does

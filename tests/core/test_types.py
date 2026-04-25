@@ -466,7 +466,7 @@ class TestEmbedderStamp:
 
 
 # ---------------------------------------------------------------------------
-# Deployment profile + eviction report (Phase 6.11)
+# Deployment profile + eviction report
 # ---------------------------------------------------------------------------
 
 

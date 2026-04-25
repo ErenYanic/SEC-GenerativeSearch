@@ -318,11 +318,9 @@ class TestHappyPath:
         )
 
         assert result.exit_code == 0, result.output
-        # Swap-phase label wins the final frame; embed-phase label was
-        # rendered during the in-between progress update.  Rich collapses
-        # frames in non-TTY capture, so we only assert that at least one
-        # of the two phase labels made it into the captured frame — the
-        # service stub ensures both callbacks fired if exit was clean.
+        # The final frame may show either progress label because Rich
+        # collapses intermediate frames in non-TTY capture.  The stub
+        # still proves both callbacks fired if exit was clean.
         assert (
             "Re-embedding chunks" in result.output or "Copying to live collection" in result.output
         )

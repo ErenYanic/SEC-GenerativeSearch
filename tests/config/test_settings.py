@@ -397,6 +397,96 @@ class TestDatabasePathSecurity:
                 real_target.rmdir()
 
 
+class TestDatabaseDeploymentProfile:
+    """Profile-driven defaults for ``max_filings`` and ``retention_max_age_days``.
+
+    The contract: the deployment profile fills in unset fields from the
+    profile-defaults table; explicit env vars always win.  Local
+    profile preserves the historical static defaults so existing
+    operators see zero behavioural change.
+    """
+
+    def test_local_default_preserves_historical_behaviour(
+        self,
+        clean_env: pytest.MonkeyPatch,
+    ) -> None:
+        s = DatabaseSettings()
+        assert s.deployment_profile == "local"
+        assert s.max_filings == 2500
+        assert s.retention_max_age_days == 0
+
+    def test_team_profile_supplies_defaults(
+        self,
+        clean_env: pytest.MonkeyPatch,
+    ) -> None:
+        clean_env.setenv("DB_DEPLOYMENT_PROFILE", "team")
+        s = DatabaseSettings()
+        assert s.deployment_profile == "team"
+        assert s.max_filings == 10000
+        assert s.retention_max_age_days == 90
+
+    def test_cloud_profile_supplies_defaults(
+        self,
+        clean_env: pytest.MonkeyPatch,
+    ) -> None:
+        clean_env.setenv("DB_DEPLOYMENT_PROFILE", "cloud")
+        s = DatabaseSettings()
+        assert s.deployment_profile == "cloud"
+        assert s.max_filings == 10000
+        assert s.retention_max_age_days == 30
+
+    def test_explicit_max_filings_wins_over_profile(
+        self,
+        clean_env: pytest.MonkeyPatch,
+    ) -> None:
+        clean_env.setenv("DB_DEPLOYMENT_PROFILE", "team")
+        clean_env.setenv("DB_MAX_FILINGS", "20000")
+        s = DatabaseSettings()
+        assert s.max_filings == 20000
+        # Retention still pulled from profile defaults — only the
+        # explicitly-overridden field bypasses the profile.
+        assert s.retention_max_age_days == 90
+
+    def test_explicit_retention_zero_disables_eviction_in_team(
+        self,
+        clean_env: pytest.MonkeyPatch,
+    ) -> None:
+        """Operator opts a team-sized deployment out of eviction."""
+        clean_env.setenv("DB_DEPLOYMENT_PROFILE", "team")
+        clean_env.setenv("DB_RETENTION_MAX_AGE_DAYS", "0")
+        s = DatabaseSettings()
+        assert s.retention_max_age_days == 0
+        assert s.max_filings == 10000
+
+    def test_explicit_retention_overrides_cloud_profile(
+        self,
+        clean_env: pytest.MonkeyPatch,
+    ) -> None:
+        clean_env.setenv("DB_DEPLOYMENT_PROFILE", "cloud")
+        clean_env.setenv("DB_RETENTION_MAX_AGE_DAYS", "7")
+        s = DatabaseSettings()
+        assert s.retention_max_age_days == 7
+
+    def test_unknown_profile_rejected(
+        self,
+        clean_env: pytest.MonkeyPatch,
+    ) -> None:
+        clean_env.setenv("DB_DEPLOYMENT_PROFILE", "edge")
+        with pytest.raises(ValidationError, match="DB_DEPLOYMENT_PROFILE"):
+            DatabaseSettings()
+
+    @pytest.mark.security
+    def test_negative_retention_rejected(
+        self,
+        clean_env: pytest.MonkeyPatch,
+    ) -> None:
+        """Defence-in-depth: a negative cutoff would invert the WHERE clause
+        and delete recent filings.  Rejected at settings load."""
+        clean_env.setenv("DB_RETENTION_MAX_AGE_DAYS", "-1")
+        with pytest.raises(ValidationError, match=">= 0"):
+            DatabaseSettings()
+
+
 @pytest.mark.security
 class TestEncryptionKeyResolution:
     """Security: DB_ENCRYPTION_KEY / DB_ENCRYPTION_KEY_FILE mutual exclusion

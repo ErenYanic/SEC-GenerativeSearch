@@ -450,8 +450,7 @@ class TaskManager:
         Execute the ingestion task.  Runs in a background thread.
 
         Acquires the GPU semaphore (blocking — FIFO queue), then
-        iterates over tickers × form_types running the two-phase ingest
-        pipeline.
+        iterates over tickers × form_types running the ingest pipeline.
         """
         # Wait for GPU slot (blocks if another task is running).
         logger.info("Task %s waiting for GPU slot...", info.task_id[:8])
@@ -504,7 +503,7 @@ class TaskManager:
 
     def _execute(self, info: TaskInfo) -> None:
         """
-        Core ingestion logic — mirrors the CLI two-phase ingest.
+        Core ingestion logic — mirrors the CLI ingest flow.
 
         Steps per filing:
             1. Fetch metadata (cheap — ``list_available``)

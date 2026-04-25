@@ -833,6 +833,56 @@ class MetadataRegistry:
                 details=str(e),
             ) from e
 
+    def list_expired_filings(self, max_age_days: int) -> list[FilingRecord]:
+        """
+        Return filings whose ``ingested_at`` is older than the cutoff.
+
+        Read-only primitive consumed by
+        :meth:`FilingStore.evict_expired` to enumerate retention
+        candidates before the ChromaDB-first batched delete.  The cutoff
+        comparison runs entirely in SQL via SQLite's ``datetime``
+        builtin, so no Python-side date arithmetic is needed.
+
+        Args:
+            max_age_days: Cutoff age in days; must be strictly positive.
+                ``0`` (disabled) is rejected here so an inverted WHERE
+                clause is impossible — the surface boundary is the seam
+                that decides whether eviction runs at all, and a 0 here
+                is a programming error, not an operator setting.
+
+        Returns:
+            ``FilingRecord`` rows with ``ingested_at`` older than
+            ``now - max_age_days`` days, ordered ``ingested_at`` ASC.
+            Empty list when nothing has expired.
+
+        Raises:
+            ValueError: If ``max_age_days <= 0``.
+            DatabaseError: If the query fails.
+        """
+        if max_age_days <= 0:
+            raise ValueError(
+                f"max_age_days must be positive; got {max_age_days}. "
+                f"Set DB_RETENTION_MAX_AGE_DAYS=0 to disable eviction at the "
+                f"settings layer — this method is the eviction primitive "
+                f"and a non-positive cutoff would invert the WHERE clause."
+            )
+
+        cutoff = datetime.now(UTC).isoformat()
+        sql = """
+            SELECT * FROM filings
+            WHERE ingested_at < datetime(?, '-' || ? || ' days')
+            ORDER BY ingested_at ASC
+        """
+        try:
+            with self._lock:
+                rows = self._conn.execute(sql, (cutoff, max_age_days)).fetchall()
+            return [self._row_to_record(row) for row in rows]
+        except self._db_error as e:
+            raise DatabaseError(
+                "Failed to list expired filings",
+                details=str(e),
+            ) from e
+
     def count(
         self,
         ticker: str | None = None,
