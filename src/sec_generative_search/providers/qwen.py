@@ -31,7 +31,7 @@ class QwenProvider(OpenAICompatibleLLMProvider):
 
     provider_name = "qwen"
     default_base_url = _QWEN_BASE_URL
-    default_model = "qwen3.5-flash"
+    default_model = "qwen3.5-plus"
 
     MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
         "qwen3-max": ModelInfo(
@@ -40,10 +40,22 @@ class QwenProvider(OpenAICompatibleLLMProvider):
                 streaming=True,
                 tool_use=True,
                 structured_output=True,
-                prompt_caching=False,
+                prompt_caching=True,
                 context_window_tokens=262_144,
-                max_output_tokens=8_192,
+                max_output_tokens=65_536,
                 pricing_tier=PricingTier.PREMIUM,
+            ),
+        ),
+        "qwen3.6-plus": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                context_window_tokens=1_000_000,
+                max_output_tokens=65_536,
+                pricing_tier=PricingTier.HIGH,
             ),
         ),
         "qwen3.5-plus": ModelInfo(
@@ -52,9 +64,9 @@ class QwenProvider(OpenAICompatibleLLMProvider):
                 streaming=True,
                 tool_use=True,
                 structured_output=True,
-                prompt_caching=False,
+                prompt_caching=True,
                 context_window_tokens=1_000_000,
-                max_output_tokens=8_192,
+                max_output_tokens=65_536,
                 pricing_tier=PricingTier.STANDARD,
             ),
         ),
@@ -64,10 +76,34 @@ class QwenProvider(OpenAICompatibleLLMProvider):
                 streaming=True,
                 tool_use=True,
                 structured_output=True,
-                prompt_caching=False,
+                prompt_caching=True,
                 context_window_tokens=1_000_000,
-                max_output_tokens=8_192,
+                max_output_tokens=65_536,
                 pricing_tier=PricingTier.LOW,
+            ),
+        ),
+        "qwen3.5-omni-plus": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                context_window_tokens=262_144,
+                max_output_tokens=65_536,
+                pricing_tier=PricingTier.HIGH,
+            ),
+        ),
+        "qwen3.5-omni-flash": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                context_window_tokens=262_144,
+                max_output_tokens=65_536,
+                pricing_tier=PricingTier.STANDARD,
             ),
         ),
         "qwen-max": ModelInfo(
@@ -76,10 +112,10 @@ class QwenProvider(OpenAICompatibleLLMProvider):
                 streaming=True,
                 tool_use=True,
                 structured_output=True,
-                prompt_caching=False,
+                prompt_caching=True,
                 context_window_tokens=32_768,
                 max_output_tokens=8_192,
-                pricing_tier=PricingTier.PREMIUM,
+                pricing_tier=PricingTier.STANDARD,
             ),
         ),
         "qwen-plus": ModelInfo(
@@ -88,10 +124,10 @@ class QwenProvider(OpenAICompatibleLLMProvider):
                 streaming=True,
                 tool_use=True,
                 structured_output=True,
-                prompt_caching=False,
-                context_window_tokens=131_072,
-                max_output_tokens=8_192,
-                pricing_tier=PricingTier.STANDARD,
+                prompt_caching=True,
+                context_window_tokens=1_000_000,
+                max_output_tokens=32_768,
+                pricing_tier=PricingTier.PREMIUM,
             ),
         ),
         "qwen-flash": ModelInfo(
@@ -100,9 +136,9 @@ class QwenProvider(OpenAICompatibleLLMProvider):
                 streaming=True,
                 tool_use=True,
                 structured_output=True,
-                prompt_caching=False,
+                prompt_caching=True,
                 context_window_tokens=1_000_000,
-                max_output_tokens=8_192,
+                max_output_tokens=32_768,
                 pricing_tier=PricingTier.LOW,
             ),
         ),
@@ -112,8 +148,8 @@ class QwenProvider(OpenAICompatibleLLMProvider):
                 streaming=True,
                 tool_use=True,
                 structured_output=True,
-                prompt_caching=False,
-                context_window_tokens=1_000_000,
+                prompt_caching=True,
+                context_window_tokens=131_072,
                 max_output_tokens=8_192,
                 pricing_tier=PricingTier.LOW,
             ),

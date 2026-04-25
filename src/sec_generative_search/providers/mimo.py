@@ -32,34 +32,70 @@ class MimoProvider(OpenAICompatibleLLMProvider):
 
     provider_name = "mimo"
     default_base_url = "https://api.xiaomimimo.com/v1"
-    default_model = "MiMo-V2-Pro"
+    default_model = "mimo-v2.5-pro"
 
     # Xiaomi's published slugs preserve the ``MiMo-V2-*`` casing — the
     # API is case-sensitive. ``MiMo-V2-Pro`` is the reasoning-capable
     # flagship with a 1M-token context window; ``MiMo-V2-Flash`` remains
     # available as the cheaper fast tier.
     MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
-        "MiMo-V2-Pro": ModelInfo(
+        "mimo-v2.5-pro": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
                 streaming=True,
                 tool_use=True,
                 structured_output=True,
-                prompt_caching=False,
+                prompt_caching=True,
                 context_window_tokens=1_048_576,
-                max_output_tokens=32_000,
-                pricing_tier=PricingTier.PREMIUM,
+                max_output_tokens=131_072,
+                pricing_tier=PricingTier.STANDARD,
             ),
         ),
-        "MiMo-V2-Flash": ModelInfo(
+        "mimo-v2-pro": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
                 streaming=True,
                 tool_use=True,
                 structured_output=True,
-                prompt_caching=False,
+                prompt_caching=True,
+                context_window_tokens=1_048_576,
+                max_output_tokens=131_072,
+                pricing_tier=PricingTier.STANDARD,
+            ),
+        ),
+        "mimo-v2.5": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                context_window_tokens=1_048_576,
+                max_output_tokens=131_072,
+                pricing_tier=PricingTier.STANDARD,
+            ),
+        ),
+        "mimo-v2-omni": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                context_window_tokens=256_000,
+                max_output_tokens=65_536,
+                pricing_tier=PricingTier.STANDARD,
+            ),
+        ),
+        "mimo-v2-flash": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
                 context_window_tokens=262_144,
-                max_output_tokens=8_192,
+                max_output_tokens=65_536,
                 pricing_tier=PricingTier.LOW,
             ),
         ),
