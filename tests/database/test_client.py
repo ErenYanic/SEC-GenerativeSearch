@@ -517,8 +517,7 @@ class TestMigrationFlag:
         ChromaDBClient(openai_stamp, chroma_path=chroma_path)
 
         assert get_calls == [], (
-            "Migration body executed on a stamped collection; the O(1) "
-            "startup invariant is broken."
+            "Migration body executed on a stamped collection; the O(1) startup invariant is broken."
         )
 
 
