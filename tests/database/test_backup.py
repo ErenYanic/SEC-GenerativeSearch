@@ -9,12 +9,9 @@ service never embeds.
 
 from __future__ import annotations
 
-import gzip
 import io
 import json
-import os
 import shutil
-import sqlite3
 import stat
 import tarfile
 from datetime import date
@@ -585,8 +582,7 @@ class TestSecurity:
         service.backup(output)
         mode = output.stat().st_mode & 0o777
         assert mode == 0o600, (
-            f"Backup file mode is {oct(mode)}; must be 0o600 to keep "
-            "the artefact owner-only."
+            f"Backup file mode is {oct(mode)}; must be 0o600 to keep the artefact owner-only."
         )
         # Defence-in-depth: world / group bits are explicitly clear.
         assert (output.stat().st_mode & stat.S_IRWXG) == 0
@@ -620,9 +616,7 @@ class TestSecurity:
         )
         attrs = {a.lower() for a in vars(bare).keys()}
         for hint in forbidden:
-            assert hint not in attrs, (
-                f"BackupService grew a credential-shaped attribute: {hint}"
-            )
+            assert hint not in attrs, f"BackupService grew a credential-shaped attribute: {hint}"
         assert "token" not in attrs
         assert "api_token" not in attrs
 
@@ -632,9 +626,7 @@ class TestSecurity:
         No ``rich`` / ``typer`` / ``edgartools`` / pipeline imports —
         the CLI wrapper drives progress through an injected callback.
         """
-        src = Path("src/sec_generative_search/database/backup.py").read_text(
-            encoding="utf-8"
-        )
+        src = Path("src/sec_generative_search/database/backup.py").read_text(encoding="utf-8")
         for name in ("rich", "typer", "edgartools", "edgar"):
             assert f"import {name}" not in src, (
                 f"backup.py must not import {name!r} — it is surface-agnostic"
@@ -705,9 +697,7 @@ class TestSecurity:
             "password",
         )
         for needle in forbidden_substrings:
-            assert needle not in raw, (
-                f"MANIFEST.json leaked secret-shaped string {needle!r}"
-            )
+            assert needle not in raw, f"MANIFEST.json leaked secret-shaped string {needle!r}"
 
     def test_refuses_path_traversal_archive(
         self,
