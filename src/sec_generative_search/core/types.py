@@ -676,6 +676,85 @@ class EvictionReport:
 
 
 @dataclass(frozen=True)
+class BackupReport:
+    """
+    Audit record for a successful :meth:`BackupService.backup` call.
+
+    Returned by the byte-faithful tarball backup so operators (CLI,
+    admin API, future scheduled task) get a uniform shape to log,
+    render, and aggregate.  Frozen because a backup write is a
+    one-shot, non-idempotent administrative event — once reported,
+    the record must not be rewritten by a subsequent operation.
+    Credential-free; the parametrised security test in
+    ``tests/core/test_types.py`` picks it up automatically.
+
+    Attributes:
+        output_path: The tarball path that was written, preserved for
+            log correlation.  Only the path is stored — never the
+            tarball contents.
+        embedder_stamp: The stamp read from the live ChromaDB
+            collection at backup time.  The same stamp is embedded in
+            the tarball's MANIFEST.json and is what restore validates
+            against the host's configured embedder.
+        schema_version: Highest applied SQLite schema version captured
+            in the snapshot.  Restore refuses forward-only artefacts
+            (artefact version > host's latest available).
+        sqlcipher_encrypted: ``True`` when the SQLite file inside the
+            archive is SQLCipher-encrypted.  Reflects the *runtime*
+            driver actually used at backup time, not the configured
+            intent — when ``DB_ENCRYPTION_KEY`` is set but
+            ``pysqlcipher3`` is unavailable, the registry falls back
+            to plain sqlite3 and the backup follows.
+        size_bytes: Tarball size on disk after writing and chmod 0600.
+        duration_seconds: Wall-clock duration of the backup call,
+            used for cost attribution and operator-side verification.
+    """
+
+    output_path: str
+    embedder_stamp: EmbedderStamp
+    schema_version: int
+    sqlcipher_encrypted: bool
+    size_bytes: int
+    duration_seconds: float
+
+
+@dataclass(frozen=True)
+class RestoreReport:
+    """
+    Audit record for a successful :meth:`BackupService.restore` call.
+
+    Mirrors :class:`BackupReport` for the inverse operation.  Frozen
+    because a restore is a non-idempotent administrative event — the
+    record names what was actually loaded so a future audit can
+    reconcile the live state against the backup history.
+    Credential-free; the parametrised security test in
+    ``tests/core/test_types.py`` picks it up automatically.
+
+    Attributes:
+        input_path: The tarball path that was read, preserved for log
+            correlation.
+        embedder_stamp: The stamp parsed from the artefact's manifest.
+            Equals the host's configured stamp because restore refuses
+            mismatches before any filesystem mutation.
+        schema_version: SQLite schema version of the restored
+            metadata file.  ``MetadataRegistry`` will run any pending
+            migrations on the next open, so a value lower than the
+            host's latest available is the lossless-upgrade case.
+        sqlcipher_encrypted: ``True`` when the restored SQLite file
+            is SQLCipher-encrypted.  Restore refuses on encryption
+            mismatch with the host's configuration before reaching
+            this report shape.
+        duration_seconds: Wall-clock duration of the restore call.
+    """
+
+    input_path: str
+    embedder_stamp: EmbedderStamp
+    schema_version: int
+    sqlcipher_encrypted: bool
+    duration_seconds: float
+
+
+@dataclass(frozen=True)
 class ProviderCapability:
     """
     Feature matrix for a concrete provider + model pair.
