@@ -500,7 +500,7 @@ class TestRestoreRefuse:
             info = tarfile.TarInfo("other.txt")
             info.size = len(payload)
             tar.addfile(info, io.BytesIO(payload))
-        with pytest.raises(DatabaseError, match="missing 'MANIFEST.json'"):
+        with pytest.raises(DatabaseError, match=r"missing 'MANIFEST\.json'"):
             service.restore(bogus, expected_stamp=stamp)
 
     def test_refuses_malformed_manifest_json(
@@ -614,7 +614,7 @@ class TestSecurity:
             "credential",
             "encryption_key",
         )
-        attrs = {a.lower() for a in vars(bare).keys()}
+        attrs = {a.lower() for a in vars(bare)}
         for hint in forbidden:
             assert hint not in attrs, f"BackupService grew a credential-shaped attribute: {hint}"
         assert "token" not in attrs
