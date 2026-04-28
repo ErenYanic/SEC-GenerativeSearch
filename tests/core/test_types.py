@@ -18,6 +18,7 @@ from datetime import UTC, date, datetime
 import pytest
 
 from sec_generative_search.core.types import (
+    BackupReport,
     Chunk,
     Citation,
     ContentType,
@@ -31,6 +32,7 @@ from sec_generative_search.core.types import (
     PricingTier,
     ProviderCapability,
     ReindexReport,
+    RestoreReport,
     RetrievalResult,
     SearchResult,
     Segment,
@@ -564,6 +566,8 @@ class TestNoCredentialFieldsOnDomainTypes:
             EmbedderStamp,
             ReindexReport,
             EvictionReport,
+            BackupReport,
+            RestoreReport,
         ],
     )
     def test_no_secret_looking_fields(self, cls: type) -> None:
