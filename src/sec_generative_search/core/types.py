@@ -10,7 +10,7 @@ This module defines the domain objects used throughout the pipeline:
     - RetrievalResult: Search result enriched with context-window metadata
     - Citation: Immutable record of a chunk referenced in a generated answer
     - TokenUsage: Input/output token counts for a provider call or session
-    - GenerationResult: Outcome of a RAG generation request with traceability
+    - GenerationResult: Outcome of a RAG generation request with traceabdility
     - ConversationTurn: Session-scoped audit record of a query/answer pair
     - EmbedderStamp: Digital seal linking a Chroma collection to its embedder
     - ProviderCapability: Feature matrix for an LLM/embedding provider-model pair
