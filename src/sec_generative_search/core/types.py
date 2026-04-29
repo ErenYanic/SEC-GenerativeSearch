@@ -755,6 +755,76 @@ class RestoreReport:
 
 
 @dataclass(frozen=True)
+class ExportReport:
+    """
+    Audit record for a successful :meth:`PortableExportService.export` call.
+
+    Returned by the portable JSONL exporter so operators get a uniform
+    shape across CLI, admin API, and future scheduled pipelines.
+    Frozen because export is a non-idempotent administrative event —
+    once reported, the count must not be rewritten.  Credential-free;
+    the parametrised security test in ``tests/core/test_types.py``
+    picks it up automatically.
+
+    The ``source_embedder_stamp`` is recorded on the artefact for
+    diagnostic value only — portable imports are deliberately
+    embedder-decoupled and re-embed on the importing host, so the
+    importer never enforces an equality match against this stamp.
+
+    Attributes:
+        output_dir: The directory where ``manifest.json`` and
+            ``chunks.jsonl`` were written, preserved for audit
+            correlation.
+        source_embedder_stamp: Stamp read from the live ChromaDB
+            collection at export time; informational only.
+        filing_count: Number of distinct filings represented in the
+            export (after filter application).
+        chunk_count: Total chunks written to ``chunks.jsonl``.
+        duration_seconds: Wall-clock duration of the export call.
+    """
+
+    output_dir: str
+    source_embedder_stamp: EmbedderStamp
+    filing_count: int
+    chunk_count: int
+    duration_seconds: float
+
+
+@dataclass(frozen=True)
+class ImportReport:
+    """
+    Audit record for a successful :meth:`PortableImportService.import_` call.
+
+    Mirrors :class:`ExportReport` for the inverse operation.  Frozen
+    because import is a non-idempotent administrative event — once
+    reported, the count must not be rewritten.  Credential-free; the
+    parametrised security test in ``tests/core/test_types.py`` picks
+    it up automatically.
+
+    Attributes:
+        input_dir: The directory the artefact was read from.
+        source_embedder_stamp: Stamp recorded in the artefact's
+            manifest (the host that produced the export).
+            Informational only — the live host re-embeds under its
+            own configured embedder.
+        filings_imported: Number of filings written to both stores
+            via :meth:`FilingStore.store_filing` ``register_if_new=True``.
+        filings_skipped: Number of filings whose accession was already
+            registered locally and therefore skipped without overwrite.
+        chunks_imported: Total chunks embedded and written across all
+            successfully-imported filings.
+        duration_seconds: Wall-clock duration of the import call.
+    """
+
+    input_dir: str
+    source_embedder_stamp: EmbedderStamp
+    filings_imported: int
+    filings_skipped: int
+    chunks_imported: int
+    duration_seconds: float
+
+
+@dataclass(frozen=True)
 class ProviderCapability:
     """
     Feature matrix for a concrete provider + model pair.

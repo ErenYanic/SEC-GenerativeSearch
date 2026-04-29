@@ -8,6 +8,10 @@ from sec_generative_search.database.metadata import (
     MetadataRegistry,
     TickerStatistics,
 )
+from sec_generative_search.database.portable import (
+    PortableExportService,
+    PortableImportService,
+)
 from sec_generative_search.database.reindex import ReindexService
 from sec_generative_search.database.store import FilingStore
 
@@ -18,6 +22,8 @@ __all__ = [
     "FilingRecord",
     "FilingStore",
     "MetadataRegistry",
+    "PortableExportService",
+    "PortableImportService",
     "ReindexService",
     "TickerStatistics",
 ]
