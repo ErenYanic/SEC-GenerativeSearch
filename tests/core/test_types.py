@@ -26,8 +26,10 @@ from sec_generative_search.core.types import (
     DeploymentProfile,
     EmbedderStamp,
     EvictionReport,
+    ExportReport,
     FilingIdentifier,
     GenerationResult,
+    ImportReport,
     IngestResult,
     PricingTier,
     ProviderCapability,
@@ -568,6 +570,8 @@ class TestNoCredentialFieldsOnDomainTypes:
             EvictionReport,
             BackupReport,
             RestoreReport,
+            ExportReport,
+            ImportReport,
         ],
     )
     def test_no_secret_looking_fields(self, cls: type) -> None:
