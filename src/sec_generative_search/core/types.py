@@ -306,10 +306,11 @@ class RetrievalResult(SearchResult):
 
     ``RetrievalResult`` extends :class:`SearchResult` with the bookkeeping the
     RAG orchestrator needs when assembling prompt context: per-chunk token
-    count, a flag for whether the chunk was clipped to fit the budget, and
-    the parsed hierarchical section path.  Subclassing (rather than
-            composition) keeps the type assignable wherever a ``SearchResult`` is
-            accepted, which matters for the public retrieval API.
+    count, a flag for whether the chunk was clipped to fit the budget, the
+    parsed hierarchical section path, and an optional reranker score.
+    Subclassing (rather than composition) keeps the type assignable wherever
+    a ``SearchResult`` is accepted, which matters for the public retrieval
+    API.
 
     Attributes:
         token_count: Token count of ``content`` measured by the active
@@ -321,11 +322,21 @@ class RetrievalResult(SearchResult):
             ``("Part I", "Item 1A", "Risk Factors")``. Used by diversity
             controls and by citation display logic to avoid
             re-parsing ``path`` at generation time.
+        rerank_score: Optional score from a
+            :class:`~sec_generative_search.providers.base.BaseRerankerProvider`.
+            ``None`` means no rerank ran (or it ran but did not assign a
+            score to this chunk).  Cosine ``similarity`` is preserved
+            verbatim so the cosine signal stays interpretable; callers
+            that want to display "the" relevance score should prefer
+            ``rerank_score`` when present and fall back to
+            ``similarity``.  The two scales are not commensurable —
+            mixing them in a single field would mislead the UI.
     """
 
     token_count: int = 0
     truncated: bool = False
     section_boundaries: tuple[str, ...] = ()
+    rerank_score: float | None = None
 
     @classmethod
     def from_search_result(
@@ -335,6 +346,7 @@ class RetrievalResult(SearchResult):
         token_count: int = 0,
         truncated: bool = False,
         section_boundaries: tuple[str, ...] | None = None,
+        rerank_score: float | None = None,
     ) -> "RetrievalResult":
         """Lift a :class:`SearchResult` into a :class:`RetrievalResult`.
 
@@ -360,6 +372,69 @@ class RetrievalResult(SearchResult):
             token_count=token_count,
             truncated=truncated,
             section_boundaries=section_boundaries,
+            rerank_score=rerank_score,
+        )
+
+    def to_citation(self, display_index: int = 0) -> "Citation":
+        """Build a :class:`Citation` referencing this retrieved chunk.
+
+        Helper that performs the mechanical lift from a
+        :class:`RetrievalResult` to a :class:`Citation`. The
+        orchestrator decides which retrieved chunks become citations
+        after parsing the model's answer.
+
+        Args:
+            display_index: One-based ordinal for inline citation
+                markers like ``[1]`` / ``[2]``.  ``0`` (default) means
+                "not yet assigned" and matches :attr:`Citation.display_index`'s
+                own default.
+
+        Raises:
+            CitationError: ``chunk_id``, ``accession_number``, or
+                ``filing_date`` is missing from the result.  Every
+                ChromaDB-sourced retrieval populates all three; a missing
+                value indicates a malformed result that must not silently
+                propagate into a citation.
+        """
+        # Local imports keep the type module dependency-free at import
+        # time; ``CitationError`` lives in ``core.exceptions`` which already
+        # imports back into ``core.types`` for type hints in some places.
+        from sec_generative_search.core.exceptions import CitationError
+
+        if not self.chunk_id:
+            raise CitationError(
+                "Cannot build a Citation: RetrievalResult.chunk_id is missing.",
+            )
+        if not self.accession_number:
+            raise CitationError(
+                "Cannot build a Citation: RetrievalResult.accession_number is missing.",
+            )
+        if not self.filing_date:
+            raise CitationError(
+                "Cannot build a Citation: RetrievalResult.filing_date is missing.",
+            )
+
+        try:
+            filing_date_obj = date.fromisoformat(self.filing_date)
+        except ValueError as exc:
+            raise CitationError(
+                f"Cannot build a Citation: RetrievalResult.filing_date "
+                f"{self.filing_date!r} is not an ISO date.",
+            ) from exc
+
+        filing_id = FilingIdentifier(
+            ticker=self.ticker,
+            form_type=self.form_type,
+            filing_date=filing_date_obj,
+            accession_number=self.accession_number,
+        )
+        return Citation(
+            chunk_id=self.chunk_id,
+            filing_id=filing_id,
+            section_path=self.path,
+            text_span=self.content,
+            similarity=self.similarity,
+            display_index=display_index,
         )
 
 
