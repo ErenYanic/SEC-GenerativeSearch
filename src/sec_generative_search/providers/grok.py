@@ -42,6 +42,19 @@ class GrokProvider(OpenAICompatibleLLMProvider):
     # matrix — call sites can override via :class:`GenerationRequest`
     # and the SDK will surface any upstream limit.
     MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
+        "grok-4.3": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                vision=True,
+                context_window_tokens=1_000_000,
+                max_output_tokens=1_000_000,
+                pricing_tier=PricingTier.STANDARD,
+            ),
+        ),
         "grok-4.20-0309-reasoning": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
@@ -52,7 +65,7 @@ class GrokProvider(OpenAICompatibleLLMProvider):
                 vision=True,
                 context_window_tokens=2_000_000,
                 max_output_tokens=2_000_000,
-                pricing_tier=PricingTier.HIGH,
+                pricing_tier=PricingTier.STANDARD,
             ),
         ),
         "grok-4.20-0309-non-reasoning": ModelInfo(
@@ -65,7 +78,7 @@ class GrokProvider(OpenAICompatibleLLMProvider):
                 vision=True,
                 context_window_tokens=2_000_000,
                 max_output_tokens=2_000_000,
-                pricing_tier=PricingTier.HIGH,
+                pricing_tier=PricingTier.STANDARD,
             ),
         ),
         "grok-4.20-multi-agent-0309": ModelInfo(
@@ -78,7 +91,7 @@ class GrokProvider(OpenAICompatibleLLMProvider):
                 vision=True,
                 context_window_tokens=2_000_000,
                 max_output_tokens=2_000_000,
-                pricing_tier=PricingTier.HIGH,
+                pricing_tier=PricingTier.STANDARD,
             ),
         ),
         "grok-4-1-fast-reasoning": ModelInfo(

@@ -36,6 +36,18 @@ class MistralProvider(OpenAICompatibleLLMProvider):
     default_model = "mistral-small-2603"
 
     MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
+        "mistral-medium-3.5": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=False,
+                context_window_tokens=256_000,
+                max_output_tokens=256_000,
+                pricing_tier=PricingTier.HIGH,
+            ),
+        ),
         "magistral-medium-2509": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
