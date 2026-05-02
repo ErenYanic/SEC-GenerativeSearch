@@ -159,10 +159,15 @@ class OpenRouterProvider(OpenAICompatibleLLMProvider):
         client's ``Authorization`` header and is the sole credential in
         flight.
         """
+        # Inherit the base default's ``response_format`` handling so
+        # JSON-mode requests still reach OpenRouter even when routing
+        # hints are also present.
+        kwargs = super()._extra_request_kwargs(request)
         hints = request.routing_hints
         if hints is None:
-            return {}
+            return kwargs
         block = hints.to_provider_block()
         if not block:
-            return {}
-        return {"extra_body": {"provider": block}}
+            return kwargs
+        kwargs["extra_body"] = {"provider": block}
+        return kwargs

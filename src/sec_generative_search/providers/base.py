@@ -27,7 +27,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar, final
+from typing import TYPE_CHECKING, ClassVar, Literal, final
 
 from sec_generative_search.core.security import mask_secret
 from sec_generative_search.core.types import (
@@ -81,6 +81,22 @@ class GenerationRequest:
             SDK call.  The hint object is pass-through and carries no
             credential material; it is a *routing* channel, not an
             authentication one.
+        response_format: ``"text"`` (default) for plain free-form output,
+            or ``"json"`` to ask the provider to constrain the output to
+            a JSON object.  Providers that do not advertise
+            :attr:`ProviderCapability.structured_output` may ignore
+            ``"json"`` (best-effort) — the orchestrator's hybrid citation
+            extractor handles a parse failure by falling back to inline
+            markers.  The flag is consumed by each provider's
+            ``_extra_request_kwargs`` hook (or its SDK equivalent for
+            non-OpenAI-compatible providers) so the same surface works
+            across every adapter.
+        response_schema: Optional JSON Schema describing the expected
+            output shape.  Used only when ``response_format == "json"``;
+            providers that support schema-constrained output (e.g.
+            OpenAI, Gemini) consume it directly.  Providers that only
+            support plain JSON-mode ignore the schema and rely on the
+            prompt to enforce shape.
     """
 
     prompt: str
@@ -89,6 +105,8 @@ class GenerationRequest:
     temperature: float = 0.1
     max_output_tokens: int = 2048
     routing_hints: OpenRouterRoutingHints | None = None
+    response_format: Literal["text", "json"] = "text"
+    response_schema: dict | None = None
 
 
 @dataclass

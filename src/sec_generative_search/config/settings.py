@@ -399,7 +399,33 @@ class RAGSettings(BaseSettings):
     chat_history_enabled: bool = False  # session-scoped conversation memory (off by default)
     chat_history_max_turns: int = 10  # max turns retained in session memory
 
+    # Operator override for the conversation-history slice of the four-way
+    # context budget.  ``0`` means "use the default fraction of total
+    # context window (15%)" — see :class:`ContextBudget` in
+    # :mod:`sec_generative_search.rag.context`.  Negative values are
+    # rejected at load.
+    history_token_budget: int = 0
+
+    # BCP-47 code (e.g. ``"en"``, ``"tr"``) or ``"auto"``.  ``"auto"``
+    # makes the orchestrator answer in whatever language the
+    # query-understanding step detected; an explicit BCP-47 code locks
+    # the output language regardless of the input language.  Operators
+    # set this once per deployment; per-request override is deferred to
+    # Phase 12/13.
+    output_language: str = "auto"
+
     model_config = SettingsConfigDict(env_prefix="RAG_")
+
+    @field_validator("history_token_budget")
+    @classmethod
+    def _validate_history_budget(cls, value: int) -> int:
+        """Reject negative budgets — would over-allocate other slices."""
+        if value < 0:
+            raise ValueError(
+                f"RAG_HISTORY_TOKEN_BUDGET must be >= 0; got {value}. "
+                f"Use 0 to fall back to the default fraction of total context."
+            )
+        return value
 
 
 class SearchSettings(BaseSettings):

@@ -401,15 +401,36 @@ class OpenAICompatibleLLMProvider(_OpenAIClientMixin, BaseLLMProvider):
         """Hook for vendor-specific SDK kwargs.
 
         Splatted into :meth:`generate` / :meth:`generate_stream`'s call
-        to ``chat.completions.create``.  Empty by default so every
-        vanilla OpenAI-compatible vendor issues the same request shape.
+        to ``chat.completions.create``.  The default implementation
+        forwards :attr:`GenerationRequest.response_format` ``"json"``
+        as the OpenAI Chat Completions ``response_format`` argument.
+        When a JSON schema is supplied, it is forwarded as
+        ``json_schema``-shaped ``response_format``; without a schema,
+        ``json_object`` is used (plain JSON-mode).
+
         Overridden by :class:`~sec_generative_search.providers.openrouter.OpenRouterProvider`
-        to forward :class:`~sec_generative_search.providers.openrouter.OpenRouterRoutingHints`
-        via ``extra_body``; unrelated providers inherit the empty default
-        so ``request.routing_hints`` is silently ignored everywhere else.
+        to forward routing hints via ``extra_body``; subclasses must
+        ``super()`` into this default so JSON-mode keeps working.
         """
-        del request
-        return {}
+        kwargs: dict[str, Any] = {}
+        if request.response_format == "json":
+            if request.response_schema is not None:
+                # OpenAI's "json_schema" response_format expects a
+                # ``{"name": ..., "schema": ...}`` envelope.  We fill in
+                # a stable ``name`` because the SDK rejects an empty
+                # value; callers who want a custom name can override the
+                # ``$id`` field on the schema instead.
+                kwargs["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": request.response_schema.get("$id", "rag_response"),
+                        "schema": request.response_schema,
+                        "strict": True,
+                    },
+                }
+            else:
+                kwargs["response_format"] = {"type": "json_object"}
+        return kwargs
 
 
 # ---------------------------------------------------------------------------
