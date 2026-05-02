@@ -1,0 +1,34 @@
+[
+    {
+        "case_id": "q-revenue-concentration-001",
+        "query": "Which customers represent more than 10% of revenue?",
+        "expected_chunk_ids": [],
+        "expected_accession_numbers": [],
+        "expected_section_paths": [
+            "Part I > Item 1 > Business > Customers"
+        ],
+        "notes": "Section-path expectation — exercises the section-match arm of the scorer."
+    },
+    {
+        "case_id": "q-supply-chain-risk-002",
+        "query": "What supply chain risks does the company disclose?",
+        "expected_chunk_ids": [
+            "AAPL_10-K_2023-11-03_042"
+        ],
+        "expected_accession_numbers": [],
+        "expected_section_paths": [],
+        "notes": "Chunk-id expectation — exercises the chunk-id arm of the scorer."
+    },
+    {
+        "case_id": "q-cash-flow-summary-003",
+        "query": "Summarise operating cash flow trends over the last fiscal year.",
+        "expected_chunk_ids": [],
+        "expected_accession_numbers": [
+            "0000320193-23-000077"
+        ],
+        "expected_section_paths": [
+            "Part II > Item 7 > Liquidity and Capital Resources"
+        ],
+        "notes": "Mixed expectations — both filing-level and section-level."
+    }
+]
