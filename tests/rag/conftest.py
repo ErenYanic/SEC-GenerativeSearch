@@ -99,7 +99,7 @@ class FakeLLMProvider(BaseLLMProvider):
         usage: TokenUsage | None = None,
         capability: ProviderCapability | None = None,
     ) -> None:
-        super().__init__(api_key="fake-key-padding-1234")
+        super().__init__(api_key="fake-key-padding-1234")  # pragma: allowlist secret
         self.reply = reply
         self.usage = usage or TokenUsage(input_tokens=12, output_tokens=8)
         self.capability = capability or ProviderCapability(

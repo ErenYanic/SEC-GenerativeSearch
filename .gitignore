@@ -27,6 +27,10 @@ edgar-identity.txt
 *.feather
 data/
 
+# Track deterministic test fixtures even though *.json is ignored above.
+!tests/fixtures/
+!tests/fixtures/**
+
 # Operating system files
 .DS_Store
 .DS_Store?
