@@ -40,7 +40,10 @@ from collections.abc import Callable
 
 from sec_generative_search.config.settings import EmbeddingSettings
 from sec_generative_search.core.exceptions import ConfigurationError
-from sec_generative_search.providers.base import BaseEmbeddingProvider
+from sec_generative_search.providers.base import (
+    BaseEmbeddingProvider,
+    BaseLLMProvider,
+)
 from sec_generative_search.providers.registry import (
     ProviderRegistry,
     ProviderSurface,
@@ -49,6 +52,7 @@ from sec_generative_search.providers.registry import (
 __all__ = [
     "ApiKeyResolver",
     "build_embedder",
+    "build_llm_provider",
     "default_api_key_resolver",
 ]
 
@@ -58,13 +62,28 @@ ApiKeyResolver = Callable[[str], str | None]
 
 # Provider name → environment variable the default resolver reads.
 # Unknown names fall through to ``None`` — the factory decides whether
-# that is acceptable (only ``local`` is).
+# that is acceptable (only ``local`` is).  Embedding-only entries
+# (``local``) and LLM-only entries (``anthropic``, ``deepseek``, …) coexist
+# in one table because the registry name is the same on both surfaces; a
+# provider that ships both surfaces (``openai``, ``gemini``, ``mistral``,
+# ``qwen``) has one env var that the default resolver returns for both.
 _DEFAULT_ENV_VAR_BY_PROVIDER: dict[str, str] = {
+    # Both surfaces.
     "openai": "OPENAI_API_KEY",
     "gemini": "GEMINI_API_KEY",
     "mistral": "MISTRAL_API_KEY",
     "qwen": "DASHSCOPE_API_KEY",
+    # Embedding-only.
     "local": "HF_TOKEN",
+    # LLM-only.
+    "anthropic": "ANTHROPIC_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "kimi": "MOONSHOT_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "zai": "ZAI_API_KEY",
+    "grok": "XAI_API_KEY",
+    "minimax": "MINIMAX_API_KEY",
+    "mimo": "MIMO_API_KEY",
 }
 
 
@@ -134,3 +153,61 @@ def build_embedder(
     # ``local`` accepts ``None`` (uses its internal sentinel); every
     # other provider requires a real key per ``_ProviderBase``.
     return provider_cls(api_key, model=settings.model_name)
+
+
+def build_llm_provider(
+    provider_name: str,
+    *,
+    api_key_resolver: ApiKeyResolver = default_api_key_resolver,
+) -> BaseLLMProvider:
+    """Construct the LLM provider named *provider_name*.
+
+    Parallel construction seam to :func:`build_embedder`, so every site
+    that needs a concrete :class:`~sec_generative_search.providers.base.BaseLLMProvider`
+    (RAG orchestrator wiring, future API lifespan, future CLI shell)
+    routes through one resolver-aware factory.  Direct
+    ``OpenAIProvider(...)`` / ``AnthropicProvider(...)`` instantiation
+    outside this function and its tests is forbidden — that is what
+    makes the resolver-chain seam meaningful for user-supplied
+    credentials.
+
+    Differences from :func:`build_embedder`:
+
+    - LLM providers do not carry a model on the instance — model
+      selection is per-request via ``GenerationRequest.model``.  The
+      factory therefore takes only ``provider_name``.
+    - There is no ``local`` LLM surface, and therefore no sentinel
+      tolerance for a missing credential.  Every LLM provider requires
+      a real key; a ``None`` resolver result is always a configuration
+      error.
+
+    Args:
+        provider_name: Registry key (``"openai"``, ``"anthropic"``,
+            ``"openrouter"``, …).
+        api_key_resolver: Callable returning the credential for the
+            named provider.  Defaults to :func:`default_api_key_resolver`
+            (process environment); callers can supply a chained resolver
+            via :func:`sec_generative_search.core.credentials.chain_resolvers`.
+
+    Returns:
+        A concrete :class:`BaseLLMProvider` instance.
+
+    Raises:
+        KeyError: The provider's optional extras are not installed
+            (raised by :meth:`ProviderRegistry.get_class`).
+        ConfigurationError: The resolver returned ``None`` — every LLM
+            provider requires a real key.
+    """
+    provider_cls = ProviderRegistry.get_class(provider_name, ProviderSurface.LLM)
+
+    api_key = api_key_resolver(provider_name)
+    if api_key is None:
+        env_var = _DEFAULT_ENV_VAR_BY_PROVIDER.get(provider_name, "<unknown>")
+        raise ConfigurationError(
+            f"No API key resolved for LLM provider '{provider_name}'. "
+            f"Supply the key via the request-scoped resolver chain "
+            f"(session / encrypted user store) or set {env_var} in the "
+            f"server environment for the admin-default fallback."
+        )
+
+    return provider_cls(api_key)

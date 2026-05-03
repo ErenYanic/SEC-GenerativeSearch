@@ -420,6 +420,11 @@ class TestDatabaseDeploymentProfile:
         clean_env: pytest.MonkeyPatch,
     ) -> None:
         clean_env.setenv("DB_DEPLOYMENT_PROFILE", "team")
+        # Team default for credential persistence is True, which requires
+        # SQLCipher.  Disable here so this test stays focused on
+        # max_filings / retention defaults — the persistence default is
+        # covered separately.
+        clean_env.setenv("DB_PERSIST_PROVIDER_CREDENTIALS", "false")
         s = DatabaseSettings()
         assert s.deployment_profile == "team"
         assert s.max_filings == 10000
@@ -430,6 +435,7 @@ class TestDatabaseDeploymentProfile:
         clean_env: pytest.MonkeyPatch,
     ) -> None:
         clean_env.setenv("DB_DEPLOYMENT_PROFILE", "cloud")
+        clean_env.setenv("DB_PERSIST_PROVIDER_CREDENTIALS", "false")
         s = DatabaseSettings()
         assert s.deployment_profile == "cloud"
         assert s.max_filings == 10000
@@ -440,6 +446,7 @@ class TestDatabaseDeploymentProfile:
         clean_env: pytest.MonkeyPatch,
     ) -> None:
         clean_env.setenv("DB_DEPLOYMENT_PROFILE", "team")
+        clean_env.setenv("DB_PERSIST_PROVIDER_CREDENTIALS", "false")
         clean_env.setenv("DB_MAX_FILINGS", "20000")
         s = DatabaseSettings()
         assert s.max_filings == 20000
@@ -453,6 +460,7 @@ class TestDatabaseDeploymentProfile:
     ) -> None:
         """Operator opts a team-sized deployment out of eviction."""
         clean_env.setenv("DB_DEPLOYMENT_PROFILE", "team")
+        clean_env.setenv("DB_PERSIST_PROVIDER_CREDENTIALS", "false")
         clean_env.setenv("DB_RETENTION_MAX_AGE_DAYS", "0")
         s = DatabaseSettings()
         assert s.retention_max_age_days == 0
@@ -463,6 +471,7 @@ class TestDatabaseDeploymentProfile:
         clean_env: pytest.MonkeyPatch,
     ) -> None:
         clean_env.setenv("DB_DEPLOYMENT_PROFILE", "cloud")
+        clean_env.setenv("DB_PERSIST_PROVIDER_CREDENTIALS", "false")
         clean_env.setenv("DB_RETENTION_MAX_AGE_DAYS", "7")
         s = DatabaseSettings()
         assert s.retention_max_age_days == 7
@@ -485,6 +494,86 @@ class TestDatabaseDeploymentProfile:
         clean_env.setenv("DB_RETENTION_MAX_AGE_DAYS", "-1")
         with pytest.raises(ValidationError, match=">= 0"):
             DatabaseSettings()
+
+
+class TestProviderCredentialPersistenceToggle:
+    """``DB_PERSIST_PROVIDER_CREDENTIALS`` toggle behaviour."""
+
+    def test_local_profile_defaults_to_off(self, clean_env: pytest.MonkeyPatch) -> None:
+        s = DatabaseSettings()
+        assert s.persist_provider_credentials is False
+
+    def test_team_profile_defaults_to_on_with_sqlcipher(
+        self,
+        clean_env: pytest.MonkeyPatch,
+    ) -> None:
+        clean_env.setenv("DB_DEPLOYMENT_PROFILE", "team")
+        clean_env.setenv("DB_ENCRYPTION_KEY", "team-key-not-a-secret")
+        s = DatabaseSettings()
+        assert s.persist_provider_credentials is True
+
+    def test_cloud_profile_defaults_to_on_with_sqlcipher(
+        self,
+        clean_env: pytest.MonkeyPatch,
+    ) -> None:
+        clean_env.setenv("DB_DEPLOYMENT_PROFILE", "cloud")
+        clean_env.setenv("DB_ENCRYPTION_KEY", "cloud-key-not-a-secret")
+        s = DatabaseSettings()
+        assert s.persist_provider_credentials is True
+
+    def test_explicit_true_wins_over_local_default(
+        self,
+        clean_env: pytest.MonkeyPatch,
+    ) -> None:
+        clean_env.setenv("DB_PERSIST_PROVIDER_CREDENTIALS", "true")
+        clean_env.setenv("DB_ENCRYPTION_KEY", "key-not-a-secret")
+        s = DatabaseSettings()
+        assert s.persist_provider_credentials is True
+
+    def test_explicit_false_wins_over_team_default(
+        self,
+        clean_env: pytest.MonkeyPatch,
+    ) -> None:
+        """Operator opts a team deployment out of the encrypted store.
+
+        For example, they may want in-memory-only sessions for stricter
+        security.
+        """
+        clean_env.setenv("DB_DEPLOYMENT_PROFILE", "team")
+        clean_env.setenv("DB_PERSIST_PROVIDER_CREDENTIALS", "false")
+        s = DatabaseSettings()
+        assert s.persist_provider_credentials is False
+
+    @pytest.mark.security
+    def test_persist_true_without_sqlcipher_rejected(
+        self,
+        clean_env: pytest.MonkeyPatch,
+    ) -> None:
+        """The encrypted store must never write to a plaintext SQLite
+        file.  Settings load is the load-bearing refusal seam — without
+        it, the operator could inadvertently store provider keys
+        unencrypted."""
+        clean_env.setenv("DB_PERSIST_PROVIDER_CREDENTIALS", "true")
+        # No encryption key.
+        with pytest.raises(ValidationError, match="requires SQLCipher"):
+            DatabaseSettings()
+
+    def test_persist_true_with_key_file_path_resolves(
+        self,
+        clean_env: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """The persistence guard must run *after* ``encryption_key`` has
+        been resolved from ``encryption_key_file`` — otherwise an
+        operator who configures only the file path would be falsely
+        rejected.  Pin the validator ordering with a behavioural test."""
+        key_file = tmp_path / "db.key"
+        key_file.write_text("file-key-not-a-secret\n")
+        clean_env.setenv("DB_PERSIST_PROVIDER_CREDENTIALS", "true")
+        clean_env.setenv("DB_ENCRYPTION_KEY_FILE", str(key_file))
+        s = DatabaseSettings()
+        assert s.persist_provider_credentials is True
+        assert s.encryption_key == "file-key-not-a-secret"
 
 
 @pytest.mark.security

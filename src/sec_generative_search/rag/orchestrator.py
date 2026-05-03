@@ -497,7 +497,7 @@ class RAGOrchestrator:
         Comparative fan-out splits by ticker first, then by date_range
         when more than one is implied (v1 takes the plan's
         ``date_range`` as a single bucket; multi-range comparison is
-        a Phase 12/13 surface concern).
+        still out of scope here).
         """
         merged_filters = self._merge_filters(plan, extra_filters)
 

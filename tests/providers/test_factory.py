@@ -31,9 +31,13 @@ from sec_generative_search.config.settings import EmbeddingSettings
 from sec_generative_search.core.exceptions import ConfigurationError
 from sec_generative_search.providers.factory import (
     build_embedder,
+    build_llm_provider,
     default_api_key_resolver,
 )
-from sec_generative_search.providers.openai import OpenAIEmbeddingProvider
+from sec_generative_search.providers.openai import (
+    OpenAIEmbeddingProvider,
+    OpenAIProvider,
+)
 from sec_generative_search.providers.registry import (
     ProviderRegistry,
     ProviderSurface,
@@ -71,6 +75,14 @@ def _clean_embedding_and_credential_env(
             "MISTRAL_API_KEY",
             "DASHSCOPE_API_KEY",
             "HF_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "MOONSHOT_API_KEY",
+            "OPENROUTER_API_KEY",
+            "ZAI_API_KEY",
+            "XAI_API_KEY",
+            "MINIMAX_API_KEY",
+            "MIMO_API_KEY",
         }:
             monkeypatch.delenv(key, raising=False)
     yield monkeypatch
@@ -287,3 +299,106 @@ class TestFactoryCredentialHygiene:
                             f"lower-case value {v!r} — the mapping must "
                             "carry env-var names only."
                         )
+
+
+# ---------------------------------------------------------------------------
+# build_llm_provider
+# ---------------------------------------------------------------------------
+
+
+class TestBuildLLMProvider:
+    """The LLM construction seam mirrors ``build_embedder``.
+
+    Differences asserted: no per-instance model is forwarded; a missing
+    credential is *always* a ``ConfigurationError`` (no ``local`` sentinel
+    tolerance); the resolver chain remains the canonical credential
+    seam.
+    """
+
+    def test_builds_openai_llm_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test-1234567890ABCDEF")
+        provider = build_llm_provider("openai")
+        assert isinstance(provider, OpenAIProvider)
+
+    def test_builds_anthropic_via_default_resolver(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The default resolver lets Anthropic and the rest of the
+        LLM-only providers resolve from server env without any
+        caller-supplied chain."""
+        from sec_generative_search.providers.anthropic import AnthropicProvider
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-1234567890ABCDEF")
+        provider = build_llm_provider("anthropic")
+        assert isinstance(provider, AnthropicProvider)
+
+    def test_raises_without_credential(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        with pytest.raises(ConfigurationError) as exc_info:
+            build_llm_provider("openai")
+        message = str(exc_info.value)
+        # The message names the env var so an admin can fix it without
+        # reading the factory source.
+        assert "OPENAI_API_KEY" in message
+        # The message names the resolver-chain alternative so a session
+        # caller knows there is a per-request path too.
+        assert "session" in message or "resolver chain" in message
+
+    def test_custom_resolver_overrides_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env-DDDDDDDD")
+        called_with: list[str] = []
+
+        def resolver(name: str) -> str | None:
+            called_with.append(name)
+            return "sk-from-resolver-FFFFFFFF"
+
+        provider = build_llm_provider("openai", api_key_resolver=resolver)
+        assert isinstance(provider, OpenAIProvider)
+        assert called_with == ["openai"]
+
+    def test_factory_delegates_to_registry(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Patching ``ProviderRegistry.get_class`` proves ``build_llm_provider``
+        routes through the registry rather than importing adapters directly."""
+        calls: list[tuple[str, ProviderSurface]] = []
+
+        def stub_class(name: str, surface: ProviderSurface) -> type:
+            calls.append((name, surface))
+            return OpenAIProvider
+
+        monkeypatch.setattr(ProviderRegistry, "get_class", stub_class)
+
+        build_llm_provider("openai", api_key_resolver=lambda _n: "sk-test-1234ABCD")
+        assert calls == [("openai", ProviderSurface.LLM)]
+
+
+@pytest.mark.security
+class TestBuildLLMProviderCredentialHygiene:
+    def test_configuration_error_does_not_echo_credential_material(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        with pytest.raises(ConfigurationError) as exc_info:
+            build_llm_provider("openai", api_key_resolver=lambda _n: None)
+        rendered = str(exc_info.value).lower()
+        for needle in ("sk-", "bearer", "secret=", "password"):
+            assert needle not in rendered
+
+    def test_built_provider_repr_does_not_leak_key(self) -> None:
+        provider = build_llm_provider(
+            "openai",
+            api_key_resolver=lambda _n: "sk-NEEDLE-1234567890",
+        )
+        rendered = repr(provider) + " " + str(provider)
+        assert "sk-NEEDLE-1234567890" not in rendered
+        assert "NEEDLE" not in rendered

@@ -194,6 +194,26 @@ individually overridable; the profile only fills *unset* fields.
 """
 
 
+_DEPLOYMENT_PROFILE_PERSIST_CREDENTIALS: dict[str, bool] = {
+    DeploymentProfile.LOCAL.value: False,
+    DeploymentProfile.TEAM.value: True,
+    DeploymentProfile.CLOUD.value: True,
+}
+"""Profile → default for ``persist_provider_credentials``.
+
+Local profile defaults to *off* — single-user dev rarely benefits from
+the encrypted credential table and most local installs do not configure
+SQLCipher.  Team / cloud default to *on* because the table is the
+ergonomic seam that lets returning users avoid re-entering keys; both
+profiles already require SQLCipher for the rest of the metadata
+registry, so the requirement adds no new operational burden.
+
+Persistence enabled without SQLCipher is rejected at settings load (see
+``DatabaseSettings._validate_credential_persistence``) — the contract is
+that a stored provider key is *always* encrypted at rest.
+"""
+
+
 class DatabaseSettings(BaseSettings):
     """Database configuration.
 
@@ -227,6 +247,17 @@ class DatabaseSettings(BaseSettings):
     # Task history privacy settings.
     task_history_retention_days: int = 0  # 0 = keep indefinitely
     task_history_persist_tickers: bool = False
+
+    # Provider-credential persistence.
+    #
+    # When ``True``, ``EncryptedCredentialStore`` may persist user-supplied
+    # provider API keys into the SQLCipher-encrypted ``provider_credentials``
+    # table.  When ``False``, the encrypted store refuses to construct and
+    # the resolver chain falls back to in-memory + admin-env only.  The
+    # default is profile-driven (local=False, team/cloud=True).  Persistence
+    # without SQLCipher is rejected at load — a stored provider key must
+    # always be encrypted at rest.
+    persist_provider_credentials: bool | None = None
 
     model_config = SettingsConfigDict(env_prefix="DB_")
 
@@ -284,6 +315,17 @@ class DatabaseSettings(BaseSettings):
             self.max_filings = default_max
         if "retention_max_age_days" not in self.model_fields_set:
             self.retention_max_age_days = default_retention
+
+        # Credential-persistence default is also profile-driven.  ``None``
+        # is the sentinel for "operator did not set it" — Pydantic's
+        # ``model_fields_set`` treats env-supplied values as set, so the
+        # ``None`` check covers both "absent from env" and "absent from
+        # constructor kwargs".  An explicit ``DB_PERSIST_PROVIDER_CREDENTIALS=true``
+        # always wins.
+        if self.persist_provider_credentials is None:
+            self.persist_provider_credentials = _DEPLOYMENT_PROFILE_PERSIST_CREDENTIALS.get(
+                self.deployment_profile, False
+            )
         return self
 
     @model_validator(mode="after")
@@ -297,6 +339,31 @@ class DatabaseSettings(BaseSettings):
         self.encryption_key = resolve_encryption_key_from_values(
             self.encryption_key, self.encryption_key_file
         )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_credential_persistence(self) -> "DatabaseSettings":
+        """Refuse to persist provider credentials without SQLCipher.
+
+        The encrypted-credential store is layered on top of SQLCipher's
+        whole-database encryption — that is the load-bearing control.
+        Allowing the toggle to be ``True`` while ``encryption_key`` is
+        unset would write provider keys into a plain-text SQLite file,
+        defeating the entire point of the table.  Fail at load with a
+        message that names both knobs the operator can fix.
+
+        Must run *after* :meth:`_resolve_encryption_key` so an operator
+        who sets ``DB_ENCRYPTION_KEY_FILE`` (rather than the inline key)
+        is not falsely rejected before the file has been read.
+        """
+        if self.persist_provider_credentials and not self.encryption_key:
+            raise ValueError(
+                "DB_PERSIST_PROVIDER_CREDENTIALS=true requires SQLCipher "
+                "encryption.  Configure DB_ENCRYPTION_KEY (or "
+                "DB_ENCRYPTION_KEY_FILE), or set "
+                "DB_PERSIST_PROVIDER_CREDENTIALS=false to disable the "
+                "encrypted credential store."
+            )
         return self
 
     @model_validator(mode="after")
@@ -410,8 +477,7 @@ class RAGSettings(BaseSettings):
     # makes the orchestrator answer in whatever language the
     # query-understanding step detected; an explicit BCP-47 code locks
     # the output language regardless of the input language.  Operators
-    # set this once per deployment; per-request override is deferred to
-    # Phase 12/13.
+    # set this once per deployment.
     output_language: str = "auto"
 
     model_config = SettingsConfigDict(env_prefix="RAG_")
