@@ -143,14 +143,19 @@ def _table_exists(db_path: str, name: str) -> bool:
 
 
 class TestBootstrapBrandNew:
-    """A brand-new SQLite file is stamped at v1 on first open."""
+    """A brand-new SQLite file is stamped through every applicable version
+    on first open — v1 (baseline) plus every v2+ migration body."""
 
     def test_stamps_v1(self, tmp_db_path: str) -> None:
         registry = MetadataRegistry(db_path=tmp_db_path)
         registry.close()
 
+        # v1 is always present (baseline).  Every additional stamp is the
+        # set of migration versions :data:`MIGRATIONS` declares.  Comparing
+        # against the live MIGRATIONS keeps the assertion tracking the
+        # source of truth as new migrations land.
         rows = _read_schema_versions(tmp_db_path)
-        assert len(rows) == 1
+        assert [row[0] for row in rows] == [1, *(v for v, _ in MIGRATIONS)]
         assert rows[0][0] == 1
 
     def test_creates_v1_tables(self, tmp_db_path: str) -> None:
@@ -176,18 +181,27 @@ class TestBootstrapBrandNew:
         assert row is not None
 
     @pytest.mark.security
-    def test_no_migration_body_run(self, tmp_db_path: str) -> None:
-        """v1 is the baseline — nothing in :data:`MIGRATIONS` to execute.
+    def test_v1_has_no_migration_body(self, tmp_db_path: str) -> None:
+        """v1 is the baseline — :data:`MIGRATIONS` MUST NOT carry an
+        entry for version 1.
 
-        The empty tuple is the contract for "no body run".
+        Adding a v1 entry would cause the body to run on every
+        v1-shaped-unstamped database (the lossless upgrade path) and
+        would corrupt rows that already match the baseline.  The
+        contract: v1 is the implicit baseline; the migrations tuple
+        carries v2+ only.
         """
-        assert MIGRATIONS == ()
+        v1_entries = [v for v, _ in MIGRATIONS if v == 1]
+        assert v1_entries == [], (
+            "MIGRATIONS must not contain a v1 entry; v1 is the implicit baseline."
+        )
 
+        # Brand-new bootstrap stamps v1 + every declared v2+ migration.
         registry = MetadataRegistry(db_path=tmp_db_path)
         registry.close()
-
         rows = _read_schema_versions(tmp_db_path)
-        assert [row[0] for row in rows] == [1]
+        assert rows[0][0] == 1
+        assert [row[0] for row in rows[1:]] == [v for v, _ in MIGRATIONS]
 
 
 # ---------------------------------------------------------------------------
@@ -208,18 +222,22 @@ class TestBootstrapV1Shaped:
         finally:
             registry.close()
 
-        assert [row[0] for row in _read_schema_versions(tmp_db_path)] == [1]
+        # v1 stamp + every declared v2+ migration.
+        assert [row[0] for row in _read_schema_versions(tmp_db_path)] == [
+            1,
+            *(v for v, _ in MIGRATIONS),
+        ]
 
     def test_idempotent_reopen(self, tmp_db_path: str) -> None:
-        """Two consecutive opens leave exactly one schema_version row."""
+        """Two consecutive opens leave exactly one stamp per declared version."""
         _seed_v1_unstamped(tmp_db_path)
 
         MetadataRegistry(db_path=tmp_db_path).close()
         MetadataRegistry(db_path=tmp_db_path).close()
 
         rows = _read_schema_versions(tmp_db_path)
-        assert len(rows) == 1
-        assert rows[0][0] == 1
+        expected = [1, *(v for v, _ in MIGRATIONS)]
+        assert [row[0] for row in rows] == expected
 
 
 # ---------------------------------------------------------------------------
@@ -273,8 +291,9 @@ class TestClearAllPreservesSchemaVersion:
             registry.close()
 
         rows = _read_schema_versions(tmp_db_path)
-        assert len(rows) == 1
-        assert rows[0][0] == 1
+        # v1 plus every declared migration must survive clear_all (it
+        # truncates filings, not schema_version).
+        assert [row[0] for row in rows] == [1, *(v for v, _ in MIGRATIONS)]
 
 
 # ---------------------------------------------------------------------------
@@ -285,34 +304,46 @@ class TestClearAllPreservesSchemaVersion:
 class TestApplyPendingMigrations:
     """The apply path is exercised through the *migrations* test seam.
 
-    :data:`MIGRATIONS` is empty for v1, so the apply surface is
-    exercised by injecting fake migrations that record their execution
-    on a real, stamped SQLite database.
+    Real :data:`MIGRATIONS` may carry production entries (v2+); the
+    tests inject their own ordered tuple via the *migrations* keyword
+    so the assertions stay independent of the production registry's
+    contents.  Injected versions deliberately start at a high number
+    (100+) to avoid colliding with any production migration that has
+    already been stamped on the freshly-bootstrapped registry.
     """
 
     def _open_stamped(self, tmp_db_path: str) -> Any:
-        """Return a connection to a brand-new DB stamped at v1."""
+        """Return a connection to a brand-new bootstrapped DB.
+
+        The DB is stamped at v1 plus every entry in production
+        :data:`MIGRATIONS`.  Tests assert against a stamp baseline
+        that includes the production migrations.
+        """
         MetadataRegistry(db_path=tmp_db_path).close()
         return sqlite3.connect(tmp_db_path)
+
+    def _baseline_stamps(self) -> list[int]:
+        return [1, *(v for v, _ in MIGRATIONS)]
 
     def test_runs_pending_in_order(self, tmp_db_path: str) -> None:
         conn = self._open_stamped(tmp_db_path)
         order: list[int] = []
 
-        def _v2(c: Any) -> None:
-            order.append(2)
+        def _v100(c: Any) -> None:
+            order.append(100)
 
-        def _v3(c: Any) -> None:
-            order.append(3)
+        def _v101(c: Any) -> None:
+            order.append(101)
 
         try:
-            apply_pending_migrations(conn, migrations=((2, _v2), (3, _v3)))
+            apply_pending_migrations(conn, migrations=((100, _v100), (101, _v101)))
             conn.commit()
         finally:
             conn.close()
 
-        assert order == [2, 3]
-        assert [row[0] for row in _read_schema_versions(tmp_db_path)] == [1, 2, 3]
+        assert order == [100, 101]
+        expected = [*self._baseline_stamps(), 100, 101]
+        assert [row[0] for row in _read_schema_versions(tmp_db_path)] == expected
 
     def test_skips_already_applied(self, tmp_db_path: str) -> None:
         conn = self._open_stamped(tmp_db_path)
@@ -330,7 +361,7 @@ class TestApplyPendingMigrations:
         # The brand-new bootstrap already stamped v1 — the injected
         # body must not run a second time.
         assert called == []
-        assert [row[0] for row in _read_schema_versions(tmp_db_path)] == [1]
+        assert [row[0] for row in _read_schema_versions(tmp_db_path)] == self._baseline_stamps()
 
     @pytest.mark.security
     def test_body_failure_leaves_prior_versions_committed(

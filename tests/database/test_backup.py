@@ -38,7 +38,13 @@ from sec_generative_search.database import (
     ChromaDBClient,
     MetadataRegistry,
 )
+from sec_generative_search.database.migrations import MIGRATIONS
 from sec_generative_search.pipeline.orchestrator import ProcessedFiling
+
+# The current schema version — v1 baseline plus every declared migration.
+# Computed once so individual test assertions stay tracking the source of
+# truth as new migrations land in production.
+_CURRENT_SCHEMA_VERSION = max((1, *(v for v, _ in MIGRATIONS)))
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -195,7 +201,7 @@ class TestBackupHappyPath:
 
         assert isinstance(report, BackupReport)
         assert report.embedder_stamp == stamp
-        assert report.schema_version == 1
+        assert report.schema_version == _CURRENT_SCHEMA_VERSION
         assert report.sqlcipher_encrypted is False
         assert report.size_bytes > 0
         assert report.duration_seconds >= 0.0
@@ -229,7 +235,7 @@ class TestBackupHappyPath:
             "model": stamp.model,
             "dimension": stamp.dimension,
         }
-        assert manifest["schema_version"] == 1
+        assert manifest["schema_version"] == _CURRENT_SCHEMA_VERSION
         assert manifest["sqlcipher_encrypted"] is False
         assert "created_at_utc" in manifest
 
@@ -375,7 +381,7 @@ class TestRestoreHappyPath:
         report = service.restore(output, expected_stamp=stamp)
         assert isinstance(report, RestoreReport)
         assert report.embedder_stamp == stamp
-        assert report.schema_version == 1
+        assert report.schema_version == _CURRENT_SCHEMA_VERSION
         assert report.sqlcipher_encrypted is False
 
         # ChromaDB has the seeded chunk back.

@@ -2,6 +2,10 @@
 
 from sec_generative_search.database.backup import BackupService
 from sec_generative_search.database.client import ChromaDBClient
+from sec_generative_search.database.credentials import (
+    CredentialRecord,
+    EncryptedCredentialStore,
+)
 from sec_generative_search.database.metadata import (
     DatabaseStatistics,
     FilingRecord,
@@ -18,7 +22,9 @@ from sec_generative_search.database.store import FilingStore
 __all__ = [
     "BackupService",
     "ChromaDBClient",
+    "CredentialRecord",
     "DatabaseStatistics",
+    "EncryptedCredentialStore",
     "FilingRecord",
     "FilingStore",
     "MetadataRegistry",

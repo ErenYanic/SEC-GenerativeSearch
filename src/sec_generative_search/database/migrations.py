@@ -72,9 +72,49 @@ trail in :mod:`sec_generative_search.database.metadata`).
 # v1 is the *baseline* shape produced by
 # :meth:`MetadataRegistry._create_table`.  It has no migration body of
 # its own — the idempotent ``CREATE TABLE IF NOT EXISTS`` path covers
-# both brand-new and v1-shaped-unstamped databases.  v2+ will be the
-# first entries that actually run SQL through this surface.
-MIGRATIONS: tuple[tuple[int, MigrationFn], ...] = ()
+# both brand-new and v1-shaped-unstamped databases.  v2+ are the first
+# entries that actually run SQL through this surface.
+
+
+def _migrate_v2_provider_credentials(conn: Any) -> None:
+    """Create the encrypted ``provider_credentials`` table.
+
+    Holds user-supplied provider API keys for callers that opt in via
+    ``DB_PERSIST_PROVIDER_CREDENTIALS=true``.  Encryption-at-rest is
+    SQLCipher's whole-database encryption — there is no per-row crypto
+    layer.  The table is created unconditionally by the migration so a
+    deployment that later flips the toggle on does not need a separate
+    "first-time create" branch; the
+    :class:`~sec_generative_search.database.credentials.EncryptedCredentialStore`
+    constructor still refuses to operate when the toggle is off, which
+    is the load-bearing access gate.
+
+    Schema rationale:
+
+        - ``user_id`` is opaque to this layer.  The caller decides what it
+            means (likely ``sha256(API_KEY)`` for the simple shared-key
+            deployment, a real user record once auth lands).
+        - ``api_key`` is stored as ``TEXT`` (the SQLCipher driver encrypts
+            every page on disk).  No second crypto layer; SQLCipher is the
+            single sealing seam.
+    - Composite primary key ``(user_id, provider)`` enforces "at most
+      one credential per (user, provider)" without a separate
+      ``UNIQUE`` index.  ``REPLACE`` semantics on conflict are the
+      standard upsert pattern used in the rest of the package.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS provider_credentials (
+            user_id TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            api_key TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, provider)
+        )
+    """)
+
+
+MIGRATIONS: tuple[tuple[int, MigrationFn], ...] = ((2, _migrate_v2_provider_credentials),)
 
 
 _SCHEMA_VERSION_DDL = """
