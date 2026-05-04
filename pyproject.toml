@@ -110,7 +110,12 @@ line-length = 100
 # removed from this list once the module is brought up to the same lint
 # standard as the rest of the project.
 extend-exclude = [
-    "src/sec_generative_search/api",
+    # 10B/11 work — adapted file-by-file with their owning phase.
+    "src/sec_generative_search/api/tasks.py",
+    "src/sec_generative_search/api/websocket.py",
+    "src/sec_generative_search/api/routes/filings.py",
+    "src/sec_generative_search/api/routes/ingest.py",
+    "src/sec_generative_search/api/routes/resources.py",
     "src/sec_generative_search/cli",
 ]
 
@@ -140,6 +145,9 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101", "S106", "T201"]  # asserts, hardcoded passwords, prints OK in tests
 "src/sec_generative_search/cli/**/*.py" = ["T201"]  # CLI modules may print
+# B008 = "do not call function in argument defaults" — clashes with the
+# canonical FastAPI Depends(...) / Security(...) pattern used in routes.
+"src/sec_generative_search/api/**/*.py" = ["B008"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["sec_generative_search"]
