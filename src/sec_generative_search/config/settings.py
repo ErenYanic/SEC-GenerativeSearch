@@ -17,7 +17,7 @@ Environment variable mapping (examples):
 from pathlib import Path
 
 from dotenv import load_dotenv
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from sec_generative_search.core.types import DeploymentProfile
@@ -543,6 +543,11 @@ class ApiSettings(BaseSettings):
     # Per-session EDGAR credentials requirement.
     edgar_session_required: bool = False
 
+    # Sliding TTL for the server-minted ``session_id`` cookie.  Mirrors
+    # the in-memory credential-store default; lowering this reduces the
+    # window in which a stolen cookie can resolve user-supplied keys.
+    session_ttl_seconds: int = 60 * 60  # one hour
+
     # Demo mode — FIFO eviction, nightly reset banner, "clear all" disabled.
     demo_mode: bool = False
     demo_eviction_buffer: int = 500
@@ -565,19 +570,27 @@ class ApiSettings(BaseSettings):
 
 
 class Settings(BaseSettings):
-    """Root settings class combining all sections."""
+    """Root settings class combining all sections.
 
-    edgar: EdgarSettings = EdgarSettings()
-    embedding: EmbeddingSettings = EmbeddingSettings()
-    chunking: ChunkingSettings = ChunkingSettings()
-    database: DatabaseSettings = DatabaseSettings()
-    llm: LLMSettings = LLMSettings()
-    provider: ProviderSettings = ProviderSettings()
-    rag: RAGSettings = RAGSettings()
-    search: SearchSettings = SearchSettings()
-    log_file: LoggingSettings = LoggingSettings()
-    hugging_face: HuggingFaceSettings = HuggingFaceSettings()
-    api: ApiSettings = ApiSettings()
+    Nested fields use ``Field(default_factory=...)`` rather than a
+    cached default instance.  Each ``Settings()`` call rebuilds the
+    nested models so they observe the *current* ``os.environ`` —
+    important for ``reload_settings()`` and for tests that mutate the
+    environment between assertions.  ``load_dotenv()`` still fires at
+    module top so ``.env`` is in ``os.environ`` before any factory call.
+    """
+
+    edgar: EdgarSettings = Field(default_factory=EdgarSettings)
+    embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
+    chunking: ChunkingSettings = Field(default_factory=ChunkingSettings)
+    database: DatabaseSettings = Field(default_factory=DatabaseSettings)
+    llm: LLMSettings = Field(default_factory=LLMSettings)
+    provider: ProviderSettings = Field(default_factory=ProviderSettings)
+    rag: RAGSettings = Field(default_factory=RAGSettings)
+    search: SearchSettings = Field(default_factory=SearchSettings)
+    log_file: LoggingSettings = Field(default_factory=LoggingSettings)
+    hugging_face: HuggingFaceSettings = Field(default_factory=HuggingFaceSettings)
+    api: ApiSettings = Field(default_factory=ApiSettings)
 
     model_config = SettingsConfigDict(
         env_file=".env",
