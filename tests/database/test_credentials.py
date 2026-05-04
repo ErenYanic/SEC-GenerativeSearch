@@ -15,7 +15,7 @@ Coverage:
 - Schema-version stamping after migration v2.
 
 Notes on the SQLCipher-skipped path: ``pysqlcipher3`` is not part of the
-CI install (AGENT.md repo conventions, ``[encryption]`` extra).  Tests
+CI install (``[encryption]`` extra).  Tests
 that exercise SQL paths force-set ``MetadataRegistry._encrypted = True``
 under a ``# noqa: SLF001`` so the store's invariant check passes; the
 store is only validated against plain-sqlite3 SQL semantics, which is

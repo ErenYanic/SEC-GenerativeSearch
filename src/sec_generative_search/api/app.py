@@ -1,329 +1,168 @@
+"""FastAPI application factory and lifespan.
+
+10A scope — what *this* file owns:
+
+    - Build the FastAPI ``app`` instance via :func:`create_app`.
+    - Initialise singletons in :func:`lifespan`: ``MetadataRegistry``,
+      ``ChromaDBClient``, the embedder, ``FilingStore``,
+      ``RetrievalService``, the Phase-9
+      ``InMemorySessionCredentialStore``, and the optional
+      ``EncryptedCredentialStore`` (only when the deployment profile
+      enables persistent credential storage).
+    - Wire the middleware stack and the structured-error handlers.
+    - Mount 10A routes: ``/api/health``, ``/api/status/``,
+      ``/api/session``, ``/api/session/logout``.
+    - Toggle OpenAPI docs off when ``API_KEY`` is configured.
+
+Out of scope for 10A — added by 10B:
+
+    - LLM provider construction (per-request via
+      :func:`request_scoped_resolver`).
+    - ``TaskManager`` (ingestion progress).
+    - Filings, ingest, retrieval, RAG, provider-validate routes.
+
+Notes for the lifespan:
+
+    - The embedder is constructed eagerly at startup using the
+    *administrative* default-env-var resolver. A startup failure here
+    is the right behaviour: a deployment that cannot embed will not
+    serve correct retrievals; refuse early.
+    - ``EncryptedCredentialStore`` is optional and gated by
+      ``DB_PERSIST_PROVIDER_CREDENTIALS``.  When disabled, the resolver
+      chain falls through to the session store and the admin-env
+      fallback, which is the documented Scenario-A behaviour.
+    - ``app.state`` is a Starlette-supplied attribute namespace; we
+      attach typed names that ``api.dependencies`` reads back.
 """
-FastAPI application factory for SEC-SemanticSearch.
 
-The public symbol is ``app`` — the ASGI application object used by
-uvicorn and by the test client.
+from __future__ import annotations
 
-Architecture:
-    - Singletons (ChromaDBClient, MetadataRegistry, SearchEngine,
-      FilingFetcher) are initialised once in the lifespan context
-      manager and stored on ``app.state``.
-    - Route modules access them through dependency functions in
-      ``dependencies.py`` (which read from ``request.app.state``).
-    - No business logic lives here — this is pure wiring.
-"""
-
-import asyncio
-import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
 
-from fastapi import Depends, FastAPI, Request, Response
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from starlette.types import ASGIApp, Receive, Scope, Send
 
-from sec_semantic_search import __version__
-from sec_semantic_search.api.dependencies import verify_api_key
-from sec_semantic_search.api.rate_limit import RateLimitMiddleware
-from sec_semantic_search.config import get_settings
-from sec_semantic_search.core import get_logger
+from sec_generative_search import __version__
+from sec_generative_search.api.errors import install_error_handlers
+from sec_generative_search.api.middleware import (
+    ContentSizeLimitMiddleware,
+    InsecureTransportWarningMiddleware,
+    RateLimitMiddleware,
+    SecurityHeadersMiddleware,
+)
+from sec_generative_search.api.routes.health import router as health_router
+from sec_generative_search.api.routes.session import router as session_router
+from sec_generative_search.api.routes.status import router as status_router
+from sec_generative_search.config.settings import get_settings
+from sec_generative_search.core.credentials import InMemorySessionCredentialStore
+from sec_generative_search.core.logging import get_logger
+from sec_generative_search.core.types import EmbedderStamp
+from sec_generative_search.database import ChromaDBClient, FilingStore, MetadataRegistry
+from sec_generative_search.database.credentials import EncryptedCredentialStore
+from sec_generative_search.providers.factory import build_embedder
+from sec_generative_search.providers.registry import ProviderRegistry
+from sec_generative_search.search import RetrievalService
+
+__all__ = ["app", "create_app", "lifespan"]
+
 
 logger = get_logger(__name__)
 
-_CONTENT_SECURITY_POLICY = "; ".join(
-    [
-        "default-src 'self'",
-        "base-uri 'self'",
-        "frame-ancestors 'none'",
-        "img-src 'self' data: blob: https:",
-        "font-src 'self' data: https:",
-        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com",
-        "script-src 'self' https://cdn.jsdelivr.net https://unpkg.com",
-        "connect-src 'self' ws: wss:",
-    ]
-)
-
-_PERMISSIONS_POLICY = (
-    "camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()"
-)
-
-_SECURITY_HEADERS: list[tuple[bytes, bytes]] = [
-    (b"x-content-type-options", b"nosniff"),
-    (b"x-frame-options", b"DENY"),
-    (b"x-xss-protection", b"1; mode=block"),
-    (b"referrer-policy", b"strict-origin-when-cross-origin"),
-    (b"content-security-policy", _CONTENT_SECURITY_POLICY.encode()),
-    (b"permissions-policy", _PERMISSIONS_POLICY.encode()),
-]
-
 
 # ---------------------------------------------------------------------------
-# Security headers middleware (pure ASGI — no threadpool overhead)
-# ---------------------------------------------------------------------------
-
-
-class SecurityHeadersMiddleware:
-    """Add security headers to every HTTP response.
-
-    Pure ASGI implementation — intercepts the ``http.response.start``
-    message and appends headers directly, avoiding the per-request
-    ``run_in_threadpool`` overhead of ``BaseHTTPMiddleware``.
-    """
-
-    def __init__(self, app: ASGIApp) -> None:
-        self.app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-
-        async def send_with_headers(message: dict[str, Any]) -> None:
-            if message["type"] == "http.response.start":
-                headers = list(message.get("headers", []))
-                headers.extend(_SECURITY_HEADERS)
-                message["headers"] = headers
-            await send(message)
-
-        await self.app(scope, receive, send_with_headers)
-
-
-class InsecureTransportWarningMiddleware(BaseHTTPMiddleware):
-    """Log a one-time warning when protected traffic arrives over HTTP."""
-
-    def __init__(self, app: ASGIApp) -> None:
-        super().__init__(app)
-        self._warned = False
-
-    async def dispatch(
-        self,
-        request: Request,
-        call_next: RequestResponseEndpoint,
-    ) -> Response:
-        if not self._warned:
-            self._maybe_warn(request)
-        return await call_next(request)
-
-    def _maybe_warn(self, request: Request) -> None:
-        settings = get_settings()
-        if not (settings.api.key or settings.api.admin_key or settings.api.edgar_session_required):
-            return
-
-        forwarded_proto = request.headers.get("x-forwarded-proto")
-        if forwarded_proto is None:
-            return
-
-        proto = forwarded_proto.split(",", 1)[0].strip().lower()
-        if proto != "http":
-            return
-
-        self._warned = True
-        logger.warning(
-            "Insecure transport detected (X-Forwarded-Proto=http) while "
-            "authentication or per-session EDGAR credentials are enabled. "
-            "Scenarios B and C require TLS; enable HTTPS at the reverse proxy "
-            "or launch the API with --ssl-certfile/--ssl-keyfile.",
-        )
-
-
-# ---------------------------------------------------------------------------
-# Request body size limit middleware (pure ASGI — no threadpool overhead)
-# ---------------------------------------------------------------------------
-
-# 1 MB — matches nginx client_max_body_size; defence in depth for
-# direct-to-uvicorn access (local dev without reverse proxy).
-_MAX_CONTENT_LENGTH = 1 * 1024 * 1024
-
-
-class ContentSizeLimitMiddleware:
-    """Reject requests whose body exceeds the allowed limit.
-
-    Pure ASGI implementation with two layers of defence:
-
-    1. **Content-Length check** — short-circuits before reading the body
-       when the declared size exceeds the limit.
-    2. **Stream-counting wrapper** — intercepts ``http.request`` messages
-       and tracks bytes received so far.  Rejects mid-stream if the
-       cumulative total exceeds the limit, protecting against chunked
-       transfer encoding (which omits ``Content-Length``).
-    """
-
-    def __init__(self, app: ASGIApp) -> None:
-        self.app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-
-        headers = dict(scope.get("headers", []))
-        content_length_raw = headers.get(b"content-length")
-
-        if content_length_raw is not None:
-            try:
-                length = int(content_length_raw)
-            except (ValueError, UnicodeDecodeError):
-                await self._send_json(
-                    send,
-                    status=400,
-                    body={"detail": "Invalid Content-Length header."},
-                )
-                return
-
-            if length > _MAX_CONTENT_LENGTH:
-                await self._send_json(
-                    send,
-                    status=413,
-                    body={
-                        "detail": {
-                            "error": "payload_too_large",
-                            "message": (
-                                f"Request body too large ({length:,} bytes). "
-                                f"Maximum allowed: {_MAX_CONTENT_LENGTH:,} bytes."
-                            ),
-                            "details": None,
-                            "hint": "Reduce the request payload size.",
-                        },
-                    },
-                )
-                return
-
-        # Stream-counting wrapper — enforces the limit during body reads
-        # even when Content-Length is absent (chunked transfer encoding).
-        bytes_received = 0
-        rejected = False
-
-        async def receive_with_limit() -> dict:
-            nonlocal bytes_received, rejected
-            message = await receive()
-            if message["type"] == "http.request":
-                bytes_received += len(message.get("body", b""))
-                if bytes_received > _MAX_CONTENT_LENGTH:
-                    rejected = True
-                    # Return an empty body with more_body=False to signal
-                    # end of stream; the 413 is sent via send_with_guard.
-                    return {"type": "http.request", "body": b"", "more_body": False}
-            return message
-
-        async def send_with_guard(message: dict) -> None:
-            if rejected and message["type"] == "http.response.start":
-                # Suppress the app's response — we send our own 413.
-                return
-            if rejected and message["type"] == "http.response.body":
-                return
-            await send(message)
-
-        await self.app(scope, receive_with_limit, send_with_guard)
-
-        if rejected:
-            await self._send_json(
-                send,
-                status=413,
-                body={
-                    "detail": {
-                        "error": "payload_too_large",
-                        "message": (
-                            f"Request body too large (>{_MAX_CONTENT_LENGTH:,} bytes). "
-                            f"Maximum allowed: {_MAX_CONTENT_LENGTH:,} bytes."
-                        ),
-                        "details": None,
-                        "hint": "Reduce the request payload size.",
-                    },
-                },
-            )
-
-    @staticmethod
-    async def _send_json(send: Send, *, status: int, body: dict) -> None:
-        """Send a complete JSON response via raw ASGI messages."""
-        payload = json.dumps(body).encode()
-        await send(
-            {
-                "type": "http.response.start",
-                "status": status,
-                "headers": [
-                    [b"content-type", b"application/json"],
-                    [b"content-length", str(len(payload)).encode()],
-                ],
-            }
-        )
-        await send(
-            {
-                "type": "http.response.body",
-                "body": payload,
-            }
-        )
-
-
-# ---------------------------------------------------------------------------
-# Lifespan — initialise singletons, store on app.state
+# Lifespan
 # ---------------------------------------------------------------------------
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Boot every singleton, expose them on ``app.state``, and tear down.
+
+    Order is load-bearing:
+
+    1. Embedder — fails early on missing admin env var.
+    2. ``EmbedderStamp`` from the registry — the storage seal.
+    3. ``ChromaDBClient`` — opens (or creates) the sealed collection.
+    4. ``MetadataRegistry`` — opens SQLite/SQLCipher and applies
+       migrations including v2 (``provider_credentials``).
+    5. ``FilingStore`` — coordinator over the two stores above.
+    6. ``RetrievalService`` — pre-built single-query primitive.
+    7. ``InMemorySessionCredentialStore`` — Phase-9 in-memory store.
+    8. ``EncryptedCredentialStore`` — optional, gated by settings.
     """
-    Initialise and clean up application-level singletons.
-
-    Heavy imports happen here (not at module top level) to keep
-    ``import sec_semantic_search.api.app`` lightweight and avoid
-    pulling torch/chromadb at test collection time.
-
-    Startup order:
-        1. MetadataRegistry (SQLite — fast)
-        2. ChromaDBClient (ChromaDB — fast; model not loaded yet)
-        3. EmbeddingGenerator (lazy — model loads on first use)
-        4. SearchEngine (wraps embedder + chroma — fast)
-        5. FilingFetcher (sets EDGAR identity — fast)
-        6. PipelineOrchestrator (wraps fetcher + embedder — fast)
-        7. TaskManager (wraps registry + chroma + fetcher + orchestrator)
-    """
-    from sec_semantic_search.api.tasks import TaskManager
-    from sec_semantic_search.database import ChromaDBClient, MetadataRegistry
-    from sec_semantic_search.pipeline import (
-        EmbeddingGenerator,
-        FilingFetcher,
-        PipelineOrchestrator,
-    )
-    from sec_semantic_search.search import SearchEngine
-
-    logger.info("SEC Semantic Search API starting up (v%s)", __version__)
-
     settings = get_settings()
+    logger.info("SEC-GenerativeSearch API starting up (v%s)", __version__)
 
-    registry = MetadataRegistry()
-    chroma = ChromaDBClient()
-    embedder = EmbeddingGenerator()
-    search_engine = SearchEngine(embedder=embedder, chroma_client=chroma)
-    fetcher = FilingFetcher()
-    orchestrator = PipelineOrchestrator(fetcher=fetcher, embedder=embedder)
-    task_manager = TaskManager(
-        registry=registry,
-        chroma=chroma,
-        fetcher=fetcher,
-        orchestrator=orchestrator,
+    # 1. Embedder — administrative selection, default-env resolver only.
+    embedder = build_embedder(settings.embedding)
+
+    # 2. Stamp via the registry — single source of truth for dimension.
+    dimension = ProviderRegistry.get_dimension(
+        settings.embedding.provider,
+        settings.embedding.model_name,
+    )
+    stamp = EmbedderStamp(
+        provider=settings.embedding.provider,
+        model=settings.embedding.model_name,
+        dimension=dimension,
     )
 
-    # Give the TaskManager a reference to the running event loop so
-    # worker threads can bridge messages into the asyncio.Queue via
-    # call_soon_threadsafe.
-    task_manager.set_event_loop(asyncio.get_running_loop())
+    # 3-5. Storage chain.
+    chroma = ChromaDBClient(stamp)
+    registry = MetadataRegistry()
+    filing_store = FilingStore(chroma, registry)
 
-    app.state.registry = registry
-    app.state.chroma = chroma
-    app.state.embedder = embedder
-    app.state.search_engine = search_engine
-    app.state.fetcher = fetcher
-    app.state.orchestrator = orchestrator
-    app.state.task_manager = task_manager
+    # 6. Retrieval — pre-built; provider-neutral by design.
+    retrieval_service = RetrievalService(embedder=embedder, chroma_client=chroma)
+
+    # 7. In-memory session credential store.  TTL mirrors the cookie's
+    # ``Max-Age`` so a credential cannot outlive the cookie that points
+    # at it (lazy eviction; no background thread).
+    session_store = InMemorySessionCredentialStore(
+        ttl_seconds=settings.api.session_ttl_seconds,
+    )
+
+    # 8. Optional encrypted store.  Settings validation already rejected
+    # ``persist=true`` without SQLCipher at load time; we still defend
+    # at this seam by letting the store's own constructor refuse loudly.
+    encrypted_store: EncryptedCredentialStore | None = None
+    if settings.database.persist_provider_credentials:
+        try:
+            encrypted_store = EncryptedCredentialStore(registry)
+        except Exception:  # pragma: no cover - defensive log
+            logger.exception(
+                "Encrypted credential store failed to initialise — "
+                "continuing without persistent credential tier."
+            )
+            encrypted_store = None
+
+    # Expose every singleton on ``app.state``.
     app.state.settings = settings
+    app.state.embedder = embedder
+    app.state.chroma = chroma
+    app.state.registry = registry
+    app.state.filing_store = filing_store
+    app.state.retrieval_service = retrieval_service
+    app.state.session_store = session_store
+    app.state.encrypted_credential_store = encrypted_store
 
-    logger.info("All singletons initialised. API ready.")
-    yield
-    logger.info("SEC Semantic Search API shutting down.")
-    task_manager.shutdown()
-    registry.close()
+    logger.info(
+        "API ready: embedder=%s/%s, dim=%d, encrypted_store=%s",
+        stamp.provider,
+        stamp.model,
+        stamp.dimension,
+        "yes" if encrypted_store is not None else "no",
+    )
+
+    try:
+        yield
+    finally:
+        logger.info("SEC-GenerativeSearch API shutting down.")
+        # ``MetadataRegistry`` owns the SQLite/SQLCipher connection that
+        # the encrypted store also uses — close it here, never inside
+        # the encrypted store, so we don't double-close from two sites.
+        registry.close()
 
 
 # ---------------------------------------------------------------------------
@@ -332,26 +171,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app() -> FastAPI:
-    """
-    Create and configure the FastAPI application.
+    """Build and configure the ASGI application.
 
-    Returns a fully configured ASGI application with CORS middleware,
-    lifespan management, and a health-check endpoint. Route modules
-    are included as they are implemented in W1.2–W1.8.
+    The factory is the single seam every entry point goes through —
+    uvicorn, the test client, and downstream embedders that wrap the
+    app.  Settings are resolved here, not in module-level code, so a
+    test fixture that patches the environment before calling
+    :func:`create_app` gets fresh wiring.
     """
     settings = get_settings()
 
-    # Disable OpenAPI/Swagger UI when authentication is enabled (Scenarios
-    # B/C).  In dev mode (no API_KEY) the docs remain available for API
-    # discoverability.  See SECURITY VULNERABILITIES.md §F1.
+    # 10A.5 — disable OpenAPI / Swagger / Redoc when API_KEY is set.
+    # In Scenario-A development the docs remain available; in
+    # Scenarios B/C they are off so an unauthenticated probe cannot
+    # discover the surface.
     is_protected = bool(settings.api.key)
 
-    application = FastAPI(
-        title="SEC Semantic Search API",
+    app = FastAPI(
+        title="SEC-GenerativeSearch API",
         description=(
-            "REST API for semantic search over ingested SEC filings "
-            "(8-K, 10-K, 10-Q). Wraps the sec-semantic-search Python package "
-            "over HTTP."
+            "REST API for retrieval-augmented generation over SEC filings. "
+            "10A surface: health, status, server-side session minting."
         ),
         version=__version__,
         docs_url=None if is_protected else "/docs",
@@ -360,33 +200,42 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # -- Request body size limit --------------------------------------------
-    application.add_middleware(ContentSizeLimitMiddleware)
+    install_error_handlers(app)
 
-    # -- Rate limiting ------------------------------------------------------
-    application.add_middleware(
+    # ------------------------------------------------------------------
+    # Middleware stack — read top-to-bottom as outermost-to-innermost.
+    # ASGI middleware is applied LIFO: the *last* ``add_middleware``
+    # call is the *first* to see an inbound request.
+    #
+    # Order rationale (outer → inner):
+    #
+    #   1. CORSMiddleware           — first to see preflight; emits
+    #                                 headers without invoking the app.
+    #   2. SecurityHeadersMiddleware — touches every response, including
+    #                                  rate-limit and 413 responses.
+    #   3. RateLimitMiddleware       — rejects abusive callers before we
+    #                                  pay the cost of body parsing.
+    #   4. ContentSizeLimitMiddleware — cheap reject on the body stream.
+    #   5. InsecureTransportWarning  — closest to the route layer; only
+    #                                  needs to observe, not modify.
+    # ------------------------------------------------------------------
+    app.add_middleware(InsecureTransportWarningMiddleware)
+    app.add_middleware(ContentSizeLimitMiddleware)
+    app.add_middleware(
         RateLimitMiddleware,
         search_rpm=settings.api.rate_limit_search,
         ingest_rpm=settings.api.rate_limit_ingest,
         delete_rpm=settings.api.rate_limit_delete,
         general_rpm=settings.api.rate_limit_general,
     )
-
-    # -- Security headers ---------------------------------------------------
-    application.add_middleware(SecurityHeadersMiddleware)
-
-    # -- Transport security warning -----------------------------------------
-    application.add_middleware(InsecureTransportWarningMiddleware)
-
-    # -- CORS ---------------------------------------------------------------
-    application.add_middleware(
+    app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.api.cors_origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
         allow_headers=[
             "Content-Type",
-            "Authorization",
             "X-API-Key",
             "X-Admin-Key",
             "X-Edgar-Name",
@@ -394,45 +243,22 @@ def create_app() -> FastAPI:
         ],
     )
 
-    # -- Routers (uncommented as implemented in W1.2–W1.8) ------------------
-    from sec_semantic_search.api.routes.filings import router as filings_router
-    from sec_semantic_search.api.routes.ingest import router as ingest_router
-    from sec_semantic_search.api.routes.resources import router as resources_router
-    from sec_semantic_search.api.routes.search import router as search_router
-    from sec_semantic_search.api.routes.status import router as status_router
-    from sec_semantic_search.api.websocket import router as ws_router
+    # ------------------------------------------------------------------
+    # Routers
+    # ------------------------------------------------------------------
+    app.include_router(health_router, prefix="/api", tags=["meta"])
+    app.include_router(status_router, prefix="/api/status", tags=["status"])
+    app.include_router(session_router, prefix="/api", tags=["session"])
 
-    auth = [Depends(verify_api_key)]
-    application.include_router(
-        status_router, prefix="/api/status", tags=["status"], dependencies=auth
-    )
-    application.include_router(
-        filings_router, prefix="/api/filings", tags=["filings"], dependencies=auth
-    )
-    application.include_router(
-        search_router, prefix="/api/search", tags=["search"], dependencies=auth
-    )
-    application.include_router(
-        ingest_router, prefix="/api/ingest", tags=["ingest"], dependencies=auth
-    )
-    application.include_router(ws_router, tags=["websocket"])  # WS validates key in handler
-    application.include_router(
-        resources_router, prefix="/api/resources", tags=["resources"], dependencies=auth
-    )
+    return app
 
-    # -- Health check -------------------------------------------------------
-    @application.get("/api/health", tags=["meta"], summary="Health check")
-    async def health() -> dict[str, str]:
-        """Return API liveness status.
 
-        The version is intentionally omitted from this unauthenticated
-        endpoint to avoid disclosing it to anonymous clients (see
-        SECURITY VULNERABILITIES.md §F3).  Authenticated users can
-        obtain the version via ``GET /api/status/``.
-        """
-        return {"status": "ok"}
-
-    return application
+# ---------------------------------------------------------------------------
+# Module-level ASGI app (used by uvicorn and the FastAPI test client).
+# Cheap at import time: only the FastAPI instance + middleware + routes
+# are wired here; storage / embedder / credential-store construction
+# happens inside ``lifespan`` when uvicorn enters the lifespan context.
+# ---------------------------------------------------------------------------
 
 
 app = create_app()

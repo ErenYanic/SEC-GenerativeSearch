@@ -1,65 +1,50 @@
-"""
-Status endpoint — database overview and statistics.
+"""Authenticated status route.
 
-Provides ``GET /api/status/`` returning filing count, chunk count,
-per-ticker and per-form breakdowns.  Mirrors the CLI ``manage status``
-command output.
+Returns a small operator-facing snapshot of the deployment. Fields are
+deliberately limited: version, embedding identity, filings count,
+deployment profile, the encrypted-credential-store toggle, and whether
+the caller is admin. No paths, no host names, no environment-variable
+values.
 """
+
+from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request
 
-from sec_semantic_search.api.dependencies import get_chroma, get_registry, is_admin_request
-from sec_semantic_search.api.schemas import StatusResponse, TickerBreakdown
-from sec_semantic_search.config import get_settings
-from sec_semantic_search.database import ChromaDBClient, MetadataRegistry
+from sec_generative_search import __version__
+from sec_generative_search.api.dependencies import (
+    get_registry,
+    is_admin_request,
+    verify_api_key,
+)
+from sec_generative_search.api.schemas import StatusResponse
+from sec_generative_search.config.settings import get_settings
+from sec_generative_search.database import MetadataRegistry
 
-router = APIRouter()
+__all__ = ["router"]
+
+
+router = APIRouter(dependencies=[Depends(verify_api_key)])
 
 
 @router.get(
     "/",
     response_model=StatusResponse,
-    summary="Database overview",
+    tags=["status"],
+    summary="Deployment status snapshot",
 )
 async def status(
     request: Request,
     registry: MetadataRegistry = Depends(get_registry),
-    chroma: ChromaDBClient = Depends(get_chroma),
 ) -> StatusResponse:
-    """
-    Return a full overview of database contents and capacity.
-
-    Includes filing count, chunk count, unique tickers, form type
-    breakdown, and per-ticker statistics.
-    """
     settings = get_settings()
     stats = registry.get_statistics()
-    chunk_count = chroma.collection_count()
-
-    ticker_breakdown = [
-        TickerBreakdown(
-            ticker=ts.ticker,
-            filings=ts.filings,
-            chunks=ts.chunks,
-            forms=ts.forms,
-        )
-        for ts in stats.ticker_breakdown
-    ]
-
-    # The frontend needs to know whether to show the Welcome screen.
-    # Session is required when the server has no EDGAR identity AND
-    # the setting explicitly mandates per-session credentials.
-    has_server_identity = bool(settings.edgar.identity_name and settings.edgar.identity_email)
-    edgar_session_required = settings.api.edgar_session_required and not has_server_identity
-
     return StatusResponse(
-        filing_count=stats.filing_count,
-        max_filings=settings.database.max_filings,
-        chunk_count=chunk_count,
-        tickers=stats.tickers,
-        form_breakdown=stats.form_breakdown,
-        ticker_breakdown=ticker_breakdown,
-        edgar_session_required=edgar_session_required,
-        demo_mode=settings.api.demo_mode,
+        version=__version__,
+        deployment_profile=settings.database.deployment_profile,
+        embedding_provider=settings.embedding.provider,
+        embedding_model=settings.embedding.model_name,
+        storage_filings=stats.filing_count,
         is_admin=is_admin_request(request),
+        persist_provider_credentials=settings.database.persist_provider_credentials,
     )
