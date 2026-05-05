@@ -217,7 +217,7 @@ class TestValidateRouteRateLimit:
         for _ in range(8):
             r = client.post(
                 "/api/providers/validate",
-                json={"provider": "openai", "api_key": "sk-test-1234"},
+                json={"provider": "openai", "api_key": "sk-test-1234"},  # pragma: allowlist secret
             )
             statuses.append(r.status_code)
         # Must include at least one 429 — the session bucket of 3 was
