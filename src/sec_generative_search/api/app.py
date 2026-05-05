@@ -1,25 +1,15 @@
 """FastAPI application factory and lifespan.
 
-10A scope — what *this* file owns:
+What this file owns:
 
-    - Build the FastAPI ``app`` instance via :func:`create_app`.
-    - Initialise singletons in :func:`lifespan`: ``MetadataRegistry``,
-      ``ChromaDBClient``, the embedder, ``FilingStore``,
-      ``RetrievalService``, the Phase-9
-      ``InMemorySessionCredentialStore``, and the optional
-      ``EncryptedCredentialStore`` (only when the deployment profile
-      enables persistent credential storage).
-    - Wire the middleware stack and the structured-error handlers.
-    - Mount 10A routes: ``/api/health``, ``/api/status/``,
-      ``/api/session``, ``/api/session/logout``.
-    - Toggle OpenAPI docs off when ``API_KEY`` is configured.
-
-Out of scope for 10A — added by 10B:
-
-    - LLM provider construction (per-request via
-      :func:`request_scoped_resolver`).
-    - ``TaskManager`` (ingestion progress).
-    - Filings, ingest, retrieval, RAG, provider-validate routes.
+        - Build the FastAPI ``app`` instance via :func:`create_app`.
+        - Initialise singletons in :func:`lifespan`: ``MetadataRegistry``,
+            ``ChromaDBClient``, the embedder, ``FilingStore``,
+            ``RetrievalService``, the in-memory session store, and the
+            optional ``EncryptedCredentialStore``.
+        - Wire the middleware stack and the structured-error handlers.
+        - Mount the API routes exposed by this application module.
+        - Toggle OpenAPI docs off when ``API_KEY`` is configured.
 
 Notes for the lifespan:
 
@@ -52,6 +42,7 @@ from sec_generative_search.api.middleware import (
     SecurityHeadersMiddleware,
 )
 from sec_generative_search.api.routes.health import router as health_router
+from sec_generative_search.api.routes.providers import router as providers_router
 from sec_generative_search.api.routes.session import router as session_router
 from sec_generative_search.api.routes.status import router as status_router
 from sec_generative_search.config.settings import get_settings
@@ -181,7 +172,7 @@ def create_app() -> FastAPI:
     """
     settings = get_settings()
 
-    # 10A.5 — disable OpenAPI / Swagger / Redoc when API_KEY is set.
+    # Disable OpenAPI / Swagger / Redoc when API_KEY is set.
     # In Scenario-A development the docs remain available; in
     # Scenarios B/C they are off so an unauthenticated probe cannot
     # discover the surface.
@@ -191,7 +182,7 @@ def create_app() -> FastAPI:
         title="SEC-GenerativeSearch API",
         description=(
             "REST API for retrieval-augmented generation over SEC filings. "
-            "10A surface: health, status, server-side session minting."
+            "Health, status, session, provider validation, and retrieval routes."
         ),
         version=__version__,
         docs_url=None if is_protected else "/docs",
@@ -227,6 +218,10 @@ def create_app() -> FastAPI:
         ingest_rpm=settings.api.rate_limit_ingest,
         delete_rpm=settings.api.rate_limit_delete,
         general_rpm=settings.api.rate_limit_general,
+        rag_rpm=settings.api.rate_limit_rag,
+        validate_rpm=settings.api.rate_limit_validate,
+        validate_per_session_rpm=settings.api.rate_limit_validate_per_session,
+        session_rpm=settings.api.rate_limit_session,
     )
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(
@@ -249,6 +244,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router, prefix="/api", tags=["meta"])
     app.include_router(status_router, prefix="/api/status", tags=["status"])
     app.include_router(session_router, prefix="/api", tags=["session"])
+    app.include_router(providers_router, prefix="/api/providers", tags=["providers"])
 
     return app
 

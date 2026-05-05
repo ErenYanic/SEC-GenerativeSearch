@@ -1,4 +1,4 @@
-"""Security tests for the session minting / logout surface (10A.6 / 10.9)."""
+"""Security tests for the session minting / logout surface."""
 
 from __future__ import annotations
 

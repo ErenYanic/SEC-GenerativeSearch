@@ -115,8 +115,8 @@ class RetrievalService:
 
     Single-query primitive: one call to :meth:`retrieve` does
     ``embed → vector search → dedupe → rerank? → diversity → packing``
-    and returns a list of :class:`RetrievalResult`.  Multi-query fan-out
-    (comparative analysis) lives in the Phase 8 orchestrator.
+    and returns a list of :class:`RetrievalResult`. Multi-query fan-out
+    (comparative analysis) lives in the RAG orchestrator.
 
     Construction:
 

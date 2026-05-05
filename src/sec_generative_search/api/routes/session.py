@@ -1,20 +1,18 @@
 """Server-side ``session_id`` minting and revocation.
 
-Implements TODO 10A.6 / 10.9 — the load-bearing security control for
-the Phase-9 :class:`InMemorySessionCredentialStore`.  A weak or
-forgeable ``session_id`` collapses the entire credential isolation
-model: one tenant's guess gives them another tenant's keys.
+A weak or forgeable ``session_id`` collapses the entire credential
+isolation model: one tenant's guess gives them another tenant's keys.
 
 Cookie contract enforced here:
 
-    - **Server-minted only** — ``secrets.token_urlsafe(32)`` (≥256 bits
-      of entropy).  Any value supplied by a browser is ignored on
-      ``POST /api/session``; mint always replaces.
-    - **HTTP-only** — JavaScript cannot read the cookie.
+        - **Server-minted only** — ``secrets.token_urlsafe(32)`` (≥256 bits
+            of entropy). Any value supplied by a browser is ignored on
+            ``POST /api/session``; mint always replaces.
+        - **HTTP-only** — JavaScript cannot read the cookie.
         - **``Secure``** — browser refuses to send over plain HTTP except
             from ``localhost``/``127.0.0.1`` (modern browsers treat localhost
             as a secure context).
-    - **``SameSite=Strict``** — eliminates the cross-site request
+        - **``SameSite=Strict``** — eliminates the cross-site request
       forgery vector for credentialed endpoints.
     - **Rotated on auth-state change** — call ``POST /api/session``
       again on login/logout; the prior session is invalidated and a
@@ -58,13 +56,12 @@ router = APIRouter()
 
 
 # ``secrets.token_urlsafe(32)`` produces a 43-char base64-url string
-# carrying 256 bits of entropy.  This is the floor — never weaken.
+# carrying 256 bits of entropy. This is the floor — never weaken.
 _SESSION_ID_BYTES = 32
 
 
-# Default browser-cookie sliding TTL.  Mirrors the in-memory store's
-# ``_DEFAULT_SESSION_TTL_SECONDS`` so the cookie never outlives the
-# server-side entry it points at.
+# Default browser-cookie sliding TTL. Mirrors the in-memory store's
+# default so the cookie never outlives the server-side entry it points at.
 _DEFAULT_COOKIE_MAX_AGE = 60 * 60  # one hour
 
 

@@ -1,9 +1,7 @@
-"""Security tests for the ``Depends()`` providers and resolver factory.
+"""Security tests for the dependency providers and resolver factory.
 
-10A.2 surface: ``verify_api_key``, ``verify_admin_key``, ``is_admin_request``,
-``request_scoped_resolver``.  Phase-9 wiring is exercised end-to-end at
-the seam where the API consumes :func:`build_llm_provider` —
-``request_scoped_resolver`` builds the chain a route would pass.
+The suite covers API/admin authentication, session cookie handling,
+provider-key header parsing, and resolver-chain precedence.
 """
 
 from __future__ import annotations
@@ -15,6 +13,7 @@ from sec_generative_search.api.dependencies import (
     ADMIN_USER_ID,
     SESSION_COOKIE_NAME,
     is_admin_request,
+    parse_provider_key_headers,
     request_scoped_resolver,
 )
 from sec_generative_search.core.credentials import InMemorySessionCredentialStore
@@ -76,6 +75,38 @@ class TestIsAdminRequest:
 
 
 @pytest.mark.security
+class TestParseProviderKeyHeaders:
+    def test_extracts_lowercase_provider(self) -> None:
+        headers = {"X-Provider-Key-openai": "sk-test"}
+        assert parse_provider_key_headers(headers) == {"openai": "sk-test"}
+
+    def test_case_insensitive_header_name(self) -> None:
+        # HTTP header names are case-insensitive.
+        headers = {"x-PROVIDER-key-openai": "sk-test"}
+        assert parse_provider_key_headers(headers) == {"openai": "sk-test"}
+
+    def test_empty_value_dropped(self) -> None:
+        headers = {"X-Provider-Key-openai": ""}
+        assert parse_provider_key_headers(headers) == {}
+
+    def test_unrelated_headers_ignored(self) -> None:
+        headers = {
+            "X-API-Key": "secret",
+            "Authorization": "Bearer x",
+            "Cookie": "sec_rag_session=abc",
+        }
+        assert parse_provider_key_headers(headers) == {}
+
+    def test_dotted_or_special_provider_rejected(self) -> None:
+        headers = {
+            "X-Provider-Key-../etc/passwd": "x",
+            "X-Provider-Key-foo bar": "x",
+            "X-Provider-Key-foo.bar": "x",
+        }
+        assert parse_provider_key_headers(headers) == {}
+
+
+@pytest.mark.security
 class TestRequestScopedResolverChain:
     def _attach_state(
         self,
@@ -132,6 +163,33 @@ class TestRequestScopedResolverChain:
         resolver = request_scoped_resolver(request)
         # Falls through to admin env.
         assert resolver("openai") == "sk-admin"  # pragma: allowlist secret
+
+    def test_header_tier_shadows_session_and_admin(self, monkeypatch) -> None:
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-admin-env")  # pragma: allowlist secret
+        store = InMemorySessionCredentialStore(ttl_seconds=300)
+        sid = "B" * 43
+        store.set(sid, "openai", "sk-session")  # pragma: allowlist secret
+
+        request = _request(
+            headers={"X-Provider-Key-openai": "sk-from-header"},
+            cookies={SESSION_COOKIE_NAME: sid},
+        )
+        self._attach_state(request, session_store=store)
+
+        resolver = request_scoped_resolver(request)
+        # Header tier wins over session and admin-env.
+        assert resolver("openai") == "sk-from-header"  # pragma: allowlist secret
+
+    def test_header_tier_only_used_for_named_provider(self, monkeypatch) -> None:
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-admin-env-openai")  # pragma: allowlist secret
+        anthropic_env = "sk-admin-env-anthropic"  # pragma: allowlist secret
+        monkeypatch.setenv("ANTHROPIC_API_KEY", anthropic_env)
+        request = _request(headers={"X-Provider-Key-openai": "sk-header-openai"})
+        self._attach_state(request)
+        resolver = request_scoped_resolver(request)
+        # Named tier — header wins for openai, falls through for anthropic.
+        assert resolver("openai") == "sk-header-openai"  # pragma: allowlist secret
+        assert resolver("anthropic") == anthropic_env
 
     def test_encrypted_tier_only_for_admin(self, monkeypatch) -> None:
         # Stand-in store: ``CredentialStore`` Protocol is structural.

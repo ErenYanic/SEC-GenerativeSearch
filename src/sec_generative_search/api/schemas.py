@@ -1,9 +1,5 @@
 """Pydantic v2 request and response models for the API surface.
 
-10A scope — only the schemas needed for health, status, and session
-minting routes.  10B will append filing / ingest / retrieval / RAG /
-provider-validate schemas to this module.
-
 Discipline:
 
     - All models use ``ConfigDict(extra="forbid")`` so unexpected fields
@@ -21,6 +17,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
     "HealthResponse",
+    "ProviderValidateRequest",
+    "ProviderValidateResponse",
     "SessionLogoutResponse",
     "SessionResponse",
     "StatusResponse",
@@ -83,3 +81,52 @@ class SessionLogoutResponse(_BaseModel):
     cleared_credentials: int = Field(
         description="Number of provider credentials dropped from the session store.",
     )
+
+
+class ProviderValidateRequest(_BaseModel):
+    """Body for ``POST /api/providers/validate``.
+
+    ``api_key`` is required and never echoed back in any response or
+    log; the validate route hands it directly to
+    :func:`validate_credential` which audit-logs only the masked tail.
+    The schema does NOT support a query-string fallback for the key —
+    bodies are encrypted by TLS in transit and never end up in proxy
+    access logs the way query strings do.
+    """
+
+    provider: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$",
+        description="Lower-case provider slug; must be registered in ProviderRegistry.",
+    )
+    api_key: str = Field(
+        min_length=1,
+        max_length=4096,
+        description="The provider key to validate.  Never echoed back.",
+    )
+    surface: str = Field(
+        default="llm",
+        pattern=r"^(llm|embedding|reranker)$",
+        description="Provider surface to validate against.",
+    )
+    model: str | None = Field(
+        default=None,
+        max_length=128,
+        description="Optional model slug for embedding-surface validation.",
+    )
+
+
+class ProviderValidateResponse(_BaseModel):
+    """Verdict from a key-validation attempt.
+
+    ``valid=True`` means the provider accepted the key.  ``valid=False``
+    is reserved for the explicit ``ProviderAuthError`` case — every
+    other ``ProviderError`` (rate limit, timeout, content filter,
+    transport) propagates as a 502 / 503 envelope so the caller does
+    not interpret a network blip as a "wrong key".
+    """
+
+    valid: bool
+    provider: str
+    surface: str

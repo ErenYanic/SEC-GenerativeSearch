@@ -3,10 +3,10 @@
 Strategy
 --------
 
-The 10A tests exercise the route + middleware stack.  We deliberately
+The API tests exercise the route and middleware stack. We deliberately
 *skip* the production lifespan (which boots the embedder, ChromaDB,
 SQLite, and the credential stores) and inject a minimal set of stubs on
-``app.state`` instead.  This keeps the tests fast, hermetic, and free
+``app.state`` instead. This keeps the tests fast, hermetic, and free
 of optional-extras dependencies (sentence-transformers, SQLCipher).
 
 Pattern: build the app via :func:`create_app`, attach the singletons
@@ -55,8 +55,8 @@ def _build_test_app(*, env: dict[str, str] | None = None):
     from sec_generative_search.api.app import create_app
 
     app = create_app()
-    # Stub the singletons the 10A route surface reads.  Heavier wiring
-    # is added per-test via the ``stub_state`` fixture when needed.
+    # Stub the singletons the route surface reads. Heavier wiring is
+    # added per-test via the ``stub_state`` fixture when needed.
     app.state.session_store = InMemorySessionCredentialStore(ttl_seconds=3600)
     app.state.encrypted_credential_store = None
     return app

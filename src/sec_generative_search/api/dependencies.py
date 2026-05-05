@@ -2,40 +2,32 @@
 
 All dependencies read pre-initialised singletons from
 ``request.app.state`` (set during the lifespan startup in
-:mod:`sec_generative_search.api.app`).  This guarantees route handlers
-share a single ChromaDB connection, a single SQLite registry, and a
-single embedding model across the process.
-
-Phase-10 split:
-
-    - 10A surface here: API/admin authentication, state providers for
-      the singletons currently wired in lifespan, ``session_id``
-      extraction from the HTTP-only cookie, and the
-      :func:`request_scoped_resolver` factory that builds a Phase-9
-      resolver chain per request (header → session → encrypted-user →
-      admin-env).
-    - 10B will extend this module with EDGAR identity resolution,
-      provider-key header parsing, and helpers around ``TaskManager``
-      ownership.
+:mod:`sec_generative_search.api.app`). This keeps the API on a single
+ChromaDB connection, a single SQLite registry, and a single embedding
+model across the process.
 
 Security contract:
 
-    - ``API_KEY`` and ``API_ADMIN_KEY`` comparisons go through
-      :func:`hmac.compare_digest` — never ``==``.
-    - ``session_id`` extracted from the cookie is validated against the
-      mint policy: a non-empty URL-safe base64 string of at least 32
-      characters before it is accepted as a key into the session store.
-      Browser-supplied / forged shapes round-trip as "no session".
-    - Per-provider ``X-Provider-Key-{name}`` headers ARE NOT parsed in
-      10A; the resolver chain falls back to session → encrypted →
-      admin-env when the header tier is absent.  10B wires the header
-      tier on top of the same factory.
+        - ``API_KEY`` and ``API_ADMIN_KEY`` comparisons go through
+            :func:`hmac.compare_digest` — never ``==``.
+        - ``session_id`` extracted from the cookie is validated against the
+            mint policy: a non-empty URL-safe base64 string of at least 32
+            characters before it is accepted as a key into the session store.
+            Browser-supplied or forged shapes round-trip as "no session".
+        - ``X-Provider-Key-{provider}`` header values are parsed into a
+            per-request map and consulted as the outermost tier of the
+            resolver chain. The header-name suffix is shape-checked against
+            the lower-case slug pattern; anything else is dropped so a
+            malformed header cannot key a credential lookup. Headers are
+            already redacted at the access-log layer
+            (:data:`api.access_log.REDACTED_HEADER_PREFIXES`).
 """
 
 from __future__ import annotations
 
 import hmac
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
 from fastapi import Request, Security
@@ -51,6 +43,7 @@ from sec_generative_search.core.credentials import (
     session_resolver,
 )
 from sec_generative_search.core.logging import audit_log, get_logger
+from sec_generative_search.core.security import mask_secret
 from sec_generative_search.providers.factory import default_api_key_resolver
 
 if TYPE_CHECKING:
@@ -64,6 +57,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ADMIN_USER_ID",
+    "PROVIDER_KEY_HEADER_PREFIX",
     "SESSION_COOKIE_NAME",
     "extract_session_id",
     "get_chroma",
@@ -74,7 +68,9 @@ __all__ = [
     "get_retrieval_service",
     "get_session_id",
     "get_session_store",
+    "header_resolver",
     "is_admin_request",
+    "parse_provider_key_headers",
     "request_scoped_resolver",
     "verify_admin_key",
     "verify_api_key",
@@ -84,13 +80,13 @@ __all__ = [
 logger = get_logger(__name__)
 
 
-# Cookie name for the server-minted ``session_id`` (10A.6).
+# Cookie name for the server-minted ``session_id``.
 SESSION_COOKIE_NAME = "sec_rag_session"
 
 
-# Until SSO/OAuth lands in Phase 13, the only writer/reader of the
-# encrypted credential store is "the admin user" — a stable opaque
-# string with no PII.  Multi-user identifiers arrive with auth.
+# Until multi-user auth lands, the only writer/reader of the encrypted
+# credential store is "the admin user" — a stable opaque string with
+# no PII. Multi-user identifiers arrive with auth.
 ADMIN_USER_ID = "__admin__"
 
 
@@ -264,6 +260,79 @@ def get_encrypted_credential_store(request: Request) -> CredentialStore | None:
 
 
 # ---------------------------------------------------------------------------
+# Per-request provider-key header parsing
+# ---------------------------------------------------------------------------
+
+
+# All ``X-Provider-Key-*`` headers are masked at the access-log layer
+# (see ``api.access_log.REDACTED_HEADER_PREFIXES``); the prefix below is
+# the canonical lowercase form the parser keys on.
+PROVIDER_KEY_HEADER_PREFIX = "x-provider-key-"
+
+
+# Provider names land in URLs / config / logs.  Restrict the alphabet to
+# the same lower-case slug shape ``ProviderRegistry._ENTRIES`` advertises;
+# this prevents header-injected weirdness (case mismatches, unicode
+# look-alikes, accidental newlines) from being treated as a "valid"
+# provider.  A bounded length is defence-in-depth against pathological
+# header floods.
+_PROVIDER_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+
+
+def parse_provider_key_headers(
+    headers: Mapping[str, str],
+) -> dict[str, str]:
+    """Extract per-provider keys from ``X-Provider-Key-{provider}`` headers.
+
+    Returns a ``{provider: api_key}`` mapping suitable for
+    :func:`header_resolver`.  Headers whose suffix fails the
+    :data:`_PROVIDER_NAME_RE` shape check or whose value is empty are
+    silently ignored — the caller never receives a partial / unsafe
+    parse.  No raw value ever appears in this function's logs (the
+    header-redaction layer covers the access log; the resolver itself is
+    the single audit-logged seam).
+    """
+    parsed: dict[str, str] = {}
+    for name, value in headers.items():
+        lowered = name.lower()
+        if not lowered.startswith(PROVIDER_KEY_HEADER_PREFIX):
+            continue
+        provider = lowered[len(PROVIDER_KEY_HEADER_PREFIX) :]
+        if not _PROVIDER_NAME_RE.match(provider):
+            continue
+        if not value:
+            continue
+        parsed[provider] = value
+    return parsed
+
+
+def header_resolver(headers_map: Mapping[str, str]) -> ApiKeyResolver:
+    """Adapt a parsed header map to the ``ApiKeyResolver`` shape.
+
+    Mirrors :func:`session_resolver` / :func:`encrypted_user_resolver`:
+    on each non-``None`` hit emit a single ``credential_resolved`` audit
+    line carrying only ``mask_secret``-tailed values, so a credential's
+    actually-resolved-from-header lineage is greppable in operator logs.
+
+    The map is consumed by reference; callers MUST treat it as
+    short-lived (per-request) and never let it escape the request
+    scope — keys live as plain strings in the dict and the dict's
+    lifetime is the credential's exposure window.
+    """
+
+    def resolver(provider: str) -> str | None:
+        value = headers_map.get(provider)
+        if value is not None:
+            audit_log(
+                "credential_resolved",
+                detail=(f"resolver=header provider={provider} key_tail={mask_secret(value)}"),
+            )
+        return value
+
+    return resolver
+
+
+# ---------------------------------------------------------------------------
 # Per-request credential resolver chain
 # ---------------------------------------------------------------------------
 
@@ -273,20 +342,23 @@ def request_scoped_resolver(
     *,
     extra_resolvers: Callable[[str], str | None] | None = None,
 ) -> ApiKeyResolver:
-    """Build a Phase-9 resolver chain for the current request.
+    """Build a resolver chain for the current request.
 
     Composition (first hit wins):
 
-    1. ``extra_resolvers`` — caller-supplied front of the chain.  10B
-       installs the per-provider header parser here so the factory
-       seam needs no awareness of the header layer.
-    2. **Session store** keyed by the validated ``session_id`` cookie,
+    1. **Per-request headers** (``X-Provider-Key-{provider}``) —
+       short-lived, opt-in, scoped to one request. The parser runs up
+       front so the chain stays O(1) per lookup.
+    2. ``extra_resolvers`` — caller-supplied front of the chain. Used
+       by tests and by future surfaces that need a tier in front of the
+       header layer; production routes pass nothing.
+    3. **Session store** keyed by the validated ``session_id`` cookie,
        when present.
-    3. **Encrypted user store** keyed by ``ADMIN_USER_ID`` when both
+    4. **Encrypted user store** keyed by ``ADMIN_USER_ID`` when both
        (a) the store exists on ``app.state`` and (b) the request is
-       admin-authenticated.  Until SSO lands the encrypted tier is
-       admin-only by design.
-    4. ``default_api_key_resolver`` — process-environment fallback.
+       admin-authenticated. Until multi-user auth lands the encrypted
+       tier is admin-only by design.
+    5. ``default_api_key_resolver`` — process-environment fallback.
 
     Returns a callable of the
     :data:`~sec_generative_search.providers.factory.ApiKeyResolver`
@@ -294,6 +366,10 @@ def request_scoped_resolver(
     ``build_llm_provider``.
     """
     chain: list[ApiKeyResolver] = []
+
+    header_keys = parse_provider_key_headers(request.headers)
+    if header_keys:
+        chain.append(header_resolver(header_keys))
 
     if extra_resolvers is not None:
         chain.append(extra_resolvers)

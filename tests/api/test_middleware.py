@@ -1,4 +1,4 @@
-"""Security tests for the 10A middleware stack."""
+"""Security tests for the middleware stack."""
 
 from __future__ import annotations
 

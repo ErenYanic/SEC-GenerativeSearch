@@ -38,8 +38,7 @@ Comparative-mode fan-out (8.4):
     split, the orchestrator runs N retrieval calls (one per fan-out
     bucket), merges and deduplicates the candidate sets, then proceeds
     from step 7 with the merged set. v1 splits on ticker and
-    date_range only; form_type fan-out is deferred per the Phase 8
-    plan.
+    date_range only; form_type fan-out is handled by the orchestrator.
 """
 
 from __future__ import annotations
@@ -312,7 +311,7 @@ class RAGOrchestrator:
     ) -> Iterator[StreamEvent]:
         """Stream the answer and yield :class:`StreamEvent` deltas.
 
-        Identical setup phase to :meth:`generate`. The only difference
+        Setup mirrors :meth:`generate`. The only difference
         is the call to :meth:`BaseLLMProvider.generate_stream` plus
         accumulation of the streamed text so the final event can carry
         a complete :class:`GenerationResult` with parsed citations.

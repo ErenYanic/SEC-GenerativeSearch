@@ -14,9 +14,10 @@ Components in this module:
       transfer encoding mid-stream.
     - :class:`InsecureTransportWarningMiddleware` — logs a one-shot
       warning when authenticated traffic arrives over plain HTTP.
-    - :class:`RateLimitMiddleware` — per-IP sliding-window limiter with
-      pluggable per-policy keys (per-IP for general limits;
-      per-``session_id`` will be wired in 10B for the validate route).
+        - :class:`RateLimitMiddleware` — per-IP sliding-window limiter with
+            a separate per-``session_id`` window enforced on top of the per-IP
+            window for the provider-validation route. Both windows must allow
+            the request; exhausting either returns 429.
 
 CORS is supplied by Starlette's :class:`CORSMiddleware` directly; we do
 not wrap it.
@@ -48,6 +49,26 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from sec_generative_search.api.errors import envelope
 from sec_generative_search.config.settings import get_settings
 from sec_generative_search.core.logging import get_logger
+
+# Imported lazily inside the dispatch path so the middleware module
+# stays cheap at import time. The dependency is one-way.
+_SESSION_COOKIE_LAZY: str | None = None
+
+
+def _session_cookie_name() -> str:
+    """Return the session-cookie name without forcing an early import.
+
+    The cookie name lives in ``api.dependencies``, which itself does not
+    import middleware. Read it once and cache so the per-request rate
+    limit path stays O(1).
+    """
+    global _SESSION_COOKIE_LAZY
+    if _SESSION_COOKIE_LAZY is None:
+        from sec_generative_search.api.dependencies import SESSION_COOKIE_NAME
+
+        _SESSION_COOKIE_LAZY = SESSION_COOKIE_NAME
+    return _SESSION_COOKIE_LAZY
+
 
 __all__ = [
     "DEFAULT_MAX_CONTENT_LENGTH",
@@ -359,8 +380,7 @@ def _classify_path(path: str, method: str) -> str | None:
     """Map a request path/method to a rate-limit category.
 
     Returns ``None`` for paths that should never be rate-limited
-    (health, OpenAPI artefacts).  10B will extend this table for the
-    provider-validate route's per-``session_id`` policy.
+    (health, OpenAPI artefacts).
     """
     if path == "/api/health":
         return None
@@ -382,13 +402,18 @@ def _classify_path(path: str, method: str) -> str | None:
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    """Per-IP sliding-window limiter.
+    """Per-IP sliding-window limiter with optional per-session keying.
 
     Buckets are keyed by ``request.client.host``.  A ``0`` limit
-    disables that category.  Per-``session_id`` keying for the
-    provider-validate route is wired via the ``key_extractors`` argument
-    in 10B — for 10A we limit by IP only so the ``session_id`` cookie
-    machinery has no rate-limit dependency on itself.
+    disables that category.
+
+    The validate category additionally enforces a per-``session_id``
+    sliding window on top of the per-IP bucket: both must allow the
+    request. A shared NAT cannot consume the per-IP bucket on behalf of
+    one tenant, and a single session cannot brute-force key validation
+    across many origins. Requests without a shape-valid ``session_id``
+    cookie skip the per-session check and rely on the per-IP bucket
+    alone.
     """
 
     def __init__(
@@ -401,6 +426,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         general_rpm: int = 120,
         rag_rpm: int = 60,
         validate_rpm: int = 10,
+        validate_per_session_rpm: int = 5,
         session_rpm: int = 20,
     ) -> None:
         super().__init__(app)
@@ -416,10 +442,17 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         ):
             if rpm > 0:
                 self._buckets[category] = _SlidingWindow(rpm)
+        # Separate bucket so the per-IP and per-session windows do not
+        # share a counter.
+        self._validate_session_bucket: _SlidingWindow | None = (
+            _SlidingWindow(validate_per_session_rpm) if validate_per_session_rpm > 0 else None
+        )
 
     def reset(self) -> None:
         for bucket in self._buckets.values():
             bucket.reset()
+        if self._validate_session_bucket is not None:
+            self._validate_session_bucket.reset()
 
     async def dispatch(
         self,
@@ -435,25 +468,52 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         allowed, retry_after = bucket.is_allowed(client_ip)
         if not allowed:
-            logger.warning(
-                "Rate limit exceeded: %s from %s on %s %s (limit=%d/min)",
-                category,
-                client_ip,
-                request.method,
-                request.url.path,
-                bucket.limit,
-            )
-            return JSONResponse(
-                status_code=429,
-                content=envelope(
-                    error="rate_limited",
-                    message=(f"Rate limit exceeded for {category}. Retry in {retry_after}s."),
-                    details={"category": category, "limit_per_minute": bucket.limit},
-                    hint=f"Maximum {bucket.limit} {category} requests per minute.",
-                ),
-                headers={"Retry-After": str(retry_after)},
-            )
+            return self._reject(category, request, client_ip, bucket.limit, retry_after)
+
+        # Per-session check piggy-backs on the per-IP gate above for the
+        # validate route only. We do not log on success; rejection uses
+        # the same structured 429 envelope as every other rate-limit response.
+        if category == "validate" and self._validate_session_bucket is not None:
+            sid = request.cookies.get(_session_cookie_name())
+            if sid is not None and sid:
+                allowed_s, retry_s = self._validate_session_bucket.is_allowed(sid)
+                if not allowed_s:
+                    return self._reject(
+                        "validate",
+                        request,
+                        f"session={sid[:6]}...",
+                        self._validate_session_bucket.limit,
+                        retry_s,
+                    )
+
         return await call_next(request)
+
+    def _reject(
+        self,
+        category: str,
+        request: Request,
+        key_label: str,
+        limit: int,
+        retry_after: int,
+    ) -> JSONResponse:
+        logger.warning(
+            "Rate limit exceeded: %s from %s on %s %s (limit=%d/min)",
+            category,
+            key_label,
+            request.method,
+            request.url.path,
+            limit,
+        )
+        return JSONResponse(
+            status_code=429,
+            content=envelope(
+                error="rate_limited",
+                message=(f"Rate limit exceeded for {category}. Retry in {retry_after}s."),
+                details={"category": category, "limit_per_minute": limit},
+                hint=f"Maximum {limit} {category} requests per minute.",
+            ),
+            headers={"Retry-After": str(retry_after)},
+        )
 
 
 # ---------------------------------------------------------------------------

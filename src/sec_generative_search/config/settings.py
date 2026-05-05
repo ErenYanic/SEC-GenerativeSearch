@@ -536,6 +536,12 @@ class ApiSettings(BaseSettings):
     rate_limit_ingest: int = 10
     rate_limit_delete: int = 30
     rate_limit_general: int = 120
+    rate_limit_rag: int = 60
+    # Provider-validation rate limits: per-IP and per-session_id are
+    # separate sliding windows, and both must allow.
+    rate_limit_validate: int = 10
+    rate_limit_validate_per_session: int = 5
+    rate_limit_session: int = 20
 
     # Admin key for destructive operations; unset = unrestricted (Scenario A).
     admin_key: str | None = None

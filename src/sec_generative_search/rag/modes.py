@@ -21,7 +21,7 @@ Mode descriptions:
 - ``COMPARATIVE`` — side-by-side comparison across two or more
   filings/tickers/date_ranges. Triggers multi-query fan-out in the
   orchestrator (split by ticker and/or date_range; form_type fan-out is
-  deferred per the Phase 8 plan).
+  handled there).
 
 The string values match the ``RAG_DEFAULT_ANSWER_MODE`` env var values
 already accepted by :class:`RAGSettings`.

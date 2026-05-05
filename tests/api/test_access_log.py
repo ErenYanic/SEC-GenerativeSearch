@@ -1,4 +1,4 @@
-"""Security tests for header redaction (10A.7)."""
+"""Security tests for header redaction."""
 
 from __future__ import annotations
 
