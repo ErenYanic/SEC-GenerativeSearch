@@ -100,7 +100,7 @@ class TestValidateRouteSchemaGuards:
     def test_uppercase_provider_rejected(self, api_client: TestClient) -> None:
         response = api_client.post(
             "/api/providers/validate",
-            json={"provider": "OPENAI", "api_key": "sk-x" * 8},
+            json={"provider": "OPENAI", "api_key": "sk-x" * 8},  # pragma: allowlist secret
         )
         # Slug pattern is lower-case only.
         assert response.status_code == 422
@@ -192,7 +192,7 @@ class TestValidateRouteAuthGate:
         # Missing X-API-Key header → 401.
         response = client.post(
             "/api/providers/validate",
-            json={"provider": "openai", "api_key": "sk-test-1234"},
+            json={"provider": "openai", "api_key": "sk-test-1234"},  # pragma: allowlist secret
         )
         assert response.status_code == 401
         assert response.json()["error"] == "unauthorised"
