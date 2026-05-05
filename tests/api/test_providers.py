@@ -119,7 +119,7 @@ class TestValidateRouteVerdicts:
         stub_provider("ok")
         response = api_client.post(
             "/api/providers/validate",
-            json={"provider": "openai", "api_key": "sk-good-key-1234"},
+            json={"provider": "openai", "api_key": "sk-good-key-1234"},  # pragma: allowlist secret
         )
         assert response.status_code == 200
         body = response.json()
@@ -129,7 +129,7 @@ class TestValidateRouteVerdicts:
         stub_provider("auth_error")
         response = api_client.post(
             "/api/providers/validate",
-            json={"provider": "openai", "api_key": "sk-bad-key-1234"},
+            json={"provider": "openai", "api_key": "sk-bad-key-1234"},  # pragma: allowlist secret
         )
         assert response.status_code == 200
         assert response.json()["valid"] is False
@@ -140,7 +140,7 @@ class TestValidateRouteVerdicts:
         stub_provider("rate_limit")
         response = api_client.post(
             "/api/providers/validate",
-            json={"provider": "openai", "api_key": "sk-key-1234"},
+            json={"provider": "openai", "api_key": "sk-key-1234"},  # pragma: allowlist secret
         )
         assert response.status_code == 503
         body = response.json()
@@ -152,7 +152,7 @@ class TestValidateRouteVerdicts:
         stub_provider("generic")
         response = api_client.post(
             "/api/providers/validate",
-            json={"provider": "openai", "api_key": "sk-key-1234"},
+            json={"provider": "openai", "api_key": "sk-key-1234"},  # pragma: allowlist secret
         )
         assert response.status_code == 502
         body = response.json()
@@ -163,10 +163,10 @@ class TestValidateRouteVerdicts:
 class TestValidateRouteNoKeyLeak:
     def test_response_body_does_not_echo_key(self, api_client: TestClient, stub_provider) -> None:
         stub_provider("ok")
-        secret = "sk-NEVER-ECHO-ME-1234-abcd"
+        secret = "sk-NEVER-ECHO-ME-1234-abcd"  # pragma: allowlist secret
         response = api_client.post(
             "/api/providers/validate",
-            json={"provider": "openai", "api_key": secret},
+            json={"provider": "openai", "api_key": secret},  # pragma: allowlist secret
         )
         # Whether valid or not, the body MUST NOT carry the raw key.
         assert secret not in response.text
