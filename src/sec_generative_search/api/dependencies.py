@@ -30,7 +30,8 @@ import re
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
-from fastapi import Request, Security
+from fastapi import Depends, Request, Security
+from fastapi.params import Depends as DependsParam
 from fastapi.security import APIKeyHeader
 
 from sec_generative_search.api.errors import http_error
@@ -59,6 +60,7 @@ __all__ = [
     "ADMIN_USER_ID",
     "PROVIDER_KEY_HEADER_PREFIX",
     "SESSION_COOKIE_NAME",
+    "admin_route_dependencies",
     "extract_session_id",
     "get_chroma",
     "get_embedder",
@@ -107,6 +109,7 @@ def _secrets_match(provided: str | None, expected: str) -> bool:
 
 
 async def verify_api_key(
+    request: Request,
     api_key: str | None = Security(_api_key_header),
 ) -> None:
     """Validate the ``X-API-Key`` header when authentication is enabled.
@@ -115,11 +118,20 @@ async def verify_api_key(
     disabled and every caller passes through.  When it is set, the
     header MUST match (constant-time comparison) or the request is
     rejected with 401.
+
+    Denials emit a ``SECURITY_AUDIT:`` line carrying the client IP and
+    endpoint so unauthorised probing is greppable in operator logs. The
+    key value itself is never logged.
     """
     expected = get_settings().api.key
     if expected is None:
         return
     if not _secrets_match(api_key, expected):
+        client_ip = request.client.host if request.client else "unknown"
+        audit_log(
+            "api_key_denied",
+            detail=(f"client_ip={client_ip} endpoint={request.method} {request.url.path}"),
+        )
         raise http_error(
             status_code=401,
             error="unauthorised",
@@ -174,6 +186,28 @@ def is_admin_request(request: Request) -> bool:
         # No admin key configured — every caller is effectively admin.
         return True
     return _secrets_match(request.headers.get("X-Admin-Key"), expected)
+
+
+def admin_route_dependencies() -> list[DependsParam]:
+    """Canonical dependency list for routes that mutate or destroy state.
+
+    A destructive route must present both headers. Wiring both
+    dependencies on the route - rather than only ``verify_admin_key`` -
+    keeps the read tier load-bearing: when ``API_KEY`` is configured but
+    ``API_ADMIN_KEY`` is not, a non-admin caller still cannot reach the
+    destructive route because the read check rejects first; when both
+    are unset, every caller passes through.
+
+    Usage::
+
+        router = APIRouter(dependencies=admin_route_dependencies())
+        # or per-route: ``@router.delete("/x", dependencies=admin_route_dependencies())``
+
+    Returned as a fresh list on each call so a router that mutates the
+    list (FastAPI does not, but downstream code might) cannot poison the
+    canonical wiring for other routers.
+    """
+    return [Depends(verify_api_key), Depends(verify_admin_key)]
 
 
 # ---------------------------------------------------------------------------
