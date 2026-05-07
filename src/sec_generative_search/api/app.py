@@ -41,6 +41,7 @@ from sec_generative_search.api.middleware import (
     RateLimitMiddleware,
     SecurityHeadersMiddleware,
 )
+from sec_generative_search.api.routes.filings import router as filings_router
 from sec_generative_search.api.routes.health import router as health_router
 from sec_generative_search.api.routes.providers import router as providers_router
 from sec_generative_search.api.routes.session import router as session_router
@@ -79,7 +80,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
        migrations including v2 (``provider_credentials``).
     5. ``FilingStore`` — coordinator over the two stores above.
     6. ``RetrievalService`` — pre-built single-query primitive.
-    7. ``InMemorySessionCredentialStore`` — Phase-9 in-memory store.
+    7. ``InMemorySessionCredentialStore`` — in-memory session store.
     8. ``EncryptedCredentialStore`` — optional, gated by settings.
     """
     settings = get_settings()
@@ -245,6 +246,7 @@ def create_app() -> FastAPI:
     app.include_router(status_router, prefix="/api/status", tags=["status"])
     app.include_router(session_router, prefix="/api", tags=["session"])
     app.include_router(providers_router, prefix="/api/providers", tags=["providers"])
+    app.include_router(filings_router, prefix="/api/filings", tags=["filings"])
 
     return app
 

@@ -13,9 +13,19 @@ Discipline:
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+import re
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 __all__ = [
+    "BulkDeleteRequest",
+    "BulkDeleteResponse",
+    "ClearAllResponse",
+    "DeleteByIdsRequest",
+    "DeleteByIdsResponse",
+    "DeleteResponse",
+    "FilingListResponse",
+    "FilingSchema",
     "HealthResponse",
     "ProviderValidateRequest",
     "ProviderValidateResponse",
@@ -115,6 +125,141 @@ class ProviderValidateRequest(_BaseModel):
         max_length=128,
         description="Optional model slug for embedding-surface validation.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Filing management schemas
+# ---------------------------------------------------------------------------
+
+
+# SEC accession numbers are deterministic: 10-2-6 digits separated by
+# hyphens (e.g. ``0000320193-23-000077``).  We pin the shape at the
+# schema boundary so a stray identifier never reaches the registry.
+_ACCESSION_PATTERN = r"^[0-9]{10}-[0-9]{2}-[0-9]{6}$"
+
+# Ticker symbols on US exchanges fit ``[A-Z][A-Z0-9.-]{0,9}`` but we
+# upper-bound length defensively — a longer string is a sign of misuse,
+# not an exotic ticker.
+_TICKER_PATTERN = r"^[A-Z][A-Z0-9.\-]{0,15}$"
+
+# Form types follow the SEC's published list; we keep validation
+# permissive (any 10-character upper-case slug) so amended forms (10-K/A,
+# 8-K/A) and future variants do not require a schema bump.
+_FORM_TYPE_PATTERN = r"^[A-Z0-9][A-Z0-9/\-]{0,15}$"
+
+
+class FilingSchema(_BaseModel):
+    """Single filing row as exposed to the API.
+
+    Strictly mirrors :class:`FilingRecord` minus the auto-increment
+    ``id`` — the integer PK is an internal SQLite detail that does not
+    belong on the wire.
+    """
+
+    ticker: str
+    form_type: str
+    filing_date: str
+    accession_number: str
+    chunk_count: int
+    ingested_at: str
+
+
+class FilingListResponse(_BaseModel):
+    """Result of ``GET /api/filings/``.
+
+    ``total`` is the count of returned rows, not the global filing
+    count.  Operators that need the registry-wide total go to
+    ``GET /api/status/``.
+    """
+
+    filings: list[FilingSchema]
+    total: int
+
+
+class DeleteResponse(_BaseModel):
+    """Result of ``DELETE /api/filings/{accession}``."""
+
+    accession_number: str
+    chunks_deleted: int
+
+
+class DeleteByIdsRequest(_BaseModel):
+    """Body for ``POST /api/filings/delete-by-ids``.
+
+    Bounded list length (1..500) keeps a single request from monopolising
+    the SQLite write lock or generating a many-MB ChromaDB ``$in``
+    clause.  Each accession is pinned to the SEC shape at schema time so
+    the registry never sees a malformed identifier.
+    """
+
+    accession_numbers: list[str] = Field(
+        min_length=1,
+        max_length=500,
+        description="Accession numbers to delete (1..500 per request).",
+    )
+
+    @field_validator("accession_numbers")
+    @classmethod
+    def _validate_accession_shape(cls, value: list[str]) -> list[str]:
+        pattern = re.compile(_ACCESSION_PATTERN)
+        for accession in value:
+            if not pattern.fullmatch(accession):
+                raise ValueError(
+                    f"Invalid accession number shape: {accession!r}. Expected NNNNNNNNNN-NN-NNNNNN."
+                )
+        # Dedupe while preserving order — duplicates make the request
+        # idempotent on the registry side, but waste a parameter slot in
+        # the bounded ``IN (?, ?, …)`` clause.
+        seen: set[str] = set()
+        unique: list[str] = []
+        for accession in value:
+            if accession not in seen:
+                seen.add(accession)
+                unique.append(accession)
+        return unique
+
+
+class DeleteByIdsResponse(_BaseModel):
+    """Result of ``POST /api/filings/delete-by-ids``."""
+
+    filings_deleted: int
+    chunks_deleted: int
+    not_found: list[str]
+
+
+class BulkDeleteRequest(_BaseModel):
+    """Body for ``POST /api/filings/bulk-delete``.
+
+    At least one of ``ticker`` / ``form_type`` MUST be set.  An empty
+    body would expand to ``DELETE FROM filings`` and we have a separate
+    confirm-gated route for that destructive shape.
+    """
+
+    ticker: str | None = Field(
+        default=None,
+        pattern=_TICKER_PATTERN,
+        description="Filter by upper-case ticker symbol (e.g. AAPL).",
+    )
+    form_type: str | None = Field(
+        default=None,
+        pattern=_FORM_TYPE_PATTERN,
+        description="Filter by upper-case form type (e.g. 10-K, 10-K/A).",
+    )
+
+
+class BulkDeleteResponse(_BaseModel):
+    """Result of ``POST /api/filings/bulk-delete``."""
+
+    filings_deleted: int
+    chunks_deleted: int
+    tickers_affected: list[str]
+
+
+class ClearAllResponse(_BaseModel):
+    """Result of ``DELETE /api/filings/?confirm=true``."""
+
+    filings_deleted: int
+    chunks_deleted: int
 
 
 class ProviderValidateResponse(_BaseModel):

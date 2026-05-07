@@ -146,10 +146,18 @@ async def _validation_exception_handler(
     """Map FastAPI validation errors into the unified envelope."""
     # ``exc.errors()`` is already a list of small dicts safe to surface;
     # we trim the ``input`` field on each entry to avoid echoing arbitrary
-    # request bodies back at the caller.
+    # request bodies back at the caller.  ``ctx`` may carry a raw
+    # exception instance (e.g. ``ValueError`` from a custom validator)
+    # which is not JSON-serialisable — coerce it to its string form so
+    # the envelope still renders.
     errors = []
     for raw in exc.errors():
         cleaned = {k: v for k, v in raw.items() if k != "input"}
+        ctx = cleaned.get("ctx")
+        if isinstance(ctx, dict) and "error" in ctx:
+            ctx_safe = dict(ctx)
+            ctx_safe["error"] = str(ctx_safe["error"])
+            cleaned["ctx"] = ctx_safe
         errors.append(cleaned)
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

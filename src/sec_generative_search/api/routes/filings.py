@@ -1,47 +1,100 @@
-"""
-Filing management endpoints — list, retrieve, and delete ingested filings.
+"""Filing management routes.
 
-Provides full CRUD (minus create — that's ingest) for the filing registry:
-    - ``GET    /api/filings/``            — list filings with optional filters
-    - ``GET    /api/filings/{accession}`` — get a single filing by accession number
-    - ``DELETE /api/filings/{accession}`` — delete a single filing (ChromaDB first, then SQLite)
-    - ``POST   /api/filings/bulk-delete`` — bulk delete by ticker/form_type filter
-    - ``DELETE /api/filings/``            — clear all filings (requires ``confirm=true``)
+Surface for inspecting and removing filings already ingested into the
+dual store.  The routes are written against the current package seams
+— :class:`FilingStore` for every write, the ``admin_route_dependencies()``
+helper for destructive routes, and the structured
+``{error, message, details, hint}`` envelope.
+
+Read tier (``Depends(verify_api_key)``):
+
+    - ``GET /api/filings/``               — list with optional filters
+    - ``GET /api/filings/{accession}``    — single-record lookup
+
+Destructive tier (``admin_route_dependencies()`` —
+``verify_api_key`` THEN ``verify_admin_key``):
+
+    - ``DELETE /api/filings/{accession}``    — remove one filing
+    - ``POST   /api/filings/delete-by-ids``  — remove by accession list
+    - ``POST   /api/filings/bulk-delete``    — remove by ticker/form filter
+    - ``DELETE /api/filings/?confirm=true``  — wipe every filing
+
+Why route through :class:`FilingStore` and never the underlying
+collaborators directly:
+
+    - The store is the single seam that owns the ChromaDB-first delete
+      ordering and the rollback semantics.  Calling
+      ``ChromaDBClient.delete_filing`` and ``MetadataRegistry.remove_filing``
+      individually here would silently re-implement that ordering with
+      drift potential — and existing storage tests pin the behaviour at
+      the store layer.
+    - It mirrors the ingestion path (which also writes through
+      :class:`FilingStore`), keeping the operator's mental model of "all
+      mutations of the dual store happen in one place" intact.
+
+Audit-log discipline:
+
+    - Every destructive call emits a ``SECURITY_AUDIT:`` line via
+      :func:`audit_log` carrying the action, client IP, endpoint, and a
+      compact effect summary.  Tickers and accession numbers in the
+      detail string are pre-scrubbed by the existing privacy contract
+      for task-history rows.
+    - Lookup misses (404) and validation failures (400 / 422) are not
+      audit-logged here — they are noise on a normal browser session and
+      are already covered by the access log.
 """
+
+from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
+from fastapi import APIRouter, Depends, Path, Query, Request
 
-from sec_semantic_search.api.dependencies import get_chroma, get_registry, verify_admin_key
-from sec_semantic_search.api.schemas import (
+from sec_generative_search.api.dependencies import (
+    admin_route_dependencies,
+    get_filing_store,
+    get_registry,
+    verify_api_key,
+)
+from sec_generative_search.api.errors import http_error
+from sec_generative_search.api.schemas import (
     BulkDeleteRequest,
     BulkDeleteResponse,
     ClearAllResponse,
     DeleteByIdsRequest,
     DeleteByIdsResponse,
     DeleteResponse,
-    ErrorResponse,
     FilingListResponse,
     FilingSchema,
 )
-from sec_semantic_search.config import get_settings
-from sec_semantic_search.core import DatabaseError, audit_log, get_logger
-from sec_semantic_search.database import (
-    ChromaDBClient,
-    MetadataRegistry,
-    clear_all_filings,
-    delete_filings_batch,
-)
-from sec_semantic_search.database.metadata import FilingRecord
+from sec_generative_search.config.settings import get_settings
+from sec_generative_search.core.exceptions import DatabaseError
+from sec_generative_search.core.logging import audit_log, get_logger
+from sec_generative_search.database import FilingRecord, FilingStore, MetadataRegistry
+
+__all__ = ["router"]
+
 
 logger = get_logger(__name__)
 
-router = APIRouter()
+
+# Accession numbers are pinned at the path level too so a shape mismatch
+# bounces with a 422 before any route logic runs.  The pattern matches
+# the schema's ``_ACCESSION_PATTERN``; do not relax either site without
+# updating the other.
+_ACCESSION_PATH_PATTERN = r"^[0-9]{10}-[0-9]{2}-[0-9]{6}$"
+
+
+# Read-tier router: list / detail are gated by ``verify_api_key`` only.
+router = APIRouter(dependencies=[Depends(verify_api_key)])
 
 
 def _record_to_schema(record: FilingRecord) -> FilingSchema:
-    """Convert a database ``FilingRecord`` to an API ``FilingSchema``."""
+    """Lift the SQLite-backed dataclass to the wire shape.
+
+    The auto-increment ``id`` is intentionally dropped — it is an
+    internal sequence number that has no meaning to API consumers.
+    """
     return FilingSchema(
         ticker=record.ticker,
         form_type=record.form_type,
@@ -52,6 +105,38 @@ def _record_to_schema(record: FilingRecord) -> FilingSchema:
     )
 
 
+def _client_ip(request: Request) -> str:
+    """Best-effort client IP for audit-log lines.
+
+    ``request.client`` is ``None`` for ASGI scopes lacking a peer
+    address (older test clients, certain proxies).  Returning ``"unknown"``
+    keeps the audit-line shape stable so downstream parsers do not need
+    to handle a missing field.
+    """
+    return request.client.host if request.client else "unknown"
+
+
+def _database_error(exc: DatabaseError) -> Exception:
+    """Wrap a raw :class:`DatabaseError` in the API's structured envelope.
+
+    The driver-level ``details`` field is intentionally NOT echoed back
+    to the client — SQLite / ChromaDB error strings routinely include
+    file paths and SQL fragments unsuitable for a public response.  The
+    exception is logged in full at the call site.
+    """
+    return http_error(
+        status_code=500,
+        error="database_error",
+        message="Database operation failed. Check server logs.",
+        hint="Check that the data directory is writable and the database is intact.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Read routes
+# ---------------------------------------------------------------------------
+
+
 @router.get(
     "/",
     response_model=FilingListResponse,
@@ -59,27 +144,50 @@ def _record_to_schema(record: FilingRecord) -> FilingSchema:
 )
 async def list_filings(
     registry: MetadataRegistry = Depends(get_registry),
-    ticker: str | None = Query(None, description="Filter by ticker symbol"),
-    form_type: str | None = Query(None, description="Filter by form type (8-K, 10-K, or 10-Q)"),
-    sort_by: Literal["filing_date", "ticker", "form_type", "chunk_count", "ingested_at"] = Query(
-        "filing_date", description="Column to sort by"
+    ticker: str | None = Query(
+        default=None,
+        max_length=16,
+        pattern=r"^[A-Za-z][A-Za-z0-9.\-]{0,15}$",
+        description="Filter by ticker symbol (case-insensitive).",
     ),
-    order: Literal["asc", "desc"] = Query("desc", description="Sort order"),
+    form_type: str | None = Query(
+        default=None,
+        max_length=16,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9/\-]{0,15}$",
+        description="Filter by form type (e.g. 10-K, 10-K/A).",
+    ),
+    sort_by: Literal[
+        "filing_date",
+        "ticker",
+        "form_type",
+        "chunk_count",
+        "ingested_at",
+    ] = Query(
+        default="filing_date",
+        description="Column to sort by.",
+    ),
+    order: Literal["asc", "desc"] = Query(
+        default="desc",
+        description="Sort order.",
+    ),
 ) -> FilingListResponse:
-    """
-    List all ingested filings with optional filters and sorting.
+    """List filings with optional filters and operator-chosen sort.
 
-    Results are returned in the order specified by ``sort_by`` and ``order``.
-    The underlying registry always returns filings ordered by filing_date
-    descending; additional sorting is applied in-memory.
+    The registry returns rows ordered by ``filing_date DESC``; we re-sort
+    in-memory only when the caller requests something else.  The list is
+    bounded by the configured ``DB_MAX_FILINGS`` and is therefore safe
+    to materialise in process — there is no pagination because the
+    storage ceiling already serves as one.
     """
-    records = registry.list_filings(
-        ticker=ticker.upper() if ticker else None,
-        form_type=form_type.upper() if form_type else None,
-    )
+    try:
+        records = registry.list_filings(
+            ticker=ticker.upper() if ticker else None,
+            form_type=form_type.upper() if form_type else None,
+        )
+    except DatabaseError as exc:
+        logger.error("list_filings failed: %s", exc.details)
+        raise _database_error(exc) from exc
 
-    # Apply sorting.  The registry returns filing_date DESC by default,
-    # so we only need to re-sort when the caller requests something else.
     if sort_by != "filing_date" or order != "desc":
         reverse = order == "desc"
         records.sort(key=lambda r: getattr(r, sort_by), reverse=reverse)
@@ -91,86 +199,97 @@ async def list_filings(
 @router.get(
     "/{accession}",
     response_model=FilingSchema,
-    responses={404: {"model": ErrorResponse}},
-    summary="Get a single filing",
+    summary="Get a single filing by accession number",
 )
 async def get_filing(
-    accession: str = Path(..., max_length=20, pattern=r"^[0-9]{10}-[0-9]{2}-[0-9]{6}$"),
+    accession: str = Path(
+        ...,
+        max_length=20,
+        pattern=_ACCESSION_PATH_PATTERN,
+        description="SEC accession number (NNNNNNNNNN-NN-NNNNNN).",
+    ),
     registry: MetadataRegistry = Depends(get_registry),
 ) -> FilingSchema:
-    """
-    Retrieve a single filing record by accession number.
+    """Return a single filing record or surface a 404 envelope.
 
-    Returns 404 if the filing is not found in the registry.
+    The 404 hint deliberately steers the caller back to ``GET /api/filings/``
+    rather than echoing ticker / form-type guesses; we do not enumerate
+    candidate matches here because that would let an unauthenticated
+    discovery tool probe the corpus shape.
     """
-    record = registry.get_filing(accession)
+    try:
+        record = registry.get_filing(accession)
+    except DatabaseError as exc:
+        logger.error("get_filing(%s) failed: %s", accession, exc.details)
+        raise _database_error(exc) from exc
+
     if record is None:
-        raise HTTPException(
+        raise http_error(
             status_code=404,
-            detail={
-                "error": "not_found",
-                "message": f"Filing not found: {accession}",
-                "hint": "Use GET /api/filings/ to list available accession numbers.",
-            },
+            error="not_found",
+            message=f"Filing not found: {accession}",
+            hint="Use GET /api/filings/ to list available accession numbers.",
         )
     return _record_to_schema(record)
 
 
 # ---------------------------------------------------------------------------
-# Delete endpoints (W1.3)
+# Destructive routes (admin-gated)
 # ---------------------------------------------------------------------------
 
 
 @router.delete(
     "/{accession}",
     response_model=DeleteResponse,
-    responses={404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     summary="Delete a single filing",
+    dependencies=admin_route_dependencies(),
 )
 async def delete_filing(
     request: Request,
-    accession: str = Path(..., max_length=20, pattern=r"^[0-9]{10}-[0-9]{2}-[0-9]{6}$"),
+    accession: str = Path(
+        ...,
+        max_length=20,
+        pattern=_ACCESSION_PATH_PATTERN,
+    ),
     registry: MetadataRegistry = Depends(get_registry),
-    chroma: ChromaDBClient = Depends(get_chroma),
+    store: FilingStore = Depends(get_filing_store),
 ) -> DeleteResponse:
-    """
-    Delete a single filing by accession number from both stores.
+    """Remove a single filing from both stores.
 
-    Removes vector data from ChromaDB first, then the metadata row from
-    SQLite.  Returns the number of chunks deleted.
+    The pre-check via :meth:`MetadataRegistry.get_filing` lets us return
+    a clean 404 without paying the ChromaDB round-trip when the
+    accession is not registered.  After the delete, the audit-log line
+    carries the chunk count so the operator can correlate the row count
+    with the ChromaDB segment delete reported in the storage logs.
     """
-    record = registry.get_filing(accession)
+    try:
+        record = registry.get_filing(accession)
+    except DatabaseError as exc:
+        logger.error("delete_filing get(%s) failed: %s", accession, exc.details)
+        raise _database_error(exc) from exc
+
     if record is None:
-        raise HTTPException(
+        raise http_error(
             status_code=404,
-            detail={
-                "error": "not_found",
-                "message": f"Filing not found: {accession}",
-                "hint": "Use GET /api/filings/ to list available accession numbers.",
-            },
+            error="not_found",
+            message=f"Filing not found: {accession}",
+            hint="Use GET /api/filings/ to list available accession numbers.",
         )
 
     try:
-        chroma.delete_filing(accession)
-        registry.remove_filing(accession)
+        store.delete_filing(accession)
     except DatabaseError as exc:
-        logger.error("Delete filing %s failed: %s", accession, exc.details)
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "database_error",
-                "message": "Database operation failed. Check server logs.",
-                "details": None,
-                "hint": "Check that the data directory is writable.",
-            },
-        ) from exc
+        logger.error("delete_filing(%s) failed: %s", accession, exc.details)
+        raise _database_error(exc) from exc
 
-    client_ip = request.client.host if request.client else "unknown"
     audit_log(
         "delete_filing",
-        client_ip=client_ip,
+        client_ip=_client_ip(request),
         endpoint="DELETE /api/filings/{accession}",
-        detail=f"accession={accession} ticker={record.ticker} form={record.form_type} chunks={record.chunk_count}",
+        detail=(
+            f"accession={accession} ticker={record.ticker} "
+            f"form={record.form_type} chunks={record.chunk_count}"
+        ),
     )
     return DeleteResponse(
         accession_number=accession,
@@ -181,25 +300,29 @@ async def delete_filing(
 @router.post(
     "/delete-by-ids",
     response_model=DeleteByIdsResponse,
-    responses={500: {"model": ErrorResponse}},
-    summary="Delete filings by accession numbers",
+    summary="Delete filings by accession-number list",
+    dependencies=admin_route_dependencies(),
 )
 async def delete_by_ids(
     request: Request,
     body: DeleteByIdsRequest,
     registry: MetadataRegistry = Depends(get_registry),
-    chroma: ChromaDBClient = Depends(get_chroma),
+    store: FilingStore = Depends(get_filing_store),
 ) -> DeleteByIdsResponse:
-    """
-    Delete specific filings by their accession numbers in a single request.
+    """Delete a bounded list of accession numbers in one round-trip.
 
-    Looks up each accession number in the registry, deletes those that exist
-    from both stores, and reports any that were not found.  This is more
-    efficient than making N sequential ``DELETE /api/filings/{accession}``
-    calls from the frontend.
+    Looks up the registry once (single ``IN (?, ?, …)`` query) so the
+    response can report the missing accessions without paying N
+    individual ``get_filing`` calls.  Pre-existence is required only for
+    *reporting* — the underlying batch delete is idempotent on missing
+    accessions because both stores treat them as no-ops.
     """
-    # Batch lookup: single SQL query instead of N individual get_filing() calls.
-    found = registry.get_filings_by_accessions(body.accession_numbers)
+    try:
+        found = registry.get_filings_by_accessions(body.accession_numbers)
+    except DatabaseError as exc:
+        logger.error("delete_by_ids lookup failed: %s", exc.details)
+        raise _database_error(exc) from exc
+
     found_accessions = {r.accession_number for r in found}
     not_found = [a for a in body.accession_numbers if a not in found_accessions]
 
@@ -210,34 +333,26 @@ async def delete_by_ids(
             not_found=not_found,
         )
 
-    try:
-        total_chunks = delete_filings_batch(
-            found,
-            chroma=chroma,
-            registry=registry,
-        )
-    except DatabaseError as exc:
-        logger.error("Delete by IDs failed: %s", exc.details)
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "database_error",
-                "message": "Database operation failed. Check server logs.",
-                "details": None,
-                "hint": "Check that the data directory is writable.",
-            },
-        ) from exc
+    accessions = [record.accession_number for record in found]
+    chunks_total = sum(record.chunk_count for record in found)
 
-    client_ip = request.client.host if request.client else "unknown"
+    try:
+        store.delete_filings_batch(accessions)
+    except DatabaseError as exc:
+        logger.error("delete_by_ids batch failed: %s", exc.details)
+        raise _database_error(exc) from exc
+
     audit_log(
-        "delete_by_ids",
-        client_ip=client_ip,
+        "delete_filings_batch",
+        client_ip=_client_ip(request),
         endpoint="POST /api/filings/delete-by-ids",
-        detail=f"deleted={len(found)} chunks={total_chunks} not_found={len(not_found)}",
+        detail=(
+            f"deleted={len(found)} chunks={chunks_total} not_found={len(not_found)}"
+        ),
     )
     return DeleteByIdsResponse(
         filings_deleted=len(found),
-        chunks_deleted=total_chunks,
+        chunks_deleted=chunks_total,
         not_found=not_found,
     )
 
@@ -245,43 +360,41 @@ async def delete_by_ids(
 @router.post(
     "/bulk-delete",
     response_model=BulkDeleteResponse,
-    responses={
-        400: {"model": ErrorResponse},
-        403: {"model": ErrorResponse},
-        500: {"model": ErrorResponse},
-    },
-    summary="Bulk delete filings by filter",
-    dependencies=[Depends(verify_admin_key)],
+    summary="Bulk delete filings by ticker / form_type filter",
+    dependencies=admin_route_dependencies(),
 )
 async def bulk_delete(
     request: Request,
     body: BulkDeleteRequest,
     registry: MetadataRegistry = Depends(get_registry),
-    chroma: ChromaDBClient = Depends(get_chroma),
+    store: FilingStore = Depends(get_filing_store),
 ) -> BulkDeleteResponse:
-    """
-    Delete all filings matching the given ticker and/or form_type filter.
+    """Delete every filing matching the given filter.
 
-    At least one filter (``ticker`` or ``form_type``) must be provided.
-    Returns the number of filings and chunks deleted.
+    The filter must narrow the result set — a fully-empty body is
+    rejected at 400 so an unguarded "delete everything" is not
+    reachable via this surface.  Wiping the entire registry has its own
+    confirm-gated route below.
     """
     if body.ticker is None and body.form_type is None:
-        raise HTTPException(
+        raise http_error(
             status_code=400,
-            detail={
-                "error": "validation_error",
-                "message": "At least one filter is required.",
-                "hint": (
-                    "Provide 'ticker' and/or 'form_type'. "
-                    "To delete everything, use DELETE /api/filings/?confirm=true instead."
-                ),
-            },
+            error="validation_error",
+            message="At least one filter is required.",
+            hint=(
+                "Provide 'ticker' and/or 'form_type'. "
+                "To delete everything, use DELETE /api/filings/?confirm=true."
+            ),
         )
 
-    filings = registry.list_filings(
-        ticker=body.ticker.upper() if body.ticker else None,
-        form_type=body.form_type,  # Already uppercased by validator
-    )
+    try:
+        filings = registry.list_filings(
+            ticker=body.ticker.upper() if body.ticker else None,
+            form_type=body.form_type.upper() if body.form_type else None,
+        )
+    except DatabaseError as exc:
+        logger.error("bulk_delete list failed: %s", exc.details)
+        raise _database_error(exc) from exc
 
     if not filings:
         return BulkDeleteResponse(
@@ -290,36 +403,29 @@ async def bulk_delete(
             tickers_affected=[],
         )
 
+    accessions = [f.accession_number for f in filings]
+    chunks_total = sum(f.chunk_count for f in filings)
+
     try:
-        total_chunks = delete_filings_batch(
-            filings,
-            chroma=chroma,
-            registry=registry,
-        )
+        store.delete_filings_batch(accessions)
     except DatabaseError as exc:
-        logger.error("Bulk delete failed: %s", exc.details)
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "database_error",
-                "message": "Database operation failed. Check server logs.",
-                "details": None,
-                "hint": "Check that the data directory is writable.",
-            },
-        ) from exc
+        logger.error("bulk_delete batch failed: %s", exc.details)
+        raise _database_error(exc) from exc
 
     tickers_affected = sorted({f.ticker for f in filings})
 
-    client_ip = request.client.host if request.client else "unknown"
     audit_log(
         "bulk_delete",
-        client_ip=client_ip,
+        client_ip=_client_ip(request),
         endpoint="POST /api/filings/bulk-delete",
-        detail=f"filings={len(filings)} chunks={total_chunks} tickers={tickers_affected}",
+        detail=(
+            f"filings={len(filings)} chunks={chunks_total} "
+            f"tickers={len(tickers_affected)}"
+        ),
     )
     return BulkDeleteResponse(
         filings_deleted=len(filings),
-        chunks_deleted=total_chunks,
+        chunks_deleted=chunks_total,
         tickers_affected=tickers_affected,
     )
 
@@ -327,70 +433,54 @@ async def bulk_delete(
 @router.delete(
     "/",
     response_model=ClearAllResponse,
-    responses={
-        400: {"model": ErrorResponse},
-        403: {"model": ErrorResponse},
-        500: {"model": ErrorResponse},
-    },
-    summary="Clear all filings",
-    dependencies=[Depends(verify_admin_key)],
+    summary="Clear every filing from both stores",
+    dependencies=admin_route_dependencies(),
 )
 async def clear_all(
     request: Request,
-    confirm: bool = Query(False, description="Safety flag — must be true to proceed"),
-    registry: MetadataRegistry = Depends(get_registry),
-    chroma: ChromaDBClient = Depends(get_chroma),
+    confirm: bool = Query(
+        default=False,
+        description="Safety flag — must be true to proceed.",
+    ),
+    store: FilingStore = Depends(get_filing_store),
 ) -> ClearAllResponse:
-    """
-    Delete every filing from both stores.
+    """Wipe every filing across both stores.
 
-    Requires ``confirm=true`` as a safety measure to prevent accidental
-    data loss.  Disabled entirely when ``DEMO_MODE=true`` — returns 403
-    for everyone, including admins.  The nightly reset script handles
-    full cleanup in demo deployments.
+    Two safety gates:
+
+    1. ``confirm=true`` MUST be present.  Without it the route returns
+       400 — preventing a stray ``curl -X DELETE`` from emptying the
+       corpus.
+    2. ``API_DEMO_MODE=true`` returns 403 unconditionally — the demo
+       deployment relies on the nightly reset job for wipes and a
+       human-driven clear-all bypassing that schedule has historically
+       caused contention.
     """
     if get_settings().api.demo_mode:
-        raise HTTPException(
+        raise http_error(
             status_code=403,
-            detail={
-                "error": "demo_mode",
-                "message": "Clear all is disabled in demo mode.",
-                "details": None,
-                "hint": "Data resets nightly at midnight UTC.",
-            },
+            error="demo_mode",
+            message="Clear-all is disabled while the deployment is in demo mode.",
+            hint="Demo data resets automatically on the nightly schedule.",
         )
 
     if not confirm:
-        raise HTTPException(
+        raise http_error(
             status_code=400,
-            detail={
-                "error": "confirmation_required",
-                "message": "This will delete ALL filings. Pass ?confirm=true to proceed.",
-                "hint": "Add '?confirm=true' to the request URL.",
-            },
+            error="confirmation_required",
+            message="This will delete ALL filings. Pass ?confirm=true to proceed.",
+            hint="Add '?confirm=true' to the request URL to acknowledge the wipe.",
         )
 
     try:
-        filings_deleted, chunks_deleted = clear_all_filings(
-            chroma=chroma,
-            registry=registry,
-        )
+        chunks_deleted, filings_deleted = store.clear_all()
     except DatabaseError as exc:
-        logger.error("Clear all failed: %s", exc.details)
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "database_error",
-                "message": "Database operation failed. Check server logs.",
-                "details": None,
-                "hint": "Check that the data directory is writable.",
-            },
-        ) from exc
+        logger.error("clear_all failed: %s", exc.details)
+        raise _database_error(exc) from exc
 
-    client_ip = request.client.host if request.client else "unknown"
     audit_log(
         "clear_all",
-        client_ip=client_ip,
+        client_ip=_client_ip(request),
         endpoint="DELETE /api/filings/?confirm=true",
         detail=f"filings={filings_deleted} chunks={chunks_deleted}",
     )

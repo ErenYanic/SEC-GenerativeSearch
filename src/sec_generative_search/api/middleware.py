@@ -396,6 +396,15 @@ def _classify_path(path: str, method: str) -> str | None:
         return "ingest"
     if method == "DELETE":
         return "delete"
+    # Batch-delete routes use POST because the body carries the
+    # accession list / filter — bucket them with the destructive tier
+    # so a script cannot side-step the per-IP delete limit by switching
+    # from DELETE /{accession} to POST /delete-by-ids.
+    if path in (
+        "/api/filings/delete-by-ids",
+        "/api/filings/bulk-delete",
+    ):
+        return "delete"
     if path.startswith("/api/"):
         return "general"
     return None
