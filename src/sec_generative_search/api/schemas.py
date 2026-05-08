@@ -32,6 +32,9 @@ __all__ = [
     "HealthResponse",
     "ProviderValidateRequest",
     "ProviderValidateResponse",
+    "SearchHit",
+    "SearchRequest",
+    "SearchResponse",
     "SessionLogoutResponse",
     "SessionResponse",
     "StatusResponse",
@@ -318,3 +321,171 @@ class ProviderValidateResponse(_BaseModel):
     valid: bool
     provider: str
     surface: str
+
+
+# ---------------------------------------------------------------------------
+# Retrieval (POST /api/search) schemas
+# ---------------------------------------------------------------------------
+
+
+# ISO date shape is pinned at the schema boundary so a malformed date
+# never reaches ``RetrievalService._validate_iso_date``. The retrieval
+# service itself validates with ``date.fromisoformat``; this regex is
+# the cheap syntactic gate.
+_ISO_DATE_PATTERN = r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+
+
+class SearchRequest(_BaseModel):
+    """Body for ``POST /api/search``.
+
+        Retrieval-only surface over :class:`RetrievalService`. The query
+        travels in the body, never the URL, so it does not land in proxy
+        access logs.
+
+    Filter fields accept either a single value or a list; the underlying
+    :meth:`RetrievalService.retrieve` already handles both shapes.  Each
+    list is bounded so a malicious caller cannot spend the embedder
+    budget by passing thousands of tickers in one request.
+
+    Numeric bounds are deliberately tight:
+
+                - ``top_k`` is capped at 50. Without a cap a single request
+                    could pin Chroma's connection on a giant scan.
+        - ``min_similarity`` is in [0.0, 1.0] — anything else is a
+          caller bug, not a configuration knob.
+        - ``context_token_budget`` is bounded at 100k tokens, matching
+          the largest realistic context window across supported
+          providers; values of 0 disable packing.
+    """
+
+    query: str = Field(
+        min_length=1,
+        max_length=1024,
+        description=(
+            "Natural language query.  Echoed nowhere in the response or any non-redacted log line."
+        ),
+    )
+    top_k: int | None = Field(
+        default=None,
+        ge=1,
+        le=50,
+        description=(
+            "Maximum number of hits to return.  Defaults to ``settings.search.top_k`` when omitted."
+        ),
+    )
+    min_similarity: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Cosine similarity threshold; results below are dropped before any further processing."
+        ),
+    )
+    ticker: str | list[str] | None = Field(
+        default=None,
+        description="Single ticker symbol or a list of tickers.",
+    )
+    form_type: str | list[str] | None = Field(
+        default=None,
+        description="Single SEC form type (e.g. '10-K') or a list.",
+    )
+    accession_number: str | list[str] | None = Field(
+        default=None,
+        description="Single SEC accession number or a list.",
+    )
+    start_date: str | None = Field(
+        default=None,
+        pattern=_ISO_DATE_PATTERN,
+        description="Inclusive lower bound, YYYY-MM-DD.",
+    )
+    end_date: str | None = Field(
+        default=None,
+        pattern=_ISO_DATE_PATTERN,
+        description="Inclusive upper bound, YYYY-MM-DD.",
+    )
+    max_per_section: int = Field(
+        default=0,
+        ge=0,
+        le=50,
+        description="Maximum chunks per section path; 0 disables the cap.",
+    )
+    max_per_filing: int = Field(
+        default=0,
+        ge=0,
+        le=50,
+        description="Maximum chunks per accession number; 0 disables the cap.",
+    )
+    context_token_budget: int | None = Field(
+        default=None,
+        ge=0,
+        le=100_000,
+        description=(
+            "Cumulative token budget for the returned hits; 0 disables "
+            "packing.  Defaults to ``settings.rag.context_token_budget``."
+        ),
+    )
+
+    @field_validator("ticker", "form_type", "accession_number")
+    @classmethod
+    def _bounded_list(cls, value: str | list[str] | None) -> str | list[str] | None:
+        # Bound list length so a malicious payload cannot expand into a
+        # huge ChromaDB ``$in`` clause.  Single strings pass through
+        # unchanged — the underlying retrieval helpers shape-check those.
+        if isinstance(value, list):
+            if len(value) == 0:
+                raise ValueError("Filter list must not be empty; omit the field instead.")
+            if len(value) > 50:
+                raise ValueError("Filter list is bounded to 50 entries per request.")
+        return value
+
+
+class SearchHit(_BaseModel):
+    """One retrieval hit on the wire.
+
+    Mirrors :class:`RetrievalResult` minus internal-only fields.  The
+    fields chosen for the wire are the union of "needed by the UI" and
+    "auditable" — ``content`` is Tier-1 public SEC data and is safe to
+    return to authenticated callers.
+
+    Notes:
+
+                - ``rerank_score`` is ``None`` when no reranker is bound. UI
+                    code should prefer ``rerank_score`` when present and fall back
+                    to ``similarity``; the two scales are not commensurable.
+        - ``token_count`` is exposed because operators tuning the budget
+          want to see it; it is NOT a credential and reveals nothing
+          about the underlying corpus shape that ``content`` does not
+          already.
+        - ``truncated`` is reserved for future mid-chunk clipping; the
+          current packer is drop-tail and never sets the flag, but the
+          field is on the wire so a future change does not break clients.
+    """
+
+    chunk_id: str | None
+    content: str
+    path: str
+    content_type: str
+    ticker: str
+    form_type: str
+    filing_date: str | None
+    accession_number: str | None
+    similarity: float
+    rerank_score: float | None = None
+    token_count: int = 0
+    truncated: bool = False
+    section_boundaries: list[str] = Field(default_factory=list)
+
+
+class SearchResponse(_BaseModel):
+    """Result of ``POST /api/search``.
+
+    ``query`` is intentionally NOT echoed back — the request body is
+    sufficient round-trip context for any client (clients keep the body
+    they sent), and echoing it would land queries in any caller-side log
+    or browser dev-tools history that captures responses but redacts
+    requests.  ``total`` is the count of returned hits, not a corpus
+    cardinality.
+    """
+
+    hits: list[SearchHit]
+    total: int
