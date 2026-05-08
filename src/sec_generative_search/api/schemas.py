@@ -24,6 +24,9 @@ __all__ = [
     "DeleteByIdsRequest",
     "DeleteByIdsResponse",
     "DeleteResponse",
+    "EdgarIdentityClearResponse",
+    "EdgarIdentityRegisterResponse",
+    "EdgarIdentityRequest",
     "FilingListResponse",
     "FilingSchema",
     "HealthResponse",
@@ -91,6 +94,46 @@ class SessionLogoutResponse(_BaseModel):
     cleared_credentials: int = Field(
         description="Number of provider credentials dropped from the session store.",
     )
+    cleared_edgar_identity: bool = Field(
+        default=False,
+        description=("Whether a per-session EDGAR identity was cleared as part of logout."),
+    )
+
+
+class EdgarIdentityRequest(_BaseModel):
+    """Body for ``POST /api/session/edgar``.
+
+    Both fields are validated server-side before storage; the response
+    NEVER echoes the values back.  The route requires an active
+    server-minted ``session_id`` cookie — without one there is no scope
+    in which to register the identity.
+    """
+
+    name: str = Field(
+        min_length=1,
+        max_length=128,
+        description="Acting user's full name (sent to SEC as part of the User-Agent).",
+    )
+    email: str = Field(
+        min_length=3,
+        max_length=254,
+        description="Acting user's email address (sent to SEC as part of the User-Agent).",
+    )
+
+
+class EdgarIdentityRegisterResponse(_BaseModel):
+    """Result of a successful ``POST /api/session/edgar``.
+
+    Body is deliberately minimal — neither name nor email is echoed back.
+    """
+
+    registered: bool
+
+
+class EdgarIdentityClearResponse(_BaseModel):
+    """Result of a successful ``DELETE /api/session/edgar``."""
+
+    cleared: bool
 
 
 class ProviderValidateRequest(_BaseModel):

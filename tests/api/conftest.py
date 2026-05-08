@@ -25,6 +25,7 @@ from fastapi.testclient import TestClient
 
 from sec_generative_search.config.settings import reload_settings
 from sec_generative_search.core.credentials import InMemorySessionCredentialStore
+from sec_generative_search.core.edgar_identity import InMemorySessionEdgarIdentityStore
 
 
 @pytest.fixture(autouse=True)
@@ -58,6 +59,7 @@ def _build_test_app(*, env: dict[str, str] | None = None):
     # Stub the singletons the route surface reads. Heavier wiring is
     # added per-test via the ``stub_state`` fixture when needed.
     app.state.session_store = InMemorySessionCredentialStore(ttl_seconds=3600)
+    app.state.edgar_identity_store = InMemorySessionEdgarIdentityStore(ttl_seconds=3600)
     app.state.encrypted_credential_store = None
     return app
 

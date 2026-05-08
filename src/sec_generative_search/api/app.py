@@ -48,6 +48,7 @@ from sec_generative_search.api.routes.session import router as session_router
 from sec_generative_search.api.routes.status import router as status_router
 from sec_generative_search.config.settings import get_settings
 from sec_generative_search.core.credentials import InMemorySessionCredentialStore
+from sec_generative_search.core.edgar_identity import InMemorySessionEdgarIdentityStore
 from sec_generative_search.core.logging import get_logger
 from sec_generative_search.core.types import EmbedderStamp
 from sec_generative_search.database import ChromaDBClient, FilingStore, MetadataRegistry
@@ -115,6 +116,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         ttl_seconds=settings.api.session_ttl_seconds,
     )
 
+    # 7b. In-memory per-session EDGAR identity store. Same TTL as the
+    # credential store so the (name, email) tuple cannot outlive the
+    # cookie that points at it.
+    edgar_identity_store = InMemorySessionEdgarIdentityStore(
+        ttl_seconds=settings.api.session_ttl_seconds,
+    )
+
     # 8. Optional encrypted store.  Settings validation already rejected
     # ``persist=true`` without SQLCipher at load time; we still defend
     # at this seam by letting the store's own constructor refuse loudly.
@@ -137,6 +145,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.filing_store = filing_store
     app.state.retrieval_service = retrieval_service
     app.state.session_store = session_store
+    app.state.edgar_identity_store = edgar_identity_store
     app.state.encrypted_credential_store = encrypted_store
 
     logger.info(

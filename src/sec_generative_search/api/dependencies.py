@@ -43,6 +43,12 @@ from sec_generative_search.core.credentials import (
     encrypted_user_resolver,
     session_resolver,
 )
+from sec_generative_search.core.edgar_identity import (
+    EdgarIdentity,
+    InMemorySessionEdgarIdentityStore,
+    validate_edgar_email,
+    validate_edgar_name,
+)
 from sec_generative_search.core.logging import audit_log, get_logger
 from sec_generative_search.core.security import mask_secret
 from sec_generative_search.providers.factory import default_api_key_resolver
@@ -58,11 +64,16 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ADMIN_USER_ID",
+    "EDGAR_EMAIL_HEADER",
+    "EDGAR_NAME_HEADER",
     "PROVIDER_KEY_HEADER_PREFIX",
     "SESSION_COOKIE_NAME",
     "admin_route_dependencies",
+    "extract_edgar_headers",
     "extract_session_id",
     "get_chroma",
+    "get_edgar_identity",
+    "get_edgar_identity_store",
     "get_embedder",
     "get_encrypted_credential_store",
     "get_filing_store",
@@ -291,6 +302,150 @@ def get_encrypted_credential_store(request: Request) -> CredentialStore | None:
     treat its absence as a no-op rather than a hard error.
     """
     return getattr(request.app.state, "encrypted_credential_store", None)
+
+
+def get_edgar_identity_store(request: Request) -> InMemorySessionEdgarIdentityStore:
+    """Return the in-memory per-session EDGAR identity store."""
+    return request.app.state.edgar_identity_store
+
+
+# ---------------------------------------------------------------------------
+# Per-request EDGAR identity header parsing + resolver
+# ---------------------------------------------------------------------------
+
+
+# The two headers a multi-tenant deployment uses to carry the *acting*
+# user's EDGAR identity.  Both are fully suppressed at the access-log
+# layer (see ``api.access_log.SUPPRESSED_HEADER_NAMES``) — neither value
+# may ever appear in any log record at any verbosity level.
+EDGAR_NAME_HEADER = "X-Edgar-Name"
+EDGAR_EMAIL_HEADER = "X-Edgar-Email"
+
+
+def extract_edgar_headers(request: Request) -> EdgarIdentity | None:
+    """Parse and validate ``X-Edgar-Name`` / ``X-Edgar-Email``.
+
+    Returns the validated identity when *both* headers are present and
+    pass shape validation.  Returns ``None`` when either header is
+    absent — partial input is treated as no input so the resolver chain
+    can fall through to the next tier.
+
+    Validation failures raise a structured 400 envelope.  The error
+    message NEVER echoes the supplied value (header content might be PII
+    or attacker-controlled and we treat both identically); the caller
+    only learns *which* field failed.
+    """
+    name_raw = request.headers.get(EDGAR_NAME_HEADER)
+    email_raw = request.headers.get(EDGAR_EMAIL_HEADER)
+    if name_raw is None or email_raw is None:
+        return None
+
+    try:
+        name = validate_edgar_name(name_raw)
+    except ValueError as exc:
+        raise http_error(
+            status_code=400,
+            error="invalid_edgar_identity",
+            message=f"{EDGAR_NAME_HEADER} header is invalid.",
+            hint=str(exc),
+        ) from exc
+    try:
+        email = validate_edgar_email(email_raw)
+    except ValueError as exc:
+        raise http_error(
+            status_code=400,
+            error="invalid_edgar_identity",
+            message=f"{EDGAR_EMAIL_HEADER} header is invalid.",
+            hint=str(exc),
+        ) from exc
+
+    return EdgarIdentity(name=name, email=email)
+
+
+def get_edgar_identity(
+    request: Request,
+    store: InMemorySessionEdgarIdentityStore = Depends(get_edgar_identity_store),
+) -> EdgarIdentity:
+    """Resolve the EDGAR identity for the current request.
+
+    Resolver chain (first hit wins):
+
+    1. **Headers** (``X-Edgar-Name`` + ``X-Edgar-Email``) — short-lived,
+       per-request override.  Both headers must be present together;
+       a partial pair falls through to the next tier.
+    2. **Session store** keyed by the validated ``session_id`` cookie,
+       when one was previously registered via
+       ``POST /api/session/edgar``.
+    3. **Admin-env fallback** — :envvar:`EDGAR_IDENTITY_NAME` +
+       :envvar:`EDGAR_IDENTITY_EMAIL` — only consulted when
+       :envvar:`API_EDGAR_SESSION_REQUIRED` is ``false`` (Scenario A).
+
+    Errors:
+
+        - ``API_EDGAR_SESSION_REQUIRED=true`` and no header / session
+          identity → 401 ``edgar_identity_required``.
+        - ``API_EDGAR_SESSION_REQUIRED=false`` and no admin-env fallback
+          configured either → 503 ``edgar_identity_unavailable``.
+
+    Audit-log: emits a single ``edgar_identity_resolved`` line carrying
+    the resolver tier name and the masked session-id tail when the
+    session tier hits.  Name and email values are never logged.
+    """
+    settings = get_settings()
+    session_required = settings.api.edgar_session_required
+
+    # Tier 1 — per-request headers.
+    header_identity = extract_edgar_headers(request)
+    if header_identity is not None:
+        audit_log("edgar_identity_resolved", detail="resolver=header")
+        return header_identity
+
+    # Tier 2 — session store.
+    session_id = extract_session_id(request)
+    if session_id is not None:
+        stored = store.get(session_id)
+        if stored is not None:
+            audit_log(
+                "edgar_identity_resolved",
+                detail=(f"resolver=session session_id_tail={mask_secret(session_id)}"),
+            )
+            return stored
+
+    # Tier 3 — admin-env fallback (Scenario A only).
+    if session_required:
+        raise http_error(
+            status_code=401,
+            error="edgar_identity_required",
+            message=("Per-session EDGAR identity is required for this deployment."),
+            hint=(
+                "Register one via POST /api/session/edgar or supply both "
+                f"{EDGAR_NAME_HEADER} and {EDGAR_EMAIL_HEADER} headers."
+            ),
+        )
+
+    edgar = settings.edgar
+    if edgar.identity_name and edgar.identity_email:
+        try:
+            fallback = EdgarIdentity.from_strings(edgar.identity_name, edgar.identity_email)
+        except ValueError as exc:
+            raise http_error(
+                status_code=503,
+                error="edgar_identity_unavailable",
+                message="Server-side EDGAR identity is misconfigured.",
+                hint=str(exc),
+            ) from exc
+        audit_log("edgar_identity_resolved", detail="resolver=admin_env")
+        return fallback
+
+    raise http_error(
+        status_code=503,
+        error="edgar_identity_unavailable",
+        message="No EDGAR identity is configured for this request.",
+        hint=(
+            "Set EDGAR_IDENTITY_NAME and EDGAR_IDENTITY_EMAIL on the server, "
+            "or supply a per-session identity."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
