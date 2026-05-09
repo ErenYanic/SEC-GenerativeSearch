@@ -32,6 +32,9 @@ __all__ = [
     "HealthResponse",
     "ProviderValidateRequest",
     "ProviderValidateResponse",
+    "QueryPlanSchema",
+    "RagPlanRequest",
+    "RagPlanResponse",
     "SearchHit",
     "SearchRequest",
     "SearchResponse",
@@ -489,3 +492,81 @@ class SearchResponse(_BaseModel):
 
     hits: list[SearchHit]
     total: int
+
+
+# ---------------------------------------------------------------------------
+# RAG query-understanding (POST /api/rag/plan) schemas
+# ---------------------------------------------------------------------------
+
+
+class RagPlanRequest(_BaseModel):
+    """Body for ``POST /api/rag/plan``.
+
+    The query travels in the body — never the URL — for the same reason
+    as :class:`SearchRequest`: queries are Tier-3 user-generated data and
+    a query-string transport would land them in proxy access logs.  The
+    optional ``provider`` / ``model`` fields let callers pin which LLM
+    runs the understanding step; both default to ``settings.llm`` when
+    omitted.
+    """
+
+    query: str = Field(
+        min_length=1,
+        max_length=1024,
+        description=(
+            "Natural-language query. Tier-3 user data — never echoed in any "
+            "non-redacted log line; the audit log carries metadata only."
+        ),
+    )
+    provider: str | None = Field(
+        default=None,
+        max_length=64,
+        pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$",
+        description=(
+            "Optional registered provider slug.  Defaults to ``settings.llm.default_provider``."
+        ),
+    )
+    model: str | None = Field(
+        default=None,
+        max_length=128,
+        description=(
+            "Optional model slug.  Defaults to ``settings.llm.default_model`` "
+            "or the provider's own default when both are unset."
+        ),
+    )
+
+
+class QueryPlanSchema(_BaseModel):
+    """Wire shape of :class:`~sec_generative_search.rag.query_understanding.QueryPlan`.
+
+    Mirrors the dataclass field-for-field, with ``date_range`` lifted
+    onto the wire as a fixed-length list (``[start, end]``) instead of a
+    Python tuple.  ``suggested_answer_mode`` is the lower-case enum value.
+
+    The plan IS the query reformulated for the editable-chips UI; the
+    raw query unavoidably appears here (``raw_query`` and possibly
+    ``query_en``) — that is the documented contract.  The route never
+    embeds the query in any other surface (audit log, error envelope).
+    """
+
+    raw_query: str
+    detected_language: str
+    query_en: str
+    tickers: list[str]
+    form_types: list[str]
+    date_range: list[str] | None
+    intent: str
+    suggested_answer_mode: str
+
+
+class RagPlanResponse(_BaseModel):
+    """Result of ``POST /api/rag/plan``.
+
+    Carries the planned :class:`QueryPlanSchema` plus the resolved
+    ``provider`` / ``model`` so the UI can show "ran on X / Y" without
+    re-deriving them from settings.
+    """
+
+    plan: QueryPlanSchema
+    provider: str
+    model: str
