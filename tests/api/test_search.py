@@ -385,7 +385,7 @@ class TestSearchPrivacyContract:
     def test_response_body_does_not_echo_query(self, search_app_factory) -> None:
         app, _service = search_app_factory(results=[_result()])
         client = TestClient(app, base_url="https://testserver")
-        secret_query = "PROPRIETARY-TICKER-WATCHLIST-MNEMONIC-AAA"
+        secret_query = "PROPRIETARY-TICKER-WATCHLIST-MNEMONIC-AAA"  # pragma: allowlist secret
         response = client.post("/api/search", json={"query": secret_query})
         # The response MUST NOT carry the raw query — neither in hits
         # (chunk content is independent of the query) nor in metadata.
@@ -397,7 +397,7 @@ class TestSearchPrivacyContract:
             raise_with=SearchError("Invalid start_date", details="got '2024/13/99'"),
         )
         client = TestClient(app, base_url="https://testserver")
-        secret_query = "PROPRIETARY-TICKER-WATCHLIST-MNEMONIC-AAA"
+        secret_query = "PROPRIETARY-TICKER-WATCHLIST-MNEMONIC-AAA"  # pragma: allowlist secret
         response = client.post("/api/search", json={"query": secret_query})
         assert response.status_code == 400
         # Neither the message nor the hint quotes the query content.
