@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 __all__ = [
     "BulkDeleteRequest",
     "BulkDeleteResponse",
+    "CitationSchema",
     "ClearAllResponse",
     "DeleteByIdsRequest",
     "DeleteByIdsResponse",
@@ -35,12 +36,15 @@ __all__ = [
     "QueryPlanSchema",
     "RagPlanRequest",
     "RagPlanResponse",
+    "RagQueryRequest",
+    "RagQueryResponse",
     "SearchHit",
     "SearchRequest",
     "SearchResponse",
     "SessionLogoutResponse",
     "SessionResponse",
     "StatusResponse",
+    "TokenUsageSchema",
 ]
 
 
@@ -570,3 +574,159 @@ class RagPlanResponse(_BaseModel):
     plan: QueryPlanSchema
     provider: str
     model: str
+
+
+# ---------------------------------------------------------------------------
+# RAG generation (POST /api/rag/query) schemas
+# ---------------------------------------------------------------------------
+
+
+# Mode strings accepted on the wire — mirrors the lower-case values of
+# :class:`AnswerMode`.  Validating the alphabet at the schema boundary
+# means an unknown mode is rejected as 422 before the route runs, rather
+# than silently coerced to the default by ``AnswerMode.from_string``.
+_ANSWER_MODE_PATTERN = r"^(concise|analytical|extractive|comparative)$"
+
+
+class TokenUsageSchema(_BaseModel):
+    """Wire shape of :class:`~sec_generative_search.core.types.TokenUsage`.
+
+    ``total_tokens`` is computed by the dataclass; we surface it
+    explicitly on the wire so a client does not have to re-derive it
+    from the two component counts.
+    """
+
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    total_tokens: int = Field(ge=0)
+
+
+class CitationSchema(_BaseModel):
+    """Wire shape of :class:`~sec_generative_search.core.types.Citation`.
+
+    The citation is the audit trail of *which* retrieved chunk the model
+    actually leaned on.  Every field maps one-for-one onto :class:`Citation`,
+    with :attr:`Citation.filing_id` flattened into the four-tuple
+    ``(ticker, form_type, filing_date, accession_number)`` so the wire
+    schema stays JSON-flat and the UI does not have to walk a nested
+    object.
+
+    The ``text_span`` is Tier 1 (public SEC filing) content — safe to
+    surface to authenticated callers.  ``display_index`` is the 1-based
+    ordinal that maps to inline ``[N]`` markers in the answer.
+    """
+
+    chunk_id: str
+    ticker: str
+    form_type: str
+    filing_date: str = Field(
+        description="ISO date the filing was submitted to SEC (YYYY-MM-DD).",
+    )
+    accession_number: str
+    section_path: str
+    text_span: str
+    similarity: float
+    display_index: int = Field(
+        ge=0,
+        description=("1-based ordinal mapped to inline [N] markers; 0 means 'not assigned'."),
+    )
+
+
+class RagQueryRequest(_BaseModel):
+    """Body for ``POST /api/rag/query``.
+
+    Accepts a :class:`QueryPlanSchema` — never a raw query string.  This
+    is load-bearing: splitting plan / generate makes the human-in-the-
+    loop edit step a hard contract enforced by the API shape, so the UI
+    cannot accidentally bypass the editable-chips review by sending a
+    raw query straight at generation.
+
+    All other fields are optional overrides:
+
+    - ``provider`` / ``model`` default to ``settings.llm`` (same defaults
+      as :class:`RagPlanRequest`); the route resolves the LLM through
+      the request-scoped resolver chain so the generation lands on the
+      caller's key, not on admin env.
+    - ``mode`` overrides the plan's ``suggested_answer_mode``.  Useful
+      when the user edited the chip in the UI but did not regenerate
+      the plan.
+    - ``max_output_tokens`` caps the answer slice.  Defaults to
+      ``settings.llm.max_output_tokens``.
+
+    """
+
+    plan: QueryPlanSchema
+    provider: str | None = Field(
+        default=None,
+        max_length=64,
+        pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$",
+        description=(
+            "Optional registered provider slug.  Defaults to ``settings.llm.default_provider``."
+        ),
+    )
+    model: str | None = Field(
+        default=None,
+        max_length=128,
+        description=(
+            "Optional model slug.  Defaults to ``settings.llm.default_model`` "
+            "or the provider's own default when both are unset."
+        ),
+    )
+    mode: str | None = Field(
+        default=None,
+        pattern=_ANSWER_MODE_PATTERN,
+        description=(
+            "Optional override of ``plan.suggested_answer_mode``.  "
+            "One of: concise, analytical, extractive, comparative."
+        ),
+    )
+    max_output_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        le=8192,
+        description=(
+            "Optional cap on the answer slice.  Defaults to "
+            "``settings.llm.max_output_tokens``.  Bounded at 8192 to "
+            "keep a single request from burning a giant generation budget."
+        ),
+    )
+
+
+class RagQueryResponse(_BaseModel):
+    """Result of ``POST /api/rag/query``.
+
+    Carries the generated answer plus full traceability — provider,
+    model, prompt-template version, citations, token usage, and wall-
+    clock latency — so the UI can render "Generated by X / Y in N
+    seconds, used Z chunks" without re-deriving anything.
+
+    ``refused`` is true when the orchestrator short-circuited the LLM
+    call because retrieval returned nothing; it lets the UI show a
+    distinct "no sources" state without parsing the answer text for the
+    refusal phrase.
+
+    ``retrieved_chunks`` is intentionally NOT on the wire in v1 — the
+    citations are the user-visible audit trail and the full retrieved
+    set would balloon the payload.  When debugging is needed, operators
+    use the existing ``POST /api/search`` route (same retrieval primitive)
+    to inspect the candidate set.
+    """
+
+    answer: str
+    citations: list[CitationSchema]
+    provider: str
+    model: str
+    prompt_version: str
+    token_usage: TokenUsageSchema
+    latency_seconds: float = Field(ge=0.0)
+    streamed: bool = Field(
+        default=False,
+        description="Always False on this non-streaming surface.",
+    )
+    refused: bool = Field(
+        default=False,
+        description=(
+            "True when the orchestrator short-circuited the LLM call "
+            "because retrieval returned no chunks."
+        ),
+    )
