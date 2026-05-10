@@ -1,6 +1,6 @@
 """RAG query-understanding and generation routes.
 
-Two endpoints live here:
+Three endpoints live here:
 
         - ``POST /api/rag/plan`` wraps
             :func:`sec_generative_search.rag.query_understanding.understand_query`
@@ -8,7 +8,13 @@ Two endpoints live here:
             :class:`QueryPlanSchema`.
         - ``POST /api/rag/query`` runs
             :meth:`RAGOrchestrator.generate` against an approved plan and
-            returns the generated answer with citations and traceability.
+            returns the generated answer with citations and traceability
+            (non-streaming).
+        - ``POST /api/rag/stream`` shares the same orchestrator entry point
+            but consumes :meth:`RAGOrchestrator.generate_stream` and emits
+            Server-Sent Events (``delta`` / ``citation`` / ``final`` /
+            ``error`` event types) plus a 15s ``heartbeat`` on idle
+            inter-event gaps.
 
 Why two routes (plan vs. generate):
 
@@ -47,16 +53,21 @@ Security contract (shared by both routes):
 
 from __future__ import annotations
 
+import asyncio
+import json
+import threading
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, Request
+from starlette.responses import StreamingResponse
 
 from sec_generative_search.api.dependencies import (
     get_retrieval_service,
     request_scoped_resolver,
     verify_api_key,
 )
-from sec_generative_search.api.errors import http_error
+from sec_generative_search.api.errors import envelope, http_error
 from sec_generative_search.api.schemas import (
     CitationSchema,
     QueryPlanSchema,
@@ -83,7 +94,7 @@ from sec_generative_search.providers.registry import (
     ProviderSurface,
 )
 from sec_generative_search.rag.modes import AnswerMode
-from sec_generative_search.rag.orchestrator import RAGOrchestrator
+from sec_generative_search.rag.orchestrator import RAGOrchestrator, StreamEvent
 from sec_generative_search.rag.query_understanding import (
     QueryPlan,
     understand_query,
@@ -92,6 +103,25 @@ from sec_generative_search.rag.query_understanding import (
 if TYPE_CHECKING:
     from sec_generative_search.providers.base import BaseLLMProvider
     from sec_generative_search.search import RetrievalService
+
+
+# ---------------------------------------------------------------------------
+# SSE constants
+# ---------------------------------------------------------------------------
+
+
+# Inter-event idle window after which the route emits a ``heartbeat``
+# event. 15s is a balance between (a) keeping the connection visibly
+# alive through proxies that sever idle TCP and (b) not flooding
+# the network with no-op frames during normal generation. Override is
+# intentionally omitted — every operator wants the same semantics here.
+_SSE_HEARTBEAT_SECONDS: float = 15.0
+
+
+# Producer-thread sentinel pushed onto the queue when the orchestrator
+# generator finishes normally. ``object()`` (not a string / int) so it
+# cannot accidentally collide with a payload value.
+_SSE_DONE_SENTINEL = object()
 
 __all__ = ["router"]
 
@@ -585,3 +615,380 @@ async def generate_answer(
     )
 
     return _result_to_response(result, refused=refused)
+
+
+# ---------------------------------------------------------------------------
+# POST /api/rag/stream — Server-Sent Events
+# ---------------------------------------------------------------------------
+
+
+def _sse_format(event: str, data: dict) -> str:
+    """Encode one Server-Sent-Events frame.
+
+    Per RFC the frame is ``event: <name>\\ndata: <json>\\n\\n``.  We
+    deliberately serialise ``data`` on a single line — ``json.dumps``
+    without ``indent`` never emits a literal newline, and a stray
+    newline in the payload would terminate the frame mid-stream.
+    """
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _final_payload(result: GenerationResult, *, refused: bool) -> dict:
+    """Build the JSON payload for the terminal ``final`` event.
+
+    The shape mirrors :class:`RagQueryResponse` minus ``citations`` —
+    those land on the wire as separate ``citation`` events so the UI can
+    render the source panel incrementally as soon as the deltas have
+    finished arriving.  ``answer`` is repeated here even though deltas
+    already streamed it: clients that drop a delta packet still get the
+    fully-assembled answer in one place, and the orchestrator's
+    citation-extraction step may have stripped a JSON envelope from the
+    streamed deltas (in structured-output mode), in which case the
+    final answer differs from the concatenated deltas.
+    """
+    usage = result.token_usage
+    return {
+        "answer": result.answer,
+        "provider": result.provider,
+        "model": result.model,
+        "prompt_version": result.prompt_version,
+        "token_usage": {
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "total_tokens": usage.total_tokens,
+        },
+        "latency_seconds": result.latency_seconds,
+        "streamed": True,
+        "refused": refused,
+    }
+
+
+def _citation_payload(citation: Citation) -> dict:
+    """Build the JSON payload for one ``citation`` event.
+
+    Same flat shape as :class:`CitationSchema` so clients can re-use the
+    same parser they wrote for ``POST /api/rag/query``.  ``filing_id``
+    is flattened into four scalar fields and ``filing_date`` is rendered
+    as ISO.
+    """
+    schema = _citation_to_schema(citation)
+    return schema.model_dump()
+
+
+def _error_payload(*, error: str, message: str, hint: str | None = None) -> dict:
+    """Build the JSON payload for an SSE ``error`` event.
+
+    Reuses :func:`envelope` so the SSE error shape matches the unified
+    HTTP error envelope — clients that already key on ``error`` /
+    ``message`` / ``hint`` for the JSON surface need no second parser.
+    """
+    return envelope(error=error, message=message, hint=hint)
+
+
+def _classify_stream_exception(exc: Exception) -> dict:
+    """Map an orchestrator-side exception to an SSE error payload.
+
+    Mirrors the HTTP error map of :func:`generate_answer` so a caller
+    cannot get one shape from ``/query`` and a different one from
+    ``/stream`` for the same upstream failure.
+    """
+    if isinstance(exc, ProviderAuthError):
+        return _error_payload(
+            error="provider_unauthorized",
+            message="The upstream provider rejected the supplied API key.",
+            hint="Verify or rotate the provider key (header / session / admin env).",
+        )
+    if isinstance(exc, (ProviderRateLimitError, ProviderTimeoutError)):
+        return _error_payload(
+            error="provider_unavailable",
+            message="The upstream provider is rate-limited or timed out.",
+            hint="Retry after a short backoff; do not rotate the key.",
+        )
+    if isinstance(exc, ProviderError):
+        return _error_payload(
+            error="provider_error",
+            message="The upstream provider returned an error during generation.",
+            hint="Inspect the audit log; do not rotate the key on a non-auth error.",
+        )
+    if isinstance(exc, GenerationError):
+        return _error_payload(
+            error="generation_error",
+            message="The orchestrator could not assemble a valid answer.",
+            hint="Retry the request; if the failure persists, switch model or provider.",
+        )
+    # Unknown — return a generic envelope without echoing the exception
+    # text (internal messages routinely contain file paths, SQL, etc.).
+    return _error_payload(
+        error="internal_error",
+        message="The server encountered an unexpected error while streaming.",
+        hint="Retry the request; if the failure persists, contact the operator.",
+    )
+
+
+def _run_orchestrator_in_thread(
+    orchestrator: RAGOrchestrator,
+    *,
+    plan: QueryPlan,
+    mode: AnswerMode | None,
+    model: str | None,
+    max_output_tokens: int | None,
+    prefer_structured_output: bool,
+    queue: asyncio.Queue,
+    loop: asyncio.AbstractEventLoop,
+) -> None:
+    """Drive the synchronous orchestrator generator from a worker thread.
+
+    Why a thread: :meth:`RAGOrchestrator.generate_stream` is a *sync*
+    generator that blocks on the LLM SDK's network calls.  Iterating it
+    directly from the asyncio event loop would block the entire process
+    and starve the heartbeat coroutine.  A daemon thread pumps events
+    onto an :class:`asyncio.Queue` via :meth:`call_soon_threadsafe`;
+    the async consumer awaits the queue and emits frames downstream.
+
+    Sentinel discipline:
+
+        - On normal completion the producer pushes :data:`_SSE_DONE_SENTINEL`
+          so the consumer knows to close the stream.
+        - On exception the producer pushes the exception itself; the
+          consumer translates it into an ``error`` event via
+          :func:`_classify_stream_exception`.
+        - Both cases run under ``finally`` so a ``return`` from inside
+          the orchestrator (refusal short-circuit) still closes the
+          consumer cleanly.
+    """
+
+    def producer() -> None:
+        try:
+            for event in orchestrator.generate_stream(
+                plan,
+                mode=mode,
+                model=model,
+                max_output_tokens=max_output_tokens,
+                prefer_structured_output=prefer_structured_output,
+            ):
+                loop.call_soon_threadsafe(queue.put_nowait, event)
+        except Exception as exc:
+            loop.call_soon_threadsafe(queue.put_nowait, exc)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, _SSE_DONE_SENTINEL)
+
+    threading.Thread(
+        target=producer,
+        name="rag-stream-producer",
+        daemon=True,
+    ).start()
+
+
+@router.post(
+    "/stream",
+    tags=["rag"],
+    summary="Stream an answer for an approved QueryPlan via Server-Sent Events",
+    response_class=StreamingResponse,
+)
+async def stream_answer(
+    request: Request,
+    body: RagQueryRequest,
+    retrieval: RetrievalService = Depends(get_retrieval_service),
+) -> StreamingResponse:
+    """Stream the orchestrator output as Server-Sent Events.
+
+    Event contract (one frame per event, RFC-compliant ``event: <name>\\ndata: <json>``):
+
+        - ``delta`` — ``{"text": "..."}`` per streamed chunk from the
+          LLM.  Clients append these as they arrive to render the
+          incrementally-built answer.
+        - ``citation`` — one frame per cited chunk, emitted between the
+          last ``delta`` and the ``final`` event so the UI can render
+          the source panel as soon as deltas finish.  Payload mirrors
+          :class:`CitationSchema`.
+        - ``final`` — terminal event carrying the full assembled answer
+          plus traceability (``provider`` / ``model`` / ``prompt_version``
+          / ``token_usage`` / ``latency_seconds`` / ``streamed`` /
+          ``refused``).  ``citations`` is intentionally omitted here —
+          they were already streamed as their own events.
+        - ``error`` — emitted in place of the trailing events when the
+          orchestrator raises after the SSE response is open.  Payload
+          matches the unified HTTP error envelope shape so the same
+          parser handles both surfaces.
+        - ``heartbeat`` — emitted every 15s of inter-event silence.
+          The frame is ``event: heartbeat\\ndata: {}`` so a client that
+          ignores unknown events still receives a TCP-level write that
+          keeps proxies from severing the connection.
+
+    Pre-stream errors (unknown provider, missing key, ProviderAuthError
+    raised during LLM construction) surface as the regular HTTP error
+    envelope on a 4xx / 5xx status — the SSE response only opens when
+    we are committed to streaming.  Errors during streaming arrive as
+    ``error`` events instead so the client knows to stop reading deltas.
+
+    Same auth, rate-limit, and resolver-chain semantics as
+    :func:`generate_answer`; both routes are read-tier and both share
+    :func:`_build_llm_for_request` so a misconfiguration cannot surface
+    as ``provider_key_required`` from one and ``unknown_provider`` from
+    the other.
+    """
+    provider_name, model = _resolve_provider_and_model_query(body)
+
+    # Pre-stream validation — these MUST raise HTTP errors (not SSE
+    # error events) because the SSE response is not yet open.  A
+    # 4xx response here lets the client distinguish "your request was
+    # bad" (don't retry) from "the upstream blew up mid-generation"
+    # (maybe retry).
+    try:
+        capability = ProviderRegistry.get_capability(
+            provider_name,
+            ProviderSurface.LLM,
+            model=model or None,
+        )
+    except KeyError as exc:
+        raise http_error(
+            status_code=400,
+            error="unknown_provider",
+            message=str(exc),
+            hint="Use ProviderRegistry.list_providers(LLM) to see registered slugs.",
+        ) from None
+    except ValueError as exc:
+        raise http_error(
+            status_code=400,
+            error="unknown_model",
+            message=str(exc),
+            hint="Omit the model field to use the provider default.",
+        ) from None
+
+    plan = _plan_from_schema(body.plan)
+    llm = _build_llm_for_request(request, provider_name)
+    orchestrator = RAGOrchestrator(retrieval=retrieval, llm=llm)
+
+    effective_mode = (
+        AnswerMode.from_string(body.mode, default=plan.suggested_answer_mode)
+        if body.mode is not None
+        else None
+    )
+    audit_mode = (
+        effective_mode.value if effective_mode is not None else plan.suggested_answer_mode.value
+    )
+
+    # Audit-log emission happens *before* the stream opens: SSE responses
+    # cannot raise after the body starts, so logging at the start makes
+    # the route's intent visible even if the connection drops mid-stream.
+    # Counts of chunks / citations / refused are unknown at this point;
+    # the producer thread emits a follow-up ``rag_stream_completed`` line
+    # carrying those once the orchestrator finishes.
+    audit_log(
+        "rag_stream",
+        client_ip=_client_ip(request),
+        endpoint="POST /api/rag/stream",
+        detail=(
+            f"provider={provider_name} model={model or '<provider default>'} "
+            f"lang={plan.detected_language} tickers={len(plan.tickers)} "
+            f"forms={len(plan.form_types)} mode={audit_mode}"
+        ),
+    )
+
+    async def event_stream() -> AsyncIterator[str]:
+        """Async generator that interleaves orchestrator events + heartbeats."""
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+        client_ip = _client_ip(request)
+
+        _run_orchestrator_in_thread(
+            orchestrator,
+            plan=plan,
+            mode=effective_mode,
+            model=model or None,
+            max_output_tokens=body.max_output_tokens,
+            prefer_structured_output=capability.structured_output,
+            queue=queue,
+            loop=loop,
+        )
+
+        chunks_streamed = 0
+        citations_emitted = 0
+        refused = False
+        completion_status = "ok"
+
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(
+                        queue.get(),
+                        timeout=_SSE_HEARTBEAT_SECONDS,
+                    )
+                except TimeoutError:
+                    yield _sse_format("heartbeat", {})
+                    continue
+
+                if item is _SSE_DONE_SENTINEL:
+                    return
+                if isinstance(item, Exception):
+                    completion_status = type(item).__name__
+                    logger.error(
+                        "rag stream exception: provider=%s kind=%s",
+                        provider_name,
+                        completion_status,
+                    )
+                    yield _sse_format("error", _classify_stream_exception(item))
+                    return
+                if not isinstance(item, StreamEvent):
+                    # Defensive — the orchestrator contract says events
+                    # are StreamEvent. Anything else is a bug we want
+                    # logged, not silently dropped onto the wire.
+                    logger.error(
+                        "rag stream producer pushed unexpected payload: %s",
+                        type(item).__name__,
+                    )
+                    continue
+
+                if item.delta is not None:
+                    chunks_streamed += 1
+                    yield _sse_format("delta", {"text": item.delta})
+
+                if item.final is not None:
+                    final_result = item.final
+                    refused = not final_result.retrieved_chunks and not final_result.citations
+                    for citation in final_result.citations:
+                        citations_emitted += 1
+                        yield _sse_format("citation", _citation_payload(citation))
+                    yield _sse_format(
+                        "final",
+                        _final_payload(final_result, refused=refused),
+                    )
+        finally:
+            # The queue's producer thread is daemon-flagged; if the
+            # client disconnected mid-stream, asyncio cancels this
+            # coroutine which propagates here as a CancelledError. The
+            # producer keeps running until the orchestrator yields its
+            # next event, then quietly exits when ``put_nowait`` lands
+            # in a queue no one is reading. That's an acceptable cost
+            # for not having to plumb a cancellation token through the
+            # sync orchestrator API.
+            audit_log(
+                "rag_stream_completed",
+                client_ip=client_ip,
+                endpoint="POST /api/rag/stream",
+                detail=(
+                    f"provider={provider_name} model={model or '<provider default>'} "
+                    f"deltas={chunks_streamed} citations={citations_emitted} "
+                    f"refused={refused} status={completion_status}"
+                ),
+            )
+
+    # SSE-required headers:
+    #
+    #   - ``Cache-Control: no-cache`` keeps caching proxies from
+    #     buffering the half-open stream.
+    #   - ``X-Accel-Buffering: no`` is the nginx-specific directive that
+    #     disables response buffering; without it, the heartbeat would
+    #     be absorbed by nginx until it filled its buffer.
+    #   - ``Connection: keep-alive`` is technically the HTTP/1.1
+    #     default but stating it makes the intent explicit for any
+    #     intermediary that downgrades.
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
