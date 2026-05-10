@@ -647,7 +647,7 @@ class TestRagQueryPrivacyContract:
         )
         client = TestClient(app, base_url="https://testserver")
         plan = _sample_plan_payload()
-        secret_query = "PROPRIETARY-WATCHLIST-MNEMONIC-ZZZ"
+        secret_query = "PROPRIETARY-WATCHLIST-MNEMONIC-ZZZ"  # pragma: allowlist secret
         plan["raw_query"] = secret_query
         plan["query_en"] = secret_query
         response = client.post(
