@@ -52,6 +52,58 @@ class TestContentSizeLimit:
         response = api_client.post("/api/session")
         assert response.status_code == 201
 
+    def test_per_route_cap_tighter_than_global_default(self, api_client: TestClient) -> None:
+        # Per-route policy on /api/session is 1 KiB — well below the
+        # 1 MiB global cap. A 2 KiB declared body MUST 413 even
+        # though it would have passed the legacy global ceiling.
+        oversize = 2 * 1024
+        response = api_client.post(
+            "/api/session",
+            content=b"x" * oversize,
+            headers={"content-length": str(oversize)},
+        )
+        assert response.status_code == 413
+        assert response.json()["error"] == "payload_too_large"
+
+    def test_per_route_cap_envelope_message(self, api_client: TestClient) -> None:
+        # 413 response messages must reference the per-route cap, not
+        # the global default — operators tracing a 413 need to know
+        # which cap fired.
+        oversize = 2 * 1024
+        response = api_client.post(
+            "/api/session",
+            content=b"x" * oversize,
+            headers={"content-length": str(oversize)},
+        )
+        body = response.json()
+        # The 1 KiB per-route bound on /api/session.
+        assert "1,024 bytes" in body["message"]
+
+    def test_health_route_rejects_huge_declared_body(self, api_client: TestClient) -> None:
+        # /api/health is unauthenticated. Without the per-route cap a
+        # caller could declare a 1 MiB Content-Length and force a
+        # body read on every probe. The 1 KiB cap rejects pre-read.
+        oversize = 100 * 1024
+        response = api_client.post(
+            "/api/health",
+            content=b"x" * oversize,
+            headers={"content-length": str(oversize)},
+        )
+        assert response.status_code == 413
+
+    def test_rag_query_accepts_realistic_plan_envelope(self, api_client: TestClient) -> None:
+        # Sanity check: a realistic ~16 KiB plan body MUST land at the
+        # handler (returns 422 / 401 from missing fields, not 413).
+        # Confirms the /api/rag/query 64 KiB cap holds for plausible
+        # real-world payloads.
+        body = b"{" + b"x" * (16 * 1024) + b"}"
+        response = api_client.post(
+            "/api/rag/query",
+            content=body,
+            headers={"content-type": "application/json"},
+        )
+        assert response.status_code != 413
+
 
 @pytest.mark.security
 class TestErrorEnvelope:
@@ -77,7 +129,7 @@ class TestErrorEnvelope:
 class TestOpenAPIGating:
     def test_docs_available_without_api_key(self, api_client: TestClient) -> None:
         response = api_client.get("/docs")
-        # In Scenario A (no key) the docs are exposed.
+        # With no API key configured, the docs endpoints stay exposed.
         assert response.status_code == 200
 
     def test_openapi_schema_available_without_api_key(self, api_client: TestClient) -> None:

@@ -47,6 +47,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from sec_generative_search.api.errors import envelope
+from sec_generative_search.api.policies import resolve_policy
 from sec_generative_search.config.settings import get_settings
 from sec_generative_search.core.logging import get_logger
 
@@ -158,9 +159,18 @@ DEFAULT_MAX_CONTENT_LENGTH = 1 * 1024 * 1024
 
 
 class ContentSizeLimitMiddleware:
-    """Reject oversize request bodies.
+    """Reject oversize request bodies, per-route.
 
-    Two layers of defence:
+    The effective bound is the **smaller** of:
+
+    1. The constructor's ``max_bytes`` (global ceiling — kept for the
+       scenarios in which an operator wants a tighter cap than any
+       route's table entry, e.g. an ingress proxy is already enforcing
+       a smaller limit and we want consistency below it).
+    2. The route policy's ``max_body_bytes`` resolved from
+       :func:`~sec_generative_search.api.policies.resolve_policy`.
+
+    Two layers of defence inside the chosen bound:
 
     1. *Content-Length check* — short-circuits before reading the body
        when the declared size already exceeds the limit.
@@ -179,6 +189,13 @@ class ContentSizeLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
+        # Resolve the per-route cap and clamp by the global ceiling
+        # so a tighter constructor-supplied bound always wins.
+        path = scope.get("path", "")
+        method = scope.get("method", "")
+        policy_max = resolve_policy(path, method).max_body_bytes
+        effective_max = min(policy_max, self._max_bytes)
+
         headers = dict(scope.get("headers", []))
         content_length_raw = headers.get(b"content-length")
 
@@ -195,14 +212,14 @@ class ContentSizeLimitMiddleware:
                 )
                 return
 
-            if length > self._max_bytes:
+            if length > effective_max:
                 await self._send_payload_error(
                     send,
                     status=413,
                     error="payload_too_large",
                     message=(
                         f"Request body too large ({length:,} bytes). "
-                        f"Maximum allowed: {self._max_bytes:,} bytes."
+                        f"Maximum allowed: {effective_max:,} bytes."
                     ),
                     hint="Reduce the request payload size.",
                 )
@@ -216,7 +233,7 @@ class ContentSizeLimitMiddleware:
             message = await receive()
             if message["type"] == "http.request":
                 bytes_received += len(message.get("body", b""))
-                if bytes_received > self._max_bytes:
+                if bytes_received > effective_max:
                     rejected = True
                     return {"type": "http.request", "body": b"", "more_body": False}
             return message
@@ -236,8 +253,8 @@ class ContentSizeLimitMiddleware:
                 status=413,
                 error="payload_too_large",
                 message=(
-                    f"Request body too large (>{self._max_bytes:,} bytes). "
-                    f"Maximum allowed: {self._max_bytes:,} bytes."
+                    f"Request body too large (>{effective_max:,} bytes). "
+                    f"Maximum allowed: {effective_max:,} bytes."
                 ),
                 hint="Reduce the request payload size.",
             )
@@ -379,35 +396,21 @@ class _SlidingWindow:
 def _classify_path(path: str, method: str) -> str | None:
     """Map a request path/method to a rate-limit category.
 
-    Returns ``None`` for paths that should never be rate-limited
-    (health, OpenAPI artefacts).
+    Thin shim over :func:`~sec_generative_search.api.policies.resolve_policy`
+    preserved for the existing tests that import it directly.  The
+    return semantics mirror the original classifier:
+
+    - ``None`` — the route is exempt from the rate limiter (e.g.
+      ``/api/health``) **or** the path falls outside ``/api/`` and so
+      should not be rate-limited at all (Swagger / Redoc / static).
+    - any non-``None`` string — the rate-limit bucket name.
     """
-    if path == "/api/health":
+    # Non-``/api/`` paths (Swagger, Redoc, openapi.json, static) skip
+    # the rate limiter entirely — they are unauthenticated read
+    # surfaces gated by ``API_KEY`` presence in the FastAPI factory.
+    if not path.startswith("/api/") and path != "/api":
         return None
-    if path.startswith("/api/session"):
-        return "session"
-    if path.startswith("/api/providers/validate"):
-        return "validate"
-    if path.startswith("/api/search"):
-        return "search"
-    if path.startswith("/api/rag"):
-        return "rag"
-    if path.startswith("/api/ingest") and method == "POST":
-        return "ingest"
-    if method == "DELETE":
-        return "delete"
-    # Batch-delete routes use POST because the body carries the
-    # accession list / filter — bucket them with the destructive tier
-    # so a script cannot side-step the per-IP delete limit by switching
-    # from DELETE /{accession} to POST /delete-by-ids.
-    if path in (
-        "/api/filings/delete-by-ids",
-        "/api/filings/bulk-delete",
-    ):
-        return "delete"
-    if path.startswith("/api/"):
-        return "general"
-    return None
+    return resolve_policy(path, method).rate_category
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
