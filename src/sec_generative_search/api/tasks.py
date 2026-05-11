@@ -1,20 +1,50 @@
-"""
-Background task manager for ingestion operations.
+"""Background task manager for the ingestion pipeline (Phase 11.1).
 
-Provides ``TaskManager`` — an in-memory, single-process task runner that
-executes ingestion pipelines in background threads.  Designed for a
-single-user portfolio project running on a GTX 1650 (4 GB VRAM):
+The legacy `sec_semantic_search.api.tasks` shipped a stand-alone in-memory
+task runner that wrote to `ChromaDBClient` and `MetadataRegistry`
+directly. This module is the Phase-11 rewrite against the current package
+surfaces, with three load-bearing differences.
 
-    - **One GPU task at a time** — a ``threading.Semaphore(1)`` gates
-      execution; additional tasks queue in FIFO order.
-    - **Cancel via ``threading.Event``** — checked between pipeline steps;
-      partial data is rolled back on cancellation.
-    - **Task cleanup** — completed/failed/cancelled tasks are pruned after
-      one hour by a background timer.
-    - **Progress callback** — the pipeline's ``progress_callback`` feeds
-      directly into the task's ``TaskProgress`` snapshot.
+1. **All dual-store writes go through :class:`FilingStore`.** ChromaDB-first
+   ordering, best-effort rollbacks, and the atomic ``register_if_new=True``
+   path are the contract on that single seam (AGENT.md §Storage). The
+   worker never calls ``self._chroma.store_filing`` /
+   ``registry.register_filing_if_new`` /
+   ``self._chroma.delete_filing`` / ``registry.remove_filing`` directly
+   — those routes are bug magnets for orphan ChromaDB chunks because
+   Chroma's ``add()`` silently no-ops duplicate IDs.
 
-No Redis, no Celery — task state lives in a plain ``dict``.
+2. **Zero-key contract on :class:`TaskInfo`**
+   Ingestion runs on the admin-env embedder; there is *no* provider key
+   in flight, so :class:`TaskInfo` carries no credential-shaped attribute name.
+   The EDGAR identity (PII, not a credential) is also kept off
+   :class:`TaskInfo` — the per-task identity resolver lives on the
+   manager in :attr:`TaskManager._task_resolvers`, a parallel dict
+   cleared in the worker's ``finally`` block. A
+   ``@pytest.mark.security`` test mirrors ``tests/core/test_types.py``
+   to assert no key-shaped name on :class:`TaskInfo`.
+
+3. **Session-scoped ownership**
+   :class:`TaskInfo` carries the server-minted ``session_id`` from the
+   cookie at create time so the route layer can isolate ``GET /api/ingest/tasks`` /
+   ``GET /api/ingest/tasks/{id}`` / ``DELETE /api/ingest/tasks/{id}``
+   per tenant.  The manager itself does *not* gate on session — it
+   exposes :meth:`list_tasks_for_session` as a convenience and lets the
+   route choose whether to surface a foreign task as ``404`` or hide it
+   entirely.
+
+4. **No recurring cleanup timer**
+   Terminal-state transitions persist the row to ``task_history``
+   immediately, and lazy eviction sweeps memory on every
+   :meth:`create_task` / :meth:`get_task` / :meth:`list_tasks` call.
+   Mirrors the in-memory credential / EDGAR identity stores and the
+   embedding-provider idle unload — every other in-memory store in
+   this codebase uses caller-driven eviction; one stray background
+   timer makes interpreter shutdown ordering noisy and offers no
+   measurable win.
+
+The module intentionally does **not** ship the API routes / WebSocket /
+cooldown plumbing. This file is the worker substrate they wire onto.
 """
 
 from __future__ import annotations
@@ -27,26 +57,49 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import TypeVar
+from typing import TYPE_CHECKING
 
-from sec_semantic_search.config import get_settings
-from sec_semantic_search.core import (
+from sec_generative_search.config.settings import get_settings
+from sec_generative_search.core.exceptions import (
     DatabaseError,
     FetchError,
     FilingLimitExceededError,
-    SECSemanticSearchError,
-    get_logger,
+    SECGenerativeSearchError,
 )
-from sec_semantic_search.database import ChromaDBClient, MetadataRegistry, delete_filings_batch
-from sec_semantic_search.pipeline import PipelineOrchestrator
-from sec_semantic_search.pipeline.fetch import FilingFetcher, FilingInfo
+from sec_generative_search.core.logging import get_logger
+from sec_generative_search.pipeline.fetch import FilingFetcher, FilingInfo
+from sec_generative_search.pipeline.orchestrator import PipelineOrchestrator
+
+if TYPE_CHECKING:
+    from sec_generative_search.core.edgar_identity import EdgarIdentity
+    from sec_generative_search.database.metadata import MetadataRegistry
+    from sec_generative_search.database.store import FilingStore
+
+__all__ = [
+    "FilingResult",
+    "TaskInfo",
+    "TaskManager",
+    "TaskProgress",
+    "TaskQueueFullError",
+    "TaskState",
+]
+
 
 logger = get_logger(__name__)
 
-_T = TypeVar("_T")
 
-# In-memory TTL — tasks are persisted to SQLite before pruning.
+# In-memory TTL for terminal tasks. Rows are persisted to ``task_history``
+# at the terminal-state transition; the in-memory entry is kept around
+# for a day so a polling client can still see the result without a SQLite
+# round-trip. Lazy eviction only — no background thread.
 _TASK_TTL_SECONDS = 86_400  # 24 hours
+
+
+# Type alias for the per-task EDGAR identity resolver. Returning ``None``
+# means "use the admin-env fallback in the fetcher". The route layer
+# fills this in at create time; tests pass ``None`` to exercise the
+# admin-env path.
+EdgarIdentityResolver = Callable[[], "EdgarIdentity | None"]
 
 
 # ---------------------------------------------------------------------------
@@ -64,9 +117,19 @@ class TaskState(StrEnum):
     CANCELLED = "cancelled"
 
 
+_TERMINAL_STATES: frozenset[TaskState] = frozenset(
+    {TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED}
+)
+
+
 @dataclass
 class TaskProgress:
-    """Mutable progress snapshot updated by the worker thread."""
+    """Mutable progress snapshot updated by the worker thread.
+
+    Access to individual scalar fields is inherently thread-safe in
+    CPython (GIL); we never mutate the structure outside the worker
+    thread that owns the task, so no lock is needed at this layer.
+    """
 
     current_ticker: str | None = None
     current_form_type: str | None = None
@@ -81,7 +144,14 @@ class TaskProgress:
 
 @dataclass
 class FilingResult:
-    """Per-filing outcome stored after a successful ingest."""
+    """Per-filing outcome stored after a successful ingest.
+
+    The two serialisation helpers project onto different consumers:
+    :meth:`to_dict` is the wire shape used by the WebSocket
+    ``filing_done`` event (and, later, the ``GET /api/ingest/tasks/{id}``
+    response); :meth:`to_history_dict` is the SQLite ``task_history``
+    shape, which keeps the explicit field names for forward compatibility.
+    """
 
     ticker: str
     form_type: str
@@ -104,7 +174,7 @@ class FilingResult:
         }
 
     def to_history_dict(self) -> dict:
-        """Serialise to a dict for task history persistence."""
+        """Serialise to a dict for task-history persistence."""
         return {
             "ticker": self.ticker,
             "form_type": self.form_type,
@@ -118,13 +188,18 @@ class FilingResult:
 
 @dataclass
 class TaskInfo:
-    """
-    Full state for a single ingestion task.
+    """Full state for a single ingestion task.
 
-    Mutated by the worker thread; read by route handlers and WebSocket.
-    Access to individual scalar/list fields is inherently thread-safe in
-    CPython (GIL), but we avoid structural mutations to ``results`` from
-    multiple threads.
+    Mutated by the worker thread; read by route handlers and the
+    WebSocket forwarder. The dataclass deliberately omits any
+    credential-shaped attribute name and any EDGAR identity field — the
+    per-task EDGAR identity resolver lives on the manager in
+    :attr:`TaskManager._task_resolvers` and is cleared in the worker's
+    ``finally`` block.
+
+    ``session_id`` carries the server-minted ownership key so routes can
+    filter tasks per tenant. The ``_message_queue`` field carries
+    WebSocket messages from the worker thread to the async consumer.
     """
 
     task_id: str
@@ -136,33 +211,69 @@ class TaskInfo:
     start_date: str | None = None
     end_date: str | None = None
 
+    # Server-minted session_id from the cookie. ``None`` when no session
+    # is available — the route layer collapses ownership checks in that
+    # case.
+    session_id: str | None = None
+
     state: TaskState = TaskState.PENDING
     progress: TaskProgress = field(default_factory=TaskProgress)
     results: list[FilingResult] = field(default_factory=list)
     error: str | None = None
-
-    # Per-session EDGAR credentials (name, email) — set by the route
-    # handler when the user provides credentials via HTTP headers.
-    # Never logged or persisted.
-    edgar_name: str | None = None
-    edgar_email: str | None = None
 
     cancel_event: threading.Event = field(default_factory=threading.Event)
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     started_at: datetime | None = None
     completed_at: datetime | None = None
 
-    # GPU time limit timer — set by TaskManager when
-    # MAX_TASK_DURATION_MINUTES > 0.  Cancelled on normal completion.
+    # GPU time-limit timer; cancelled on terminal-state transition.
+    # Underscored so a future field walker (eg. JSON serialiser) can
+    # filter privately-prefixed attributes out by convention.
     _duration_timer: threading.Timer | None = field(default=None, repr=False)
 
-    # Accession numbers stored so far in the *current* filing — used for
-    # partial rollback on cancellation.
+    # Accession numbers stored in the *current* task — used for partial
+    # rollback on cancellation. Cleared after a successful rollback so
+    # repeated cancels do not redo a no-op delete pass.
     _stored_accessions: list[str] = field(default_factory=list)
 
-    # WebSocket message queue — worker thread pushes typed dicts via
-    # call_soon_threadsafe; WebSocket handler awaits them directly.
-    _message_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    # WebSocket message queue. Worker thread pushes typed dicts via
+    # ``call_soon_threadsafe`` when an event loop is bound (the
+    # production path); falls back to a direct ``put_nowait`` when not
+    # (the unit-test path). The queue is built lazily so creating a
+    # task outside an async context does not bind it to a closed loop.
+    _message_queue: asyncio.Queue | None = field(default=None, repr=False)
+
+
+# ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
+
+
+class TaskQueueFullError(SECGenerativeSearchError):
+    """Raised when the active task queue is at capacity.
+
+    Inherits from :class:`SECGenerativeSearchError` so a route handler
+    can catch the base exception and surface the unified envelope; the
+    constructor populates ``details`` with the active / max counts so a
+    UI can render an informative message without re-parsing the
+    ``message`` field.
+    """
+
+    def __init__(self, active: int, maximum: int) -> None:
+        super().__init__(
+            f"Task queue is full ({active}/{maximum} active).",
+            details={"active": active, "maximum": maximum},
+        )
+
+
+class _CancelledError(Exception):
+    """Internal sentinel raised from a progress callback to abort the pipeline.
+
+    Caught only inside :meth:`TaskManager._execute` and translated into
+    the ``CANCELLED`` terminal state. Not exported because callers
+    should signal cancellation through ``info.cancel_event``, never by
+    raising this directly.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -171,46 +282,70 @@ class TaskInfo:
 
 
 class TaskManager:
-    """
-    In-memory manager for background ingestion tasks.
+    """In-memory manager for background ingestion tasks.
 
-    Usage (from route handlers)::
+    The manager is a process-local singleton attached to ``app.state``
+    by the lifespan in :mod:`api.app`. Its public surface is:
 
-        manager = TaskManager(registry, chroma, fetcher, orchestrator)
-        task_id = manager.create_task(request)
-        info = manager.get_task(task_id)
-        manager.cancel_task(task_id)
+        - :meth:`create_task` — enqueue a new ingest; spawns a daemon
+          worker thread immediately. Returns the task id.
+        - :meth:`get_task` / :meth:`list_tasks` / :meth:`list_tasks_for_session`
+          — read-side queries; cheap, lazy-evict stale terminal tasks
+          on entry.
+        - :meth:`cancel_task` — sets the task's ``cancel_event``; the
+          worker observes it between pipeline steps and rolls back any
+          ChromaDB writes through :meth:`FilingStore.delete_filings_batch`.
+        - :meth:`has_active_task` — for the ``/api/status`` endpoint.
+        - :meth:`set_event_loop` — late-bound during lifespan so
+          ``_push`` can bridge the sync worker thread → async queue.
+        - :meth:`shutdown` — drains any duration timers and prevents
+          new tasks; called from the lifespan teardown.
 
-    The manager is stored on ``app.state`` (singleton per process).
+    Construction takes a :class:`FilingStore` (the dual-store seam) plus
+    a :class:`MetadataRegistry` (for batch duplicate checks, FIFO
+    eviction reads, and ``task_history`` persistence). The registry
+    *must not* be used for filing writes from this module — those go
+    through ``filing_store``. The split keeps the write path isolated
+    while letting the worker do read-side queries
+    (``count``, ``list_oldest_filings``, ``get_existing_accessions``)
+    that don't belong on :class:`FilingStore`.
     """
 
     def __init__(
         self,
+        *,
+        filing_store: FilingStore,
         registry: MetadataRegistry,
-        chroma: ChromaDBClient,
         fetcher: FilingFetcher,
         orchestrator: PipelineOrchestrator,
     ) -> None:
+        self._filing_store = filing_store
         self._registry = registry
-        self._chroma = chroma
         self._fetcher = fetcher
         self._orchestrator = orchestrator
 
         self._tasks: dict[str, TaskInfo] = {}
-        self._gpu_semaphore = threading.Semaphore(1)
+        # Per-task EDGAR identity resolver, kept off ``TaskInfo`` so
+        # downstream JSON serialisers cannot accidentally splat identity
+        # onto a wire payload.
+        self._task_resolvers: dict[str, EdgarIdentityResolver] = {}
+
+        # ``edgar.set_identity`` mutates process-global state, so every
+        # EDGAR-bound operation re-applies the intended identity under
+        # this lock. Two concurrent ingest tasks would otherwise race
+        # on whose identity wins.
         self._edgar_lock = threading.Lock()
-        self._lock = threading.Lock()  # protects _tasks dict mutations
-
-        # Event loop reference — set via set_event_loop() during lifespan
-        # startup.  Used by _push() to bridge sync worker → async queue.
+        # GPU semaphore: one task at a time, FIFO queueing. Captured in
+        # a sentinel attribute name so a future ``threading.BoundedSemaphore``
+        # swap does not change every call site.
+        self._gpu_semaphore = threading.Semaphore(1)
+        # Guards ``_tasks`` / ``_task_resolvers`` dict mutations.
+        self._lock = threading.Lock()
+        # Late-bound event loop reference for ``_push``.
         self._loop: asyncio.AbstractEventLoop | None = None
-
-        # Cleanup timer reference — stored so it can be cancelled on shutdown.
-        self._cleanup_timer: threading.Timer | None = None
+        # Set during ``shutdown``; observed by ``create_task`` so a
+        # late-arriving request after lifespan teardown is refused.
         self._shutdown_event = threading.Event()
-
-        # Start the cleanup timer.
-        self._start_cleanup_timer()
 
     # ------------------------------------------------------------------
     # Public API
@@ -226,28 +361,40 @@ class TaskManager:
         year: int | None = None,
         start_date: str | None = None,
         end_date: str | None = None,
-        edgar_name: str | None = None,
-        edgar_email: str | None = None,
+        session_id: str | None = None,
+        edgar_identity_resolver: EdgarIdentityResolver | None = None,
     ) -> str:
-        """
-        Create a new ingestion task and start it in a background thread.
+        """Enqueue a new ingestion task and start its worker thread.
 
-        Returns the task ID (UUID4 hex string).
+        ``session_id`` carries the server-minted cookie value when one
+        is available; the route layer uses it later for per-tenant
+        ownership filtering. Passing ``None`` is the documented
+        Scenario-A behaviour (no API_KEY, single tenant).
+
+        ``edgar_identity_resolver`` is called by the worker before each
+        EDGAR-bound operation. The callable is held off
+        :class:`TaskInfo` in :attr:`TaskManager._task_resolvers` to keep
+        the zero-key / no-PII contract on the dataclass; the manager
+        clears the entry in the worker's ``finally`` block. Passing
+        ``None`` resolves to the fetcher's admin-env default.
 
         Raises:
-            TaskQueueFullError: If the active task queue is at capacity.
+            TaskQueueFullError: When the active queue is at capacity.
         """
-        # Guard against unbounded task queue (GPU semaphore starvation).
+        if self._shutdown_event.is_set():
+            raise TaskQueueFullError(active=0, maximum=0)
+
+        # Lazy eviction first so a long-quiescent server does not refuse
+        # a new task on the back of stale terminal entries.
+        self._evict_stale_locked()
+
         max_active = get_settings().api.max_task_queue_size
         with self._lock:
             active_count = sum(
                 1 for t in self._tasks.values() if t.state in (TaskState.PENDING, TaskState.RUNNING)
             )
             if active_count >= max_active:
-                raise TaskQueueFullError(
-                    f"Task queue is full ({active_count} active). "
-                    "Wait for existing tasks to complete before submitting new ones."
-                )
+                raise TaskQueueFullError(active=active_count, maximum=max_active)
 
         task_id = uuid.uuid4().hex
         info = TaskInfo(
@@ -259,12 +406,13 @@ class TaskManager:
             year=year,
             start_date=start_date,
             end_date=end_date,
-            edgar_name=edgar_name,
-            edgar_email=edgar_email,
+            session_id=session_id,
         )
 
         with self._lock:
             self._tasks[task_id] = info
+            if edgar_identity_resolver is not None:
+                self._task_resolvers[task_id] = edgar_identity_resolver
 
         thread = threading.Thread(
             target=self._run_task,
@@ -284,12 +432,19 @@ class TaskManager:
         return task_id
 
     def get_task(self, task_id: str) -> TaskInfo | None:
-        """Return task info, falling back to SQLite history if pruned."""
+        """Return the in-memory or persisted task, or ``None``.
+
+        Falls back to :meth:`MetadataRegistry.get_task_history` for tasks
+        that have already been evicted from memory. The reconstructed
+        :class:`TaskInfo` is read-only by convention — the persisted
+        shape has no live ``cancel_event`` / ``_message_queue``, so
+        mutating it would raise downstream.
+        """
+        self._evict_stale_locked()
         info = self._tasks.get(task_id)
         if info is not None:
             return info
 
-        # Check persisted history.
         try:
             history = self._registry.get_task_history(task_id)
         except Exception:
@@ -301,173 +456,100 @@ class TaskManager:
 
         return self._reconstruct_task_info(history)
 
-    @staticmethod
-    def _reconstruct_task_info(history: dict) -> TaskInfo:
-        """Build a read-only ``TaskInfo`` from persisted history data."""
-        info = TaskInfo(
-            task_id=history["task_id"],
-            tickers=history["tickers"],
-            form_types=history["form_types"],
-        )
-        info.state = TaskState(history["status"])
-        info.error = history["error"]
-        info.progress = TaskProgress(
-            filings_done=history["filings_done"],
-            filings_skipped=history["filings_skipped"],
-            filings_failed=history["filings_failed"],
-        )
-        info.results = [
-            FilingResult(
-                ticker=r["ticker"],
-                form_type=r["form_type"],
-                filing_date=r["filing_date"],
-                accession_number=r["accession_number"],
-                segment_count=r["segment_count"],
-                chunk_count=r["chunk_count"],
-                duration_seconds=r["duration_seconds"],
-            )
-            for r in history["results"]
-        ]
-        if history["started_at"]:
-            info.started_at = datetime.fromisoformat(history["started_at"])
-        if history["completed_at"]:
-            info.completed_at = datetime.fromisoformat(history["completed_at"])
-        return info
-
     def list_tasks(self) -> list[TaskInfo]:
-        """Return all tasks (active and recent)."""
-        return list(self._tasks.values())
+        """Return every in-memory task (snapshot)."""
+        self._evict_stale_locked()
+        with self._lock:
+            return list(self._tasks.values())
+
+    def list_tasks_for_session(self, session_id: str | None) -> list[TaskInfo]:
+        """Return tasks owned by ``session_id``.
+
+        ``session_id=None`` returns tasks created without a session
+        cookie (the Scenario-A single-tenant case). Filtering happens
+        here rather than at the route so the manager owns the
+        ownership-key shape — a future change (eg. ``user_id`` post-SSO)
+        is a one-method swap.
+        """
+        self._evict_stale_locked()
+        with self._lock:
+            return [t for t in self._tasks.values() if t.session_id == session_id]
 
     def cancel_task(self, task_id: str) -> bool:
-        """
-        Request cancellation of a running or pending task.
+        """Request cancellation of a pending or running task.
 
-        Returns True if the cancel signal was sent, False if the task
-        was not found or already finished.
+        Sets ``cancel_event``; the worker checks it between pipeline
+        steps and triggers a ChromaDB-first rollback through
+        :meth:`FilingStore.delete_filings_batch`. Returns ``True`` when
+        the signal was sent, ``False`` for unknown / terminal tasks.
+        Cancelling a task that has not yet acquired the GPU semaphore
+        still works — the worker observes the event before doing any
+        SEC fetch.
         """
-        info = self._tasks.get(task_id)
+        with self._lock:
+            info = self._tasks.get(task_id)
         if info is None:
             return False
-        if info.state in (TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED):
+        if info.state in _TERMINAL_STATES:
             return False
         info.cancel_event.set()
         logger.info("Cancel requested for task %s", task_id[:8])
         return True
 
     def has_active_task(self) -> bool:
-        """Return True if any task is pending or running."""
-        return any(t.state in (TaskState.PENDING, TaskState.RUNNING) for t in self._tasks.values())
-
-    def shutdown(self) -> None:
-        """
-        Cancel the cleanup timer and prevent further rescheduling.
-
-        Call this during application shutdown (lifespan teardown) to
-        stop the recurring cleanup thread cleanly.
-        """
-        self._shutdown_event.set()
-        if self._cleanup_timer is not None:
-            self._cleanup_timer.cancel()
-            self._cleanup_timer = None
-        logger.info("TaskManager shut down")
-
-    def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
-        """
-        Store a reference to the running asyncio event loop.
-
-        Called during lifespan startup so that ``_push()`` can use
-        ``call_soon_threadsafe`` to bridge messages from the sync
-        worker thread into the async ``asyncio.Queue``.
-        """
-        self._loop = loop
-
-    # ------------------------------------------------------------------
-    # GPU time limit
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _timeout_task(info: TaskInfo) -> None:
-        """Cancel a task that has exceeded ``MAX_TASK_DURATION_MINUTES``.
-
-        Called by ``threading.Timer`` from a daemon thread.  Sets the
-        cancel event — the worker thread checks this between pipeline
-        steps and performs a clean rollback, exactly like a user-initiated
-        cancel.
-        """
-        if info.state == TaskState.RUNNING:
-            info.cancel_event.set()
-            logger.warning(
-                "Task %s auto-cancelled: exceeded GPU time limit",
-                info.task_id[:8],
+        """``True`` if any task is pending or running."""
+        with self._lock:
+            return any(
+                t.state in (TaskState.PENDING, TaskState.RUNNING) for t in self._tasks.values()
             )
 
-    # ------------------------------------------------------------------
-    # WebSocket message helpers
-    # ------------------------------------------------------------------
+    def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Bind the running asyncio loop for cross-thread message pushes."""
+        self._loop = loop
 
-    def _push(self, info: TaskInfo, message: dict) -> None:
-        """
-        Push a WebSocket message onto the task's async queue.
+    def shutdown(self) -> None:
+        """Block new tasks and cancel any in-flight duration timers.
 
-        When called from a worker thread (the normal case), uses
-        ``call_soon_threadsafe`` to schedule the ``put_nowait`` on the
-        event loop thread — required because ``asyncio.Queue`` is not
-        thread-safe.  Falls back to a direct ``put_nowait`` when no
-        event loop is available (e.g. in unit tests).
+        Existing worker threads run to completion — they are daemon
+        threads, so the interpreter exit cleans them up if a hard
+        shutdown is required. Cancelling a long-running embed call
+        cleanly is out of scope here; the route layer covers user
+        cancellation via :meth:`cancel_task`.
         """
-        loop = self._loop
-        if loop is not None and loop.is_running():
-            loop.call_soon_threadsafe(info._message_queue.put_nowait, message)
-        else:
-            # Fallback: direct put (safe when no coroutine is awaiting
-            # queue.get(), e.g. in unit tests).
-            info._message_queue.put_nowait(message)
+        self._shutdown_event.set()
+        with self._lock:
+            for info in self._tasks.values():
+                timer = info._duration_timer
+                if timer is not None:
+                    timer.cancel()
+                    info._duration_timer = None
+        logger.info("TaskManager shut down")
 
     # ------------------------------------------------------------------
     # Worker
     # ------------------------------------------------------------------
 
-    def _run_with_edgar_identity(
-        self,
-        info: TaskInfo,
-        operation: Callable[..., _T],
-        *args,
-        **kwargs,
-    ) -> _T:
-        """Run an EDGAR-bound operation under the correct effective identity.
-
-        ``edgar.set_identity()`` mutates process-global state, so the identity
-        must be re-applied immediately before every EDGAR request cluster.
-        A dedicated lock keeps this invariant correct even if task concurrency
-        changes in the future.
-        """
-        with self._edgar_lock:
-            self._fetcher.apply_identity(info.edgar_name, info.edgar_email)
-            return operation(*args, **kwargs)
-
     def _run_task(self, info: TaskInfo) -> None:
-        """
-        Execute the ingestion task.  Runs in a background thread.
+        """Top-level worker entry. Acquires the GPU slot then runs ``_execute``.
 
-        Acquires the GPU semaphore (blocking — FIFO queue), then
-        iterates over tickers × form_types running the ingest pipeline.
+        Wraps every error path with the terminal-state persistence
+        hook so a worker crash still leaves ``task_history`` with the
+        right ``status``. The duration timer is cancelled in
+        ``finally`` so a worker that finishes early does not page the
+        operator with a spurious auto-cancel a few minutes later.
         """
-        # Wait for GPU slot (blocks if another task is running).
         logger.info("Task %s waiting for GPU slot...", info.task_id[:8])
         self._gpu_semaphore.acquire()
 
         try:
-            # Check for cancellation while queued.
             if info.cancel_event.is_set():
-                info.state = TaskState.CANCELLED
-                info.completed_at = datetime.now(UTC)
+                self._mark_terminal(info, TaskState.CANCELLED)
                 self._push(info, {"type": "cancelled"})
                 return
 
             info.state = TaskState.RUNNING
             info.started_at = datetime.now(UTC)
 
-            # Start GPU time limit timer if configured.
             max_minutes = get_settings().api.max_task_duration_minutes
             if max_minutes > 0:
                 timer = threading.Timer(
@@ -482,9 +564,8 @@ class TaskManager:
             self._execute(info)
 
         except Exception as exc:
-            info.state = TaskState.FAILED
             info.error = str(exc)
-            info.completed_at = datetime.now(UTC)
+            self._mark_terminal(info, TaskState.FAILED)
             self._push(
                 info,
                 {
@@ -495,59 +576,44 @@ class TaskManager:
             )
             logger.exception("Task %s failed unexpectedly", info.task_id[:8])
         finally:
-            # Cancel the duration timer if it hasn't fired yet.
             if info._duration_timer is not None:
                 info._duration_timer.cancel()
                 info._duration_timer = None
+            with self._lock:
+                self._task_resolvers.pop(info.task_id, None)
             self._gpu_semaphore.release()
 
     def _execute(self, info: TaskInfo) -> None:
-        """
-        Core ingestion logic — mirrors the CLI ingest flow.
+        """Ingest one filing at a time, fetching HTML on demand.
 
-        Steps per filing:
-            1. Fetch metadata (cheap — ``list_available``)
-            2. Duplicate check
-            3. Fetch HTML content (on demand, one filing at a time)
-            4. Process (parse → chunk → embed — expensive GPU)
-            5. Store (ChromaDB first, then SQLite)
-
-        HTML is fetched per-filing just before processing, so only one
-        filing's HTML is in memory at a time.
+        Fetching HTML per filing (rather than batching) keeps memory
+        bounded at one filing's worth of HTML regardless of work-list
+        size; on a 4 GB-VRAM single-user setup the alternative would
+        OOM on a wide ticker selection.
         """
-        # Build the flat work list of filings to ingest (metadata only).
+        # Build the work list under the correct effective identity.
         work = self._run_with_edgar_identity(info, self._build_work_list, info)
-
         info.progress.filings_total = len(work)
 
-        # Batch duplicate check — single SQL query instead of N individual
-        # is_duplicate() calls, reducing SQLite round-trips from O(N) to O(1).
+        # Batch dup check — one SQL ``IN (?, ?, …)`` instead of N
+        # round-trips through ``is_duplicate``.
         all_accessions = [fi.accession_number for fi in work]
         existing = self._registry.get_existing_accessions(all_accessions)
 
-        # --- FIFO eviction (demo mode only) ------------------------------
-        # When DEMO_MODE is enabled and the incoming batch would exceed the
-        # filing limit, automatically evict the oldest filings to make room
-        # instead of failing with FilingLimitExceededError.
         settings = get_settings()
         if settings.api.demo_mode:
             new_count = sum(1 for fi in work if fi.accession_number not in existing)
             self._maybe_evict(info, new_count)
 
-        # Cache the filing count to avoid N separate COUNT(*) queries.
-        # The GPU semaphore ensures single-task execution, so the count
-        # only changes when *this* task stores a filing or evicts.
         cached_count = self._registry.count()
         max_filings = settings.database.max_filings
 
         for filing_info in work:
             filing_id = filing_info.to_identifier()
 
-            # --- Cancellation check (between filings) --------------------
             if info.cancel_event.is_set():
                 self._rollback(info)
-                info.state = TaskState.CANCELLED
-                info.completed_at = datetime.now(UTC)
+                self._mark_terminal(info, TaskState.CANCELLED)
                 self._push(info, {"type": "cancelled"})
                 logger.info("Task %s cancelled", info.task_id[:8])
                 return
@@ -560,7 +626,6 @@ class TaskManager:
             info.progress.step_label = "Checking duplicate"
             info.progress.step_index = 1
 
-            # --- Duplicate check -----------------------------------------
             if filing_id.accession_number in existing:
                 info.progress.filings_skipped += 1
                 info.progress.filings_done += 1
@@ -581,42 +646,21 @@ class TaskManager:
                 )
                 continue
 
-            # --- Filing limit check (cached) ---------------------------------
+            # Filing-count ceiling. Demo mode tries one more eviction
+            # round before failing so a steady-state demo never blows
+            # the limit; non-demo deployments rely on operator policy
+            # and surface ``FilingLimitExceededError`` instead.
             if cached_count >= max_filings:
                 if settings.api.demo_mode:
                     self._maybe_evict(info, 1)
-                    # Re-read count after eviction.
                     cached_count = self._registry.count()
                     if cached_count >= max_filings:
-                        exc = FilingLimitExceededError(cached_count, max_filings)
-                        info.state = TaskState.FAILED
-                        info.error = exc.message
-                        info.completed_at = datetime.now(UTC)
-                        self._push(
-                            info,
-                            {
-                                "type": "failed",
-                                "error": exc.message,
-                                "details": exc.details,
-                            },
-                        )
+                        self._fail_with_limit(info, cached_count, max_filings)
                         return
                 else:
-                    exc = FilingLimitExceededError(cached_count, max_filings)
-                    info.state = TaskState.FAILED
-                    info.error = exc.message
-                    info.completed_at = datetime.now(UTC)
-                    self._push(
-                        info,
-                        {
-                            "type": "failed",
-                            "error": exc.message,
-                            "details": exc.details,
-                        },
-                    )
+                    self._fail_with_limit(info, cached_count, max_filings)
                     return
 
-            # --- Fetch HTML content (on demand) --------------------------
             info.progress.step_label = "Fetching"
             info.progress.step_index = 0
 
@@ -647,7 +691,6 @@ class TaskManager:
                 )
                 continue
 
-            # --- Process (parse → chunk → embed) -------------------------
             def _progress_cb(
                 step: str,
                 current: int,
@@ -657,14 +700,17 @@ class TaskManager:
                 _ticker: str = ticker,
                 _form: str = form_type,
             ) -> None:
-                """Feed pipeline progress into task state."""
+                """Pipeline progress callback — feeds task state + WebSocket.
+
+                Default-argument capture (``_info``/``_ticker``/``_form``)
+                is the closure-friendly idiom for late-binding the
+                current loop iteration's values without leaking them
+                into the outer scope.
+                """
                 _info.progress.current_ticker = _ticker
                 _info.progress.current_form_type = _form
                 _info.progress.step_label = step
-                # Pipeline reports steps 1–4 (parse, chunk, embed, complete).
-                # We add fetching as step 0 and storing as step 4, giving
-                # 5 total: 0=fetch, 1=parse, 2=chunk, 3=embed, 4=store.
-                _info.progress.step_index = current  # 1-based from pipeline
+                _info.progress.step_index = current
                 _info.progress.step_total = 5
 
                 _self._push(
@@ -679,7 +725,6 @@ class TaskManager:
                     },
                 )
 
-                # Check cancellation between pipeline steps.
                 if _info.cancel_event.is_set():
                     raise _CancelledError
 
@@ -694,12 +739,11 @@ class TaskManager:
                 )
             except _CancelledError:
                 self._rollback(info)
-                info.state = TaskState.CANCELLED
-                info.completed_at = datetime.now(UTC)
+                self._mark_terminal(info, TaskState.CANCELLED)
                 self._push(info, {"type": "cancelled"})
                 logger.info("Task %s cancelled during processing", info.task_id[:8])
                 return
-            except SECSemanticSearchError as exc:
+            except SECGenerativeSearchError as exc:
                 info.progress.filings_failed += 1
                 info.progress.filings_done += 1
                 self._push(
@@ -720,31 +764,28 @@ class TaskManager:
                 )
                 continue
 
-            # --- Store (ChromaDB first, then SQLite) ---------------------
             info.progress.step_label = "Storing"
             info.progress.step_index = 4
 
             if info.cancel_event.is_set():
                 self._rollback(info)
-                info.state = TaskState.CANCELLED
-                info.completed_at = datetime.now(UTC)
+                self._mark_terminal(info, TaskState.CANCELLED)
                 self._push(info, {"type": "cancelled"})
                 return
 
             try:
-                # Atomic check-then-insert: holds the SQLite lock across
-                # both the duplicate check and the INSERT, preventing the
-                # race window where two threads both pass is_duplicate()
-                # and then both attempt to register the same filing.
-                # SQLite registration is done first so that a late
-                # duplicate is caught before writing to ChromaDB.
-                registered = self._registry.register_filing_if_new(
-                    result.filing_id,
-                    result.ingest_result.chunk_count,
+                # ``register_if_new=True`` is the atomic check-and-claim
+                # path: SQLite-first, then ChromaDB. A losing caller
+                # sees ``False`` and we treat it as a late duplicate —
+                # exactly the race window the carry-over path falls
+                # into when two workers run concurrently. See
+                # ``FilingStore`` module docstring for the full
+                # rationale.
+                registered = self._filing_store.store_filing(
+                    result,
+                    register_if_new=True,
                 )
                 if not registered:
-                    # Another thread registered this filing between the
-                    # batch duplicate check and now — treat as a skip.
                     info.progress.filings_skipped += 1
                     info.progress.filings_done += 1
                     self._push(
@@ -763,14 +804,6 @@ class TaskManager:
                         filing_id.accession_number,
                     )
                     continue
-
-                try:
-                    self._chroma.store_filing(result)
-                except DatabaseError:
-                    # ChromaDB store failed after SQLite succeeded —
-                    # roll back the SQLite entry to maintain consistency.
-                    self._registry.remove_filing(filing_id.accession_number)
-                    raise
             except DatabaseError as exc:
                 info.progress.filings_failed += 1
                 info.progress.filings_done += 1
@@ -792,7 +825,6 @@ class TaskManager:
                 )
                 continue
 
-            # Record success and update the cached filing count.
             cached_count += 1
             info._stored_accessions.append(filing_id.accession_number)
             info.results.append(
@@ -832,11 +864,9 @@ class TaskManager:
                 result.ingest_result.duration_seconds,
             )
 
-        # All filings processed — mark complete.
         if info.state == TaskState.RUNNING:
-            info.state = TaskState.COMPLETED
-            info.completed_at = datetime.now(UTC)
             info.progress.step_label = "Complete"
+            self._mark_terminal(info, TaskState.COMPLETED)
             self._push(
                 info,
                 {
@@ -861,19 +891,111 @@ class TaskManager:
             )
 
     # ------------------------------------------------------------------
+    # EDGAR identity application
+    # ------------------------------------------------------------------
+
+    def _run_with_edgar_identity(
+        self,
+        info: TaskInfo,
+        operation: Callable,
+        *args,
+        **kwargs,
+    ):
+        """Re-apply the task's EDGAR identity, then run ``operation``.
+
+        ``edgar.set_identity`` mutates process-global state, so calling
+        this immediately before every EDGAR-bound operation is
+        load-bearing — without it, a concurrent task could fetch under
+        another tenant's identity. The lock serialises the
+        set-then-call sequence end-to-end; releasing the lock between
+        set and call would re-open the race.
+
+        The resolver is fetched from :attr:`TaskManager._task_resolvers`
+        (kept off :class:`TaskInfo` so it never leaks onto the wire).
+        A ``None`` resolver or a resolver that returns ``None`` defers
+        to the fetcher's admin-env default.
+        """
+        with self._lock:
+            resolver = self._task_resolvers.get(info.task_id)
+        identity = resolver() if resolver is not None else None
+
+        with self._edgar_lock:
+            if identity is not None:
+                self._fetcher.apply_identity(identity.name, identity.email)
+            else:
+                self._fetcher.apply_identity(None, None)
+            return operation(*args, **kwargs)
+
+    # ------------------------------------------------------------------
+    # GPU time limit
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _timeout_task(info: TaskInfo) -> None:
+        """Auto-cancel a task that has exceeded the GPU time limit.
+
+        Routes through the same ``cancel_event`` path as a user
+        cancellation so the worker performs a clean rollback. The
+        timer is set when ``API_MAX_TASK_DURATION_MINUTES > 0``;
+        Scenario A (``0`` default) skips the timer entirely.
+        """
+        if info.state == TaskState.RUNNING:
+            info.cancel_event.set()
+            logger.warning(
+                "Task %s auto-cancelled: exceeded GPU time limit",
+                info.task_id[:8],
+            )
+
+    # ------------------------------------------------------------------
+    # WebSocket queue plumbing
+    # ------------------------------------------------------------------
+
+    def _push(self, info: TaskInfo, message: dict) -> None:
+        """Push a WebSocket message onto the task's async queue.
+
+        Two transports:
+
+            - When an event loop is bound (production), use
+              :meth:`asyncio.AbstractEventLoop.call_soon_threadsafe` so
+              the synchronous worker thread can hand off to the
+              asyncio-owned queue without violating its thread-safety
+              contract.
+            - Without an event loop (unit tests), the message lands on
+              the queue directly via ``put_nowait``. Tests can then
+              drain the queue with ``info._message_queue.get_nowait()``.
+
+        The queue is built lazily because :class:`asyncio.Queue` binds
+        to the running loop at construction time — building it in
+        ``TaskInfo.__init__`` (off the worker thread) would either
+        require ``asyncio.run`` to be active or fail with "no current
+        event loop". Lazy construction sidesteps both.
+        """
+        if info._message_queue is None:
+            info._message_queue = asyncio.Queue()
+
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(info._message_queue.put_nowait, message)
+        else:
+            info._message_queue.put_nowait(message)
+
+    # ------------------------------------------------------------------
     # Work list builder
     # ------------------------------------------------------------------
 
-    def _build_work_list(
-        self,
-        info: TaskInfo,
-    ) -> list[FilingInfo]:
-        """
-        Build a flat list of ``FilingInfo`` metadata objects.
+    def _build_work_list(self, info: TaskInfo) -> list[FilingInfo]:
+        """Flatten the (ticker, form_type) matrix into a per-filing work list.
 
-        Only fetches lightweight metadata (no HTML content). HTML is
-        fetched per-filing in ``_execute()`` just before processing,
-        so only one filing's HTML is in memory at a time.
+        Only the lightweight metadata is fetched here — HTML is pulled
+        per filing inside :meth:`_execute`. The two modes
+        (``count_mode='total'`` cross-form vs. per-form) live here
+        because the choice is purely about how the matrix is unrolled;
+        once unrolled, the rest of the pipeline is identical.
+
+        Per-form fetch errors are logged and **swallowed** — a single
+        ticker x form failure should not nuke the whole batch. The
+        per-filing fetch errors inside :meth:`_execute` get the same
+        treatment.
         """
         work: list[FilingInfo] = []
 
@@ -886,8 +1008,6 @@ class TaskManager:
             info.progress.step_index = 0
 
             if info.count_mode == "total" and info.count is not None:
-                # Cross-form mode: list available across forms, pick
-                # the newest `count`.
                 filings = self._fetcher.list_available_across_forms(
                     ticker,
                     tuple(info.form_types),
@@ -898,7 +1018,6 @@ class TaskManager:
                 )
                 work.extend(filings)
             else:
-                # Per-form mode: list available filings (metadata only).
                 for form_type in info.form_types:
                     if info.cancel_event.is_set():
                         break
@@ -929,32 +1048,31 @@ class TaskManager:
 
     @staticmethod
     def _effective_count(info: TaskInfo) -> int | None:
-        """
-        Determine the number of filings to fetch per form type.
-
-        Mirrors the CLI's filter-aware default count logic.
-        """
+        """Mirror the CLI's filter-aware default count logic."""
         if info.count_mode == "per_form" and info.count is not None:
             return info.count
         has_filters = (
             info.year is not None or info.start_date is not None or info.end_date is not None
         )
         if has_filters and info.count is None:
-            return None  # all matching within filters
+            return None
         if info.count is not None:
             return info.count
-        return 1  # default: latest only
+        return 1
 
     # ------------------------------------------------------------------
     # Rollback
     # ------------------------------------------------------------------
 
     def _rollback(self, info: TaskInfo) -> None:
-        """
-        Roll back any filings stored during the current task.
+        """Roll back filings stored during this task.
 
-        Called on cancellation to maintain dual-store consistency.
-        Deletes from ChromaDB first, then SQLite (matching store order).
+        Delegates to :meth:`FilingStore.delete_filings_batch` so the
+        ChromaDB-first ordering and best-effort rollback semantics stay
+        single-sourced. A failed rollback is logged but **never**
+        raised — the worker's terminal-state transition is the user-
+        facing signal and we do not want a Chroma blip to mask a clean
+        cancel.
         """
         if not info._stored_accessions:
             return
@@ -965,17 +1083,14 @@ class TaskManager:
             len(info._stored_accessions),
         )
 
-        for accession in info._stored_accessions:
-            try:
-                self._chroma.delete_filing(accession)
-                self._registry.remove_filing(accession)
-            except DatabaseError as exc:
-                logger.error(
-                    "Task %s: rollback failed for %s — %s",
-                    info.task_id[:8],
-                    accession,
-                    exc.message,
-                )
+        try:
+            self._filing_store.delete_filings_batch(list(info._stored_accessions))
+        except DatabaseError as exc:
+            logger.error(
+                "Task %s: rollback failed — %s",
+                info.task_id[:8],
+                exc.message,
+            )
 
         info._stored_accessions.clear()
 
@@ -984,17 +1099,11 @@ class TaskManager:
     # ------------------------------------------------------------------
 
     def _maybe_evict(self, info: TaskInfo, new_filings: int) -> None:
-        """
-        Evict the oldest filings when demo mode is active and the
-        database would exceed its capacity with the incoming batch.
+        """Drop the oldest filings when demo mode would overflow.
 
-        Uses ``list_oldest_filings()`` + ``delete_filings_batch()`` to
-        remove the oldest ``slots_needed + DEMO_EVICTION_BUFFER`` filings
-        from both stores.  Sends a WebSocket ``eviction`` message so the
-        frontend can display a toast notification.
-
-        No-op when there is enough space or when the eviction count
-        computes to zero.
+        No-op when there is room. The eviction count adds a small
+        buffer so a steady-state demo does not churn on every ingest —
+        the buffer comes from ``API_DEMO_EVICTION_BUFFER``.
         """
         settings = get_settings()
         max_filings = settings.database.max_filings
@@ -1002,14 +1111,11 @@ class TaskManager:
         available = max_filings - current_count
 
         if new_filings <= available:
-            return  # enough room — no eviction needed
+            return
 
         slots_needed = new_filings - available
         eviction_count = slots_needed + settings.api.demo_eviction_buffer
-
-        # Don't try to evict more than what's stored.
         eviction_count = min(eviction_count, current_count)
-
         if eviction_count <= 0:
             return
 
@@ -1018,11 +1124,8 @@ class TaskManager:
             return
 
         evicted_tickers = sorted({f.ticker for f in oldest})
-        chunks_deleted = delete_filings_batch(
-            oldest,
-            chroma=self._chroma,
-            registry=self._registry,
-        )
+        accessions = [f.accession_number for f in oldest]
+        chunks_deleted = self._filing_store.delete_filings_batch(accessions)
 
         logger.info(
             "Task %s: FIFO eviction — deleted %d filing(s) (%d chunks) "
@@ -1033,7 +1136,6 @@ class TaskManager:
             new_filings,
         )
 
-        # Notify WebSocket clients of the eviction.
         self._push(
             info,
             {
@@ -1044,90 +1146,146 @@ class TaskManager:
             },
         )
 
+    def _fail_with_limit(self, info: TaskInfo, current: int, maximum: int) -> None:
+        """Centralise the filing-limit-exceeded terminal path.
+
+        Both the pre-loop and inside-loop cases route through here so
+        the audit-log line and the WebSocket envelope shape stay
+        consistent — without this helper, a future ``details`` field
+        addition would have to be applied in two places.
+        """
+        exc = FilingLimitExceededError(current, maximum)
+        info.error = exc.message
+        self._mark_terminal(info, TaskState.FAILED)
+        self._push(
+            info,
+            {
+                "type": "failed",
+                "error": exc.message,
+                "details": exc.details,
+            },
+        )
+
     # ------------------------------------------------------------------
-    # Cleanup
+    # Terminal-state hook (persist + record completion timestamp)
     # ------------------------------------------------------------------
 
-    def _start_cleanup_timer(self) -> None:
-        """Schedule periodic pruning of stale tasks."""
-        if self._shutdown_event.is_set():
-            return
-        timer = threading.Timer(60.0, self._cleanup_loop)
-        timer.daemon = True
-        timer.start()
-        self._cleanup_timer = timer
+    def _mark_terminal(self, info: TaskInfo, state: TaskState) -> None:
+        """Flip a task to a terminal state and persist it to SQLite.
 
-    def _cleanup_loop(self) -> None:
-        """Prune finished tasks older than TTL, then reschedule."""
-        if self._shutdown_event.is_set():
-            return
+        Persisting here (rather than via a recurring sweeper as the
+        legacy did) means the ``task_history`` row exists the moment
+        the user receives the terminal WebSocket event — no eventual-
+        consistency window where ``GET /api/ingest/tasks/{id}`` would
+        return a stale state or 404 during the eviction lag.
+
+        ``save_task_history`` enforces the privacy controls
+        (ticker stripping, error scrubbing); the manager never passes a
+        key or PII here in the first place — the parameter list is the
+        contract surface.
+        """
+        info.state = state
+        info.completed_at = datetime.now(UTC)
+
         try:
-            self._prune_stale_tasks()
+            self._registry.save_task_history(
+                info.task_id,
+                status=info.state.value,
+                tickers=info.tickers,
+                form_types=info.form_types,
+                results=[r.to_history_dict() for r in info.results],
+                error=info.error,
+                started_at=(info.started_at.isoformat() if info.started_at else None),
+                completed_at=info.completed_at.isoformat(),
+                filings_done=info.progress.filings_done,
+                filings_skipped=info.progress.filings_skipped,
+                filings_failed=info.progress.filings_failed,
+            )
         except Exception:
-            logger.exception("Task cleanup error")
-        finally:
-            self._start_cleanup_timer()
+            logger.exception(
+                "Failed to persist task %s to history",
+                info.task_id[:8],
+            )
 
-    def _prune_stale_tasks(self) -> None:
-        """Persist and remove completed/failed/cancelled tasks older than the TTL."""
+    # ------------------------------------------------------------------
+    # Lazy eviction (no background thread)
+    # ------------------------------------------------------------------
+
+    def _evict_stale_locked(self) -> None:
+        """Drop in-memory entries for terminal tasks older than the TTL.
+
+        Called on every read / create. The persisted ``task_history``
+        row is the long-term store; the in-memory entry is a cache for
+        polling clients. The pattern mirrors
+        :class:`InMemorySessionCredentialStore` and
+        :class:`InMemorySessionEdgarIdentityStore` — every short-lived
+        in-memory store in this codebase evicts lazily rather than
+        running a background timer.
+        """
         now = time.time()
-        terminal = (TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED)
         to_remove: list[str] = []
 
-        for task_id, info in self._tasks.items():
-            if info.state not in terminal:
-                continue
-            if info.completed_at is None:
-                continue
-            age = now - info.completed_at.timestamp()
-            if age > _TASK_TTL_SECONDS:
-                to_remove.append(task_id)
+        with self._lock:
+            for task_id, info in self._tasks.items():
+                if info.state not in _TERMINAL_STATES:
+                    continue
+                if info.completed_at is None:
+                    continue
+                if now - info.completed_at.timestamp() > _TASK_TTL_SECONDS:
+                    to_remove.append(task_id)
+
+            for task_id in to_remove:
+                self._tasks.pop(task_id, None)
+                self._task_resolvers.pop(task_id, None)
 
         if to_remove:
-            # Persist to SQLite before removing from memory.
-            for task_id in to_remove:
-                info = self._tasks[task_id]
-                try:
-                    self._registry.save_task_history(
-                        task_id,
-                        status=info.state.value,
-                        tickers=info.tickers,
-                        form_types=info.form_types,
-                        results=[r.to_history_dict() for r in info.results],
-                        error=info.error,
-                        started_at=(info.started_at.isoformat() if info.started_at else None),
-                        completed_at=(info.completed_at.isoformat() if info.completed_at else None),
-                        filings_done=info.progress.filings_done,
-                        filings_skipped=info.progress.filings_skipped,
-                        filings_failed=info.progress.filings_failed,
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to persist task %s to history",
-                        task_id[:8],
-                    )
-
-            with self._lock:
-                for task_id in to_remove:
-                    del self._tasks[task_id]
-            logger.info("Pruned %d stale task(s)", len(to_remove))
-
-            # Prune old history entries based on TASK_HISTORY_RETENTION_DAYS.
-            # When 0 (the default), pruning is skipped (kept indefinitely).
+            logger.debug("Evicted %d stale task(s) from memory", len(to_remove))
+            # Prune the history table on the same cadence — settings-
+            # driven retention is what bounds the on-disk row count.
             try:
                 self._registry.prune_task_history()
             except Exception:
                 logger.exception("Failed to prune task history")
 
+    # ------------------------------------------------------------------
+    # History rehydration
+    # ------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Internal sentinel exception for cancellation during pipeline
-# ---------------------------------------------------------------------------
+    @staticmethod
+    def _reconstruct_task_info(history: dict) -> TaskInfo:
+        """Rebuild a read-only :class:`TaskInfo` from a persisted row.
 
-
-class _CancelledError(Exception):
-    """Raised inside a progress callback to abort the pipeline."""
-
-
-class TaskQueueFullError(Exception):
-    """Raised when the active task queue exceeds the maximum allowed size."""
+        The reconstructed object has no live ``cancel_event`` /
+        ``_message_queue``; downstream callers expect the in-memory
+        path to own those. Treating the result as read-only is a
+        convention enforced by code review, not by the dataclass.
+        """
+        info = TaskInfo(
+            task_id=history["task_id"],
+            tickers=history["tickers"] or [],
+            form_types=history["form_types"] or [],
+        )
+        info.state = TaskState(history["status"])
+        info.error = history["error"]
+        info.progress = TaskProgress(
+            filings_done=history["filings_done"],
+            filings_skipped=history["filings_skipped"],
+            filings_failed=history["filings_failed"],
+        )
+        info.results = [
+            FilingResult(
+                ticker=r["ticker"],
+                form_type=r["form_type"],
+                filing_date=r["filing_date"],
+                accession_number=r["accession_number"],
+                segment_count=r["segment_count"],
+                chunk_count=r["chunk_count"],
+                duration_seconds=r["duration_seconds"],
+            )
+            for r in history["results"]
+        ]
+        if history["started_at"]:
+            info.started_at = datetime.fromisoformat(history["started_at"])
+        if history["completed_at"]:
+            info.completed_at = datetime.fromisoformat(history["completed_at"])
+        return info

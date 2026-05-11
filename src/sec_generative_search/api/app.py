@@ -27,6 +27,7 @@ Notes for the lifespan:
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -48,6 +49,7 @@ from sec_generative_search.api.routes.rag import router as rag_router
 from sec_generative_search.api.routes.search import router as search_router
 from sec_generative_search.api.routes.session import router as session_router
 from sec_generative_search.api.routes.status import router as status_router
+from sec_generative_search.api.tasks import TaskManager
 from sec_generative_search.config.settings import get_settings
 from sec_generative_search.core.credentials import InMemorySessionCredentialStore
 from sec_generative_search.core.edgar_identity import InMemorySessionEdgarIdentityStore
@@ -55,6 +57,8 @@ from sec_generative_search.core.logging import get_logger
 from sec_generative_search.core.types import EmbedderStamp
 from sec_generative_search.database import ChromaDBClient, FilingStore, MetadataRegistry
 from sec_generative_search.database.credentials import EncryptedCredentialStore
+from sec_generative_search.pipeline.fetch import FilingFetcher
+from sec_generative_search.pipeline.orchestrator import PipelineOrchestrator
 from sec_generative_search.providers.factory import build_embedder
 from sec_generative_search.providers.registry import ProviderRegistry
 from sec_generative_search.search import RetrievalService
@@ -139,6 +143,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
             encrypted_store = None
 
+    # Background ingestion TaskManager. The fetcher / orchestrator chain
+    # is built fresh per app — both are stateless apart from the
+    # process-global ``edgar.set_identity`` mutation, which the manager
+    # re-applies under its own lock before every EDGAR call cluster. The
+    # embedder is the same singleton attached above, so a successful boot
+    # here also proves the GPU/local-extras gating already passed.
+    fetcher = FilingFetcher()
+    pipeline_orchestrator = PipelineOrchestrator(embedder=embedder)
+    task_manager = TaskManager(
+        filing_store=filing_store,
+        registry=registry,
+        fetcher=fetcher,
+        orchestrator=pipeline_orchestrator,
+    )
+    # The running asyncio loop is what ``_push`` uses to bridge the sync
+    # worker thread to the per-task message queue. Capture it once here;
+    # ``set_event_loop`` is the only public seam for the bind.
+    task_manager.set_event_loop(asyncio.get_running_loop())
+
     # Expose every singleton on ``app.state``.
     app.state.settings = settings
     app.state.embedder = embedder
@@ -149,6 +172,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.session_store = session_store
     app.state.edgar_identity_store = edgar_identity_store
     app.state.encrypted_credential_store = encrypted_store
+    app.state.task_manager = task_manager
 
     logger.info(
         "API ready: embedder=%s/%s, dim=%d, encrypted_store=%s",
@@ -162,6 +186,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         logger.info("SEC-GenerativeSearch API shutting down.")
+        # Stop accepting new tasks and cancel any in-flight duration
+        # timers before the registry connection closes.  Existing
+        # daemon worker threads will reach their own teardown when the
+        # interpreter exits — that is the documented behaviour.
+        task_manager.shutdown()
         # ``MetadataRegistry`` owns the SQLite/SQLCipher connection that
         # the encrypted store also uses — close it here, never inside
         # the encrypted store, so we don't double-close from two sites.

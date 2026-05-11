@@ -392,8 +392,7 @@ class TestCredentialSecurity:
         self,
         audit_caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """A weak ``session_id`` would still be sensitive enough to
-        warrant masking — see TODO 10.9."""
+        """A weak ``session_id`` is still sensitive enough to warrant masking."""
         store = InMemorySessionCredentialStore()
         audit_caplog.clear()
         store.set("very-unique-session-NEEDLE", "openai", "sk-test-1234567890")
