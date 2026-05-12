@@ -112,7 +112,6 @@ line-length = 100
 extend-exclude = [
     "src/sec_generative_search/api/websocket.py",
     "src/sec_generative_search/api/routes/filings.py",
-    "src/sec_generative_search/api/routes/ingest.py",
     "src/sec_generative_search/api/routes/resources.py",
     "src/sec_generative_search/cli",
 ]

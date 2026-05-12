@@ -54,6 +54,7 @@ from sec_generative_search.core.security import mask_secret
 from sec_generative_search.providers.factory import default_api_key_resolver
 
 if TYPE_CHECKING:
+    from sec_generative_search.api.tasks import TaskManager
     from sec_generative_search.database import (
         ChromaDBClient,
         FilingStore,
@@ -81,6 +82,7 @@ __all__ = [
     "get_retrieval_service",
     "get_session_id",
     "get_session_store",
+    "get_task_manager",
     "header_resolver",
     "is_admin_request",
     "parse_provider_key_headers",
@@ -307,6 +309,11 @@ def get_encrypted_credential_store(request: Request) -> CredentialStore | None:
 def get_edgar_identity_store(request: Request) -> InMemorySessionEdgarIdentityStore:
     """Return the in-memory per-session EDGAR identity store."""
     return request.app.state.edgar_identity_store
+
+
+def get_task_manager(request: Request) -> TaskManager:
+    """Return the lifespan-managed background ingestion task manager."""
+    return request.app.state.task_manager
 
 
 # ---------------------------------------------------------------------------

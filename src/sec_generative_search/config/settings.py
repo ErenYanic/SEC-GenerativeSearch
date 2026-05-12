@@ -564,7 +564,6 @@ class ApiSettings(BaseSettings):
     # Abuse prevention caps (0 = unlimited/disabled).
     max_tickers_per_request: int = 0
     max_filings_per_request: int = 0
-    ingest_cooldown_seconds: int = 0
     max_task_duration_minutes: int = 0
 
     @field_validator("key", "admin_key", mode="before")

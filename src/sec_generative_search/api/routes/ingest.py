@@ -1,132 +1,212 @@
-"""
-Ingestion endpoints for starting, monitoring, and cancelling filing ingests.
+"""Ingestion routes for task creation, lookup, and cancellation.
 
-Provides five routes:
-    - ``POST /``           — start single-ticker ingestion
-    - ``POST /batch``      — start multi-ticker ingestion
-    - ``GET /tasks``       — list all tasks (active + recent)
-    - ``GET /tasks/{id}``  — get task status and progress
-    - ``DELETE /tasks/{id}`` — cancel a running task
+Rewritten against the current package seams:
 
-All business logic lives in ``tasks.TaskManager``; these routes are a
-thin HTTP layer that validates input, delegates to the manager, and
-converts internal dataclasses into Pydantic response schemas.
+        - :class:`~sec_generative_search.api.tasks.TaskManager` is the only
+            construction site for an ingest task; the route layer is a thin
+            validation + lifting shim.
+        - EDGAR identity is resolved through the canonical resolver chain
+            (``header → session → admin-env``) by reusing
+            :func:`~sec_generative_search.api.dependencies.get_edgar_identity`.
+            A request without a per-session identity fails the resolver tier
+            gating BEFORE any work-list build happens.
+        - Rate limiting flows through ``api/policies.py::ROUTE_POLICIES``
+            via the ``ingest`` category. The bespoke per-IP cooldown dict and
+            ``INGEST_COOLDOWN_SECONDS`` are gone.
+        - Session-scoped ownership: ``GET /api/ingest/tasks`` only returns
+            tasks owned by the current ``session_id``; lookups / cancels for
+            tasks owned by another session surface as ``404 not_found`` rather
+            than ``403`` so the route never confirms that a foreign task
+            exists (information-leak prophylaxis).
+
+Routes (every one read-tier — ``verify_api_key`` only):
+
+    - ``POST   /api/ingest/add``           — single-ticker ingest
+    - ``POST   /api/ingest/batch``         — multi-ticker ingest
+    - ``GET    /api/ingest/tasks``         — list this session's tasks
+    - ``GET    /api/ingest/tasks/{id}``    — task status (own only)
+    - ``DELETE /api/ingest/tasks/{id}``    — cancel a task (own only)
+
+Why two endpoints for what is structurally the same body? The
+``/add`` variant pins ``len(tickers) == 1`` at the handler so a UI
+implementing a per-ticker "Add" button cannot accidentally start a
+batch ingest by passing two tickers in one request.
+
+Audit-log discipline:
+
+        - Every create / cancel emits a ``SECURITY_AUDIT:`` line via
+            :func:`audit_log` carrying the action, client IP, masked task id
+            tail, the redacted ticker list, and the form types. Names / emails /
+            provider keys never reach this surface, so there is nothing to redact
+            here that is not already covered by the access-log layer.
+        - Read paths (``GET /api/ingest/tasks/{id}``, list) do not audit-log
+            — they would flood under WebSocket-less polling clients and they
+            already appear in the access log.
 """
 
 from __future__ import annotations
 
-import threading
-import time
+from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Path, Request
 
-from sec_semantic_search.api.dependencies import EdgarIdentity, get_edgar_identity, get_task_manager
-from sec_semantic_search.api.schemas import (
-    ErrorResponse,
+from sec_generative_search.api.dependencies import (
+    extract_session_id,
+    get_edgar_identity,
+    get_task_manager,
+    verify_api_key,
+)
+from sec_generative_search.api.errors import http_error
+from sec_generative_search.api.schemas import (
+    IngestCancelResponse,
     IngestRequest,
     IngestResultSchema,
+    IngestTaskResponse,
     TaskListResponse,
-    TaskResponse,
-    TaskStatus,
+    TaskProgressSchema,
+    TaskStatusResponse,
 )
-from sec_semantic_search.api.schemas import (
-    TaskProgress as TaskProgressSchema,
-)
-from sec_semantic_search.api.tasks import TaskInfo, TaskManager, TaskQueueFullError
-from sec_semantic_search.config import get_settings
-from sec_semantic_search.core import audit_log, get_logger, redact_for_log
+from sec_generative_search.api.tasks import TaskInfo, TaskManager, TaskQueueFullError
+from sec_generative_search.config.settings import get_settings
+from sec_generative_search.core.edgar_identity import EdgarIdentity
+from sec_generative_search.core.logging import audit_log, get_logger
+from sec_generative_search.core.security import mask_secret
+
+if TYPE_CHECKING:
+    pass
+
+__all__ = ["router"]
+
 
 logger = get_logger(__name__)
 
-router = APIRouter()
 
-# ---------------------------------------------------------------------------
-# Per-IP ingest cooldown tracking
-# ---------------------------------------------------------------------------
-
-# In-memory dict: IP → monotonic timestamp of last ingest request.
-# SECURITY: requires --workers 1 (in-memory state is per-process).
-_cooldown_lock = threading.Lock()
-_last_ingest: dict[str, float] = {}
-# How often to purge stale entries (seconds).
-_COOLDOWN_PRUNE_INTERVAL = 600
-_MAX_COOLDOWN_ENTRIES = 100_000
-_last_cooldown_prune: float = 0.0
+# Task ids are 32-char hex UUIDs; pin them at the path level so an
+# obviously forged path bounces with 422 before any state is read.
+_TASK_ID_PATH_PATTERN = r"^[0-9a-f]{32}$"
 
 
-def _check_cooldown(client_ip: str) -> None:
-    """Enforce ``INGEST_COOLDOWN_SECONDS`` for the given client IP.
+# Read-tier router: every ingest endpoint is gated by ``verify_api_key`` only.
+router = APIRouter(dependencies=[Depends(verify_api_key)])
 
-    Raises ``HTTPException(429)`` if the client has ingested too recently.
-    When ``INGEST_COOLDOWN_SECONDS`` is ``0``, the check is skipped entirely.
+
+def _client_ip(request: Request) -> str:
+    """Best-effort client IP for audit-log lines."""
+    return request.client.host if request.client else "unknown"
+
+
+def _enforce_request_caps(body: IngestRequest) -> None:
+    """Reject payloads that exceed the operator-configured caps.
+
+    ``max_tickers_per_request`` and ``max_filings_per_request`` sit on
+    top of the schema-layer bounds (``tickers`` 1..50, ``count`` 1..500).
+    Both default to 0 (disabled); when set, they trump the schema bounds.
     """
-    global _last_cooldown_prune  # noqa: PLW0603
+    settings = get_settings()
+    api = settings.api
 
-    cooldown = get_settings().api.ingest_cooldown_seconds
-    if cooldown <= 0:
-        return
+    if api.max_tickers_per_request > 0 and len(body.tickers) > api.max_tickers_per_request:
+        raise http_error(
+            status_code=400,
+            error="request_cap_exceeded",
+            message=(
+                f"Too many tickers: {len(body.tickers)} "
+                f"(maximum {api.max_tickers_per_request} per request)."
+            ),
+            hint=f"Submit at most {api.max_tickers_per_request} tickers per request.",
+        )
 
-    now = time.monotonic()
-
-    with _cooldown_lock:
-        # Lazy prune: remove entries older than 2× the cooldown window
-        # to prevent unbounded memory growth from stale IPs.
-        if now - _last_cooldown_prune > _COOLDOWN_PRUNE_INTERVAL:
-            cutoff = now - (cooldown * 2)
-            stale = [ip for ip, ts in _last_ingest.items() if ts < cutoff]
-            for ip in stale:
-                del _last_ingest[ip]
-            _last_cooldown_prune = now
-
-        # Emergency prune: if the map still reaches the configured hard cap,
-        # evict the oldest half before recording the next request.
-        if len(_last_ingest) >= _MAX_COOLDOWN_ENTRIES:
-            oldest_entries = sorted(
-                _last_ingest.items(),
-                key=lambda item: item[1],
-            )
-            prune_count = max(len(oldest_entries) // 2, 1)
-            for ip, _ in oldest_entries[:prune_count]:
-                del _last_ingest[ip]
-            logger.warning(
-                "Cooldown tracker reached %s entries; pruned %s oldest records.",
-                len(oldest_entries),
-                prune_count,
-            )
-
-        last = _last_ingest.get(client_ip)
-        if last is not None:
-            elapsed = now - last
-            if elapsed < cooldown:
-                remaining = int(cooldown - elapsed) + 1
-                raise HTTPException(
-                    status_code=429,
-                    detail={
-                        "error": "cooldown",
-                        "message": (
-                            f"Please wait {remaining}s before submitting another ingest request."
-                        ),
-                        "details": None,
-                        "hint": (f"Ingest cooldown is {cooldown}s between requests."),
-                    },
-                )
-
-        # Record this request timestamp.
-        _last_ingest[client_ip] = now
+    if (
+        api.max_filings_per_request > 0
+        and body.count is not None
+        and body.count > api.max_filings_per_request
+    ):
+        raise http_error(
+            status_code=400,
+            error="request_cap_exceeded",
+            message=(
+                f"Too many filings requested: {body.count} "
+                f"(maximum {api.max_filings_per_request} per request)."
+            ),
+            hint=f"Request at most {api.max_filings_per_request} filings per request.",
+        )
 
 
-# ---------------------------------------------------------------------------
-# Helper
-# ---------------------------------------------------------------------------
+def _create_task(
+    request: Request,
+    body: IngestRequest,
+    manager: TaskManager,
+    identity: EdgarIdentity,
+) -> IngestTaskResponse:
+    """Shared create-path for ``/add`` and ``/batch``.
+
+    Captures the per-request EDGAR identity into a closure held by the
+    manager off ``TaskInfo`` so the dataclass stays free of identity data.
+    """
+    _enforce_request_caps(body)
+
+    # Snapshot the identity into a closure so the resolver returns the
+    # value captured at create time, not whatever the request scope held
+    # when the worker thread eventually fired. ``EdgarIdentity`` is
+    # frozen, so the closure capture is safe.
+    captured_identity = identity
+
+    def _identity_resolver() -> EdgarIdentity:
+        return captured_identity
+
+    session_id = extract_session_id(request)
+
+    try:
+        task_id = manager.create_task(
+            tickers=list(body.tickers),
+            form_types=list(body.form_types),
+            count_mode=body.count_mode,
+            count=body.count,
+            year=body.year,
+            start_date=body.start_date,
+            end_date=body.end_date,
+            session_id=session_id,
+            edgar_identity_resolver=_identity_resolver,
+        )
+    except TaskQueueFullError as exc:
+        details = exc.details
+        raise http_error(
+            status_code=429,
+            error="queue_full",
+            message=str(exc),
+            details=details,
+            hint="Wait for existing tasks to complete before submitting new ones.",
+        ) from exc
+
+    audit_log(
+        "ingest_task_created",
+        detail=(
+            f"client_ip={_client_ip(request)} "
+            f"task_id_tail={mask_secret(task_id)} "
+            f"tickers={list(body.tickers)} "
+            f"form_types={list(body.form_types)} "
+            f"count_mode={body.count_mode}"
+        ),
+    )
+
+    return IngestTaskResponse(
+        task_id=task_id,
+        status="pending",
+        websocket_url=f"/ws/ingest/{task_id}",
+    )
 
 
-def _task_info_to_status(info: TaskInfo) -> TaskStatus:
-    """Convert an internal ``TaskInfo`` dataclass to the API ``TaskStatus`` schema."""
-    return TaskStatus(
+def _task_info_to_schema(info: TaskInfo) -> TaskStatusResponse:
+    """Lift the worker's ``TaskInfo`` to the wire schema.
+
+    ``session_id`` is intentionally not surfaced; the wire schema mirrors
+    the visible-progress fields only.
+    """
+    return TaskStatusResponse(
         task_id=info.task_id,
         status=info.state.value,
-        tickers=info.tickers,
-        form_types=info.form_types,
+        tickers=list(info.tickers),
+        form_types=list(info.form_types),
         progress=TaskProgressSchema(
             current_ticker=info.progress.current_ticker,
             current_form_type=info.progress.current_form_type,
@@ -151,97 +231,41 @@ def _task_info_to_status(info: TaskInfo) -> TaskStatus:
             for r in info.results
         ],
         error=info.error,
-        started_at=info.started_at,
-        completed_at=info.completed_at,
+        started_at=info.started_at.isoformat() if info.started_at else None,
+        completed_at=info.completed_at.isoformat() if info.completed_at else None,
     )
 
 
-def _create_task(
-    body: IngestRequest,
+def _resolve_owned_task(
+    request: Request,
+    task_id: str,
     manager: TaskManager,
-    identity: EdgarIdentity,
-    *,
-    client_ip: str = "unknown",
-) -> TaskResponse:
-    """Shared logic for both add and batch endpoints."""
-    settings = get_settings()
+) -> TaskInfo:
+    """Return the task only when the caller owns it.
 
-    # --- Abuse prevention: request caps --------------------------------
-    max_tickers = settings.api.max_tickers_per_request
-    if max_tickers > 0 and len(body.tickers) > max_tickers:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "request_cap_exceeded",
-                "message": (
-                    f"Too many tickers: {len(body.tickers)} (maximum {max_tickers} per request)."
-                ),
-                "details": None,
-                "hint": f"Submit at most {max_tickers} tickers per request.",
-            },
+    Foreign tasks (different ``session_id``) surface as ``404 not_found``
+    rather than ``403`` so the route never confirms a task's existence
+    to a non-owner. Single-tenant deployments (no session cookie at all)
+    match tasks whose ``session_id`` is also ``None``.
+    """
+    info = manager.get_task(task_id)
+    if info is None:
+        raise http_error(
+            status_code=404,
+            error="not_found",
+            message=f"Task '{task_id}' not found.",
+            hint="The task may have been evicted from memory after completion.",
         )
 
-    max_filings = settings.api.max_filings_per_request
-    if max_filings > 0 and body.count is not None and body.count > max_filings:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "request_cap_exceeded",
-                "message": (
-                    f"Too many filings requested: {body.count} (maximum {max_filings} per request)."
-                ),
-                "details": None,
-                "hint": f"Request at most {max_filings} filings per request.",
-            },
+    caller_session = extract_session_id(request)
+    if info.session_id != caller_session:
+        raise http_error(
+            status_code=404,
+            error="not_found",
+            message=f"Task '{task_id}' not found.",
+            hint="The task may have been evicted from memory after completion.",
         )
-
-    try:
-        task_id = manager.create_task(
-            tickers=body.tickers,
-            form_types=body.form_types,
-            count_mode=body.count_mode,
-            count=body.count,
-            year=body.year,
-            start_date=body.start_date,
-            end_date=body.end_date,
-            edgar_name=identity.name,
-            edgar_email=identity.email,
-        )
-    except TaskQueueFullError as exc:
-        raise HTTPException(
-            status_code=429,
-            detail={
-                "error": "queue_full",
-                "message": str(exc),
-                "details": None,
-                "hint": "Wait for existing tasks to complete before submitting new ones.",
-            },
-        ) from exc
-
-    logger.info(
-        "Ingest task %s created: tickers=%s, forms=%s, mode=%s",
-        task_id[:8],
-        [redact_for_log(t) for t in body.tickers],
-        body.form_types,
-        body.count_mode,
-    )
-
-    audit_log(
-        "ingest_task_created",
-        client_ip=client_ip,
-        endpoint="POST /api/ingest",
-        detail=(
-            f"task_id={task_id[:8]}, "
-            f"tickers={[redact_for_log(t) for t in body.tickers]}, "
-            f"forms={body.form_types}"
-        ),
-    )
-
-    return TaskResponse(
-        task_id=task_id,
-        status="pending",
-        websocket_url=f"/ws/ingest/{task_id}",
-    )
+    return info
 
 
 # ---------------------------------------------------------------------------
@@ -251,9 +275,8 @@ def _create_task(
 
 @router.post(
     "/add",
-    response_model=TaskResponse,
+    response_model=IngestTaskResponse,
     status_code=202,
-    responses={400: {"model": ErrorResponse}},
     summary="Ingest filings for a single ticker",
 )
 async def ingest_add(
@@ -261,155 +284,110 @@ async def ingest_add(
     body: IngestRequest,
     manager: TaskManager = Depends(get_task_manager),
     identity: EdgarIdentity = Depends(get_edgar_identity),
-) -> TaskResponse:
-    """
-    Start an ingestion task for a single ticker symbol.
+) -> IngestTaskResponse:
+    """Start a single-ticker ingestion task.
 
-    The task runs in the background — use the returned ``task_id`` to
-    poll status via ``GET /tasks/{task_id}`` or connect to the WebSocket
-    at the returned ``websocket_url`` for real-time progress.
-
-    Only one ticker is accepted.  For multiple tickers, use
-    ``POST /batch`` instead.
+    The schema accepts ``tickers: list[str]`` (so the body shape is
+    identical to ``/batch``); the handler pins ``len == 1`` so a
+    multi-ticker payload routed to ``/add`` bounces with ``400`` rather
+    than silently consuming all of them.
     """
     if len(body.tickers) != 1:
-        raise HTTPException(
+        raise http_error(
             status_code=400,
-            detail={
-                "error": "validation_error",
-                "message": "The /add endpoint accepts exactly one ticker.",
-                "details": f"Received {len(body.tickers)} tickers: {body.tickers}",
-                "hint": "Use POST /api/ingest/batch for multi-ticker ingestion.",
-            },
+            error="validation_error",
+            message="The /add endpoint accepts exactly one ticker.",
+            details={"received": len(body.tickers)},
+            hint="Use POST /api/ingest/batch for multi-ticker ingestion.",
         )
-
-    client_ip = request.client.host if request.client else "unknown"
-    _check_cooldown(client_ip)
-    return _create_task(body, manager, identity, client_ip=client_ip)
+    return _create_task(request, body, manager, identity)
 
 
 @router.post(
     "/batch",
-    response_model=TaskResponse,
+    response_model=IngestTaskResponse,
     status_code=202,
-    responses={400: {"model": ErrorResponse}},
-    summary="Ingest filings for multiple tickers",
+    summary="Ingest filings for one or more tickers",
 )
 async def ingest_batch(
     request: Request,
     body: IngestRequest,
     manager: TaskManager = Depends(get_task_manager),
     identity: EdgarIdentity = Depends(get_edgar_identity),
-) -> TaskResponse:
-    """
-    Start an ingestion task for one or more ticker symbols.
-
-    Equivalent to ``sec-search ingest batch``.  The task runs in the
-    background; poll status or connect via WebSocket.
-    """
-    client_ip = request.client.host if request.client else "unknown"
-    _check_cooldown(client_ip)
-    return _create_task(body, manager, identity, client_ip=client_ip)
+) -> IngestTaskResponse:
+    """Start a multi-ticker ingestion task."""
+    return _create_task(request, body, manager, identity)
 
 
 @router.get(
     "/tasks",
     response_model=TaskListResponse,
-    summary="List all ingestion tasks",
+    summary="List ingestion tasks owned by the current session",
 )
 async def list_tasks(
+    request: Request,
     manager: TaskManager = Depends(get_task_manager),
 ) -> TaskListResponse:
-    """
-    Return all ingestion tasks, including active, completed, failed,
-    and cancelled tasks that have not yet been pruned (1-hour TTL).
-    """
-    tasks = manager.list_tasks()
-    statuses = [_task_info_to_status(t) for t in tasks]
+    """List the current session's ingestion tasks.
 
+    Cross-session enumeration is intentionally not exposed. Callers with
+    no session cookie see tasks whose ``session_id`` is ``None``.
+    """
+    session_id = extract_session_id(request)
+    tasks = manager.list_tasks_for_session(session_id)
+    statuses = [_task_info_to_schema(t) for t in tasks]
     return TaskListResponse(tasks=statuses, total=len(statuses))
 
 
 @router.get(
     "/tasks/{task_id}",
-    response_model=TaskStatus,
-    responses={404: {"model": ErrorResponse}},
-    summary="Get ingestion task status",
+    response_model=TaskStatusResponse,
+    summary="Get a single task's status",
 )
 async def get_task(
-    task_id: str,
+    request: Request,
+    task_id: str = Path(pattern=_TASK_ID_PATH_PATTERN),
     manager: TaskManager = Depends(get_task_manager),
-) -> TaskStatus:
-    """
-    Return the current status and progress of a specific ingestion task.
-
-    Includes per-filing results as they complete, progress counters,
-    and any error messages.
-    """
-    info = manager.get_task(task_id)
-    if info is None:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error": "not_found",
-                "message": f"Task '{task_id}' not found.",
-                "details": None,
-                "hint": "The task may have been pruned after completion (1-hour TTL).",
-            },
-        )
-
-    return _task_info_to_status(info)
+) -> TaskStatusResponse:
+    """Return the live progress + result set for a task the caller owns."""
+    info = _resolve_owned_task(request, task_id, manager)
+    return _task_info_to_schema(info)
 
 
 @router.delete(
     "/tasks/{task_id}",
-    responses={
-        404: {"model": ErrorResponse},
-        409: {"model": ErrorResponse},
-    },
-    summary="Cancel a running ingestion task",
+    response_model=IngestCancelResponse,
+    summary="Cancel a running task the caller owns",
 )
 async def cancel_task(
     request: Request,
-    task_id: str,
+    task_id: str = Path(pattern=_TASK_ID_PATH_PATTERN),
     manager: TaskManager = Depends(get_task_manager),
-) -> dict[str, str]:
-    """
-    Request cancellation of a running or pending ingestion task.
+) -> IngestCancelResponse:
+    """Cancel a pending or running task.
 
-    Cancellation is cooperative — the worker thread checks the cancel
-    flag between pipeline steps and rolls back any partially stored
-    filings.
+    Returns ``404 not_found`` for tasks the caller does not own, the
+    same shape as a genuinely missing task — that keeps the route from
+    confirming the existence of someone else's work. Already-terminal
+    tasks surface as ``409 conflict`` so the UI can distinguish "you
+    were too late" from "it never existed".
     """
-    info = manager.get_task(task_id)
-    if info is None:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error": "not_found",
-                "message": f"Task '{task_id}' not found.",
-                "details": None,
-                "hint": "The task may have been pruned after completion (1-hour TTL).",
-            },
-        )
-
+    info = _resolve_owned_task(request, task_id, manager)
     cancelled = manager.cancel_task(task_id)
     if not cancelled:
-        raise HTTPException(
+        raise http_error(
             status_code=409,
-            detail={
-                "error": "conflict",
-                "message": f"Task '{task_id}' has already finished ({info.state.value}).",
-                "details": None,
-                "hint": "Only pending or running tasks can be cancelled.",
-            },
+            error="conflict",
+            message=f"Task '{task_id}' has already finished ({info.state.value}).",
+            hint="Only pending or running tasks can be cancelled.",
         )
 
-    client_ip = request.client.host if request.client else "unknown"
     audit_log(
-        "cancel_task",
-        client_ip=client_ip,
-        endpoint=f"DELETE /api/ingest/tasks/{task_id[:8]}",
-        detail=f"task_id={task_id}",
+        "ingest_task_cancelled",
+        detail=(
+            f"client_ip={_client_ip(request)} "
+            f"task_id_tail={mask_secret(task_id)} "
+            f"state_before={info.state.value}"
+        ),
     )
-    return {"task_id": task_id, "status": "cancelling"}
+    return IngestCancelResponse(task_id=task_id, status="cancelling")

@@ -31,6 +31,10 @@ __all__ = [
     "FilingListResponse",
     "FilingSchema",
     "HealthResponse",
+    "IngestCancelResponse",
+    "IngestRequest",
+    "IngestResultSchema",
+    "IngestTaskResponse",
     "ProviderValidateRequest",
     "ProviderValidateResponse",
     "QueryPlanSchema",
@@ -44,6 +48,9 @@ __all__ = [
     "SessionLogoutResponse",
     "SessionResponse",
     "StatusResponse",
+    "TaskListResponse",
+    "TaskProgressSchema",
+    "TaskStatusResponse",
     "TokenUsageSchema",
 ]
 
@@ -729,4 +736,222 @@ class RagQueryResponse(_BaseModel):
             "True when the orchestrator short-circuited the LLM call "
             "because retrieval returned no chunks."
         ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Ingestion (POST /api/ingest/*) schemas
+# ---------------------------------------------------------------------------
+
+
+# The work-list builder in ``TaskManager._build_work_list`` interprets
+# three count modes; pinning the enum at the schema boundary surfaces an
+# unknown value as 422 before the worker thread starts.
+_COUNT_MODE_PATTERN = r"^(latest|per_form|total)$"
+
+
+class IngestRequest(_BaseModel):
+    """Body for ``POST /api/ingest/{add,batch}``.
+
+    The route uses the *same* request shape for both endpoints — the
+    ``/add`` route additionally enforces a single-ticker invariant at the
+    handler so a future schema change cannot accidentally relax it. List
+    bounds defend the worker thread before any EDGAR network call.
+
+    ``year`` / ``start_date`` / ``end_date`` are SEC filter knobs passed
+    through to ``FilingFetcher.list_available`` verbatim; the ISO date
+    pattern is the cheap syntactic gate (the fetcher revalidates with
+    ``date.fromisoformat``).
+    """
+
+    tickers: list[str] = Field(
+        min_length=1,
+        max_length=50,
+        description="Ticker symbols to ingest. Length-bounded so a payload cannot OOM the worker.",
+    )
+    form_types: list[str] = Field(
+        min_length=1,
+        max_length=20,
+        description="SEC form types (e.g. '10-K', '10-Q/A'). At least one required.",
+    )
+    count_mode: str = Field(
+        default="latest",
+        pattern=_COUNT_MODE_PATTERN,
+        description=(
+            "How to interpret ``count``: 'latest' (filter-aware default), "
+            "'per_form' (count per (ticker, form_type)), or 'total' "
+            "(count across forms per ticker)."
+        ),
+    )
+    count: int | None = Field(
+        default=None,
+        ge=1,
+        le=500,
+        description=(
+            "Maximum filings per (ticker, form_type) pair (or total per "
+            "ticker in 'total' mode). Bounded at 500 to keep a single "
+            "request from monopolising the GPU semaphore."
+        ),
+    )
+    year: int | None = Field(
+        default=None,
+        ge=1990,
+        le=2100,
+        description="Filter by filing year. Mutually compatible with date-range filters.",
+    )
+    start_date: str | None = Field(
+        default=None,
+        pattern=_ISO_DATE_PATTERN,
+        description="Inclusive lower bound, YYYY-MM-DD.",
+    )
+    end_date: str | None = Field(
+        default=None,
+        pattern=_ISO_DATE_PATTERN,
+        description="Inclusive upper bound, YYYY-MM-DD.",
+    )
+
+    @field_validator("tickers")
+    @classmethod
+    def _validate_tickers(cls, value: list[str]) -> list[str]:
+        pattern = re.compile(_TICKER_PATTERN)
+        # Upper-case at the schema boundary so the registry and fetcher
+        # never see a mixed-case symbol; deduplicate preserving order to
+        # avoid a needlessly fat work-list when the caller submitted
+        # duplicates.
+        seen: set[str] = set()
+        unique: list[str] = []
+        for ticker in value:
+            upper = ticker.strip().upper()
+            if not pattern.fullmatch(upper):
+                raise ValueError(
+                    f"Invalid ticker symbol: {ticker!r}. Expected [A-Z][A-Z0-9.-]{{0,15}}."
+                )
+            if upper not in seen:
+                seen.add(upper)
+                unique.append(upper)
+        return unique
+
+    @field_validator("form_types")
+    @classmethod
+    def _validate_form_types(cls, value: list[str]) -> list[str]:
+        pattern = re.compile(_FORM_TYPE_PATTERN)
+        seen: set[str] = set()
+        unique: list[str] = []
+        for form in value:
+            upper = form.strip().upper()
+            if not pattern.fullmatch(upper):
+                raise ValueError(
+                    f"Invalid form type: {form!r}. "
+                    "Expected upper-case slug like '10-K' or '10-K/A'."
+                )
+            if upper not in seen:
+                seen.add(upper)
+                unique.append(upper)
+        return unique
+
+
+class IngestTaskResponse(_BaseModel):
+    """Result of ``POST /api/ingest/{add,batch}``.
+
+    Returns the opaque ``task_id`` (a 32-char hex uuid) plus a hint at
+    where to poll progress.  The WebSocket URL is documented here so the
+    UI does not need to hard-code the path shape; the route is gated on
+    the *same* session/ownership checks as the polling surface.
+    """
+
+    task_id: str
+    status: str = Field(
+        description="Initial state ('pending'); transitions are observed via polling or WebSocket.",
+    )
+    websocket_url: str = Field(
+        description="Relative URL of the per-task progress WebSocket.",
+    )
+
+
+class IngestResultSchema(_BaseModel):
+    """Per-filing outcome echoed back to the caller.
+
+    Mirrors :class:`sec_generative_search.api.tasks.FilingResult` minus
+    the worker-internal serialisation helpers.  Every field is public SEC
+    metadata (Tier 1) — no PII or credential ever lands here.
+    """
+
+    ticker: str
+    form_type: str
+    filing_date: str
+    accession_number: str
+    segment_count: int = Field(ge=0)
+    chunk_count: int = Field(ge=0)
+    duration_seconds: float = Field(ge=0.0)
+
+
+class TaskProgressSchema(_BaseModel):
+    """Mutable progress snapshot exposed by the polling surface.
+
+    Mirrors :class:`sec_generative_search.api.tasks.TaskProgress`; the
+    fields are individually scalar so a partial update on the worker side
+    does not need any cross-field coordination at the schema layer.
+    """
+
+    current_ticker: str | None = None
+    current_form_type: str | None = None
+    step_label: str = ""
+    step_index: int = 0
+    step_total: int = 5
+    filings_done: int = 0
+    filings_total: int = 0
+    filings_skipped: int = 0
+    filings_failed: int = 0
+
+
+class TaskStatusResponse(_BaseModel):
+    """Result of ``GET /api/ingest/tasks/{task_id}``.
+
+    Carries everything a polling client needs to render the live progress
+    surface.  The fields mirror :class:`TaskInfo` minus the ownership
+    (`session_id`) and the worker-internal fields (`cancel_event`,
+    `_stored_accessions`, `_duration_timer`, `_message_queue`); the
+    session id is intentionally not echoed back because exposing it would
+    let a same-origin script read the cookie indirectly through the
+    polling response body.
+    """
+
+    task_id: str
+    status: str
+    tickers: list[str]
+    form_types: list[str]
+    progress: TaskProgressSchema
+    results: list[IngestResultSchema]
+    error: str | None
+    started_at: str | None
+    completed_at: str | None
+
+
+class TaskListResponse(_BaseModel):
+    """Result of ``GET /api/ingest/tasks``.
+
+    Carries the *session-scoped* task list — the route filters by the
+    server-minted cookie before lifting to this schema. ``total`` is the
+    count of returned rows; there is no cross-session aggregate exposed
+    on this surface.
+    """
+
+    tasks: list[TaskStatusResponse]
+    total: int
+
+
+class IngestCancelResponse(_BaseModel):
+    """Result of ``DELETE /api/ingest/tasks/{task_id}``.
+
+    Cancellation is cooperative — the worker observes ``cancel_event``
+    between pipeline steps. The route returns immediately on signal
+    delivery; ``status='cancelling'`` distinguishes the in-flight transit
+    from the terminal ``cancelled`` state surfaced by the polling
+    response.
+    """
+
+    task_id: str
+    status: str = Field(
+        default="cancelling",
+        description="Always 'cancelling'; the terminal state is observable via polling.",
     )

@@ -1,14 +1,14 @@
-"""Background task manager for the ingestion pipeline (Phase 11.1).
+"""Background task manager for the ingestion pipeline.
 
-The legacy `sec_semantic_search.api.tasks` shipped a stand-alone in-memory
-task runner that wrote to `ChromaDBClient` and `MetadataRegistry`
-directly. This module is the Phase-11 rewrite against the current package
-surfaces, with three load-bearing differences.
+The earlier task runner shipped as a stand-alone in-memory module that
+wrote to `ChromaDBClient` and `MetadataRegistry` directly. This module
+is the rewrite against the current package surfaces, with three
+load-bearing differences.
 
 1. **All dual-store writes go through :class:`FilingStore`.** ChromaDB-first
-   ordering, best-effort rollbacks, and the atomic ``register_if_new=True``
-   path are the contract on that single seam (AGENT.md §Storage). The
-   worker never calls ``self._chroma.store_filing`` /
+    ordering, best-effort rollbacks, and the atomic ``register_if_new=True``
+    path are the contract on that single seam. The worker never calls
+    ``self._chroma.store_filing`` /
    ``registry.register_filing_if_new`` /
    ``self._chroma.delete_filing`` / ``registry.remove_filing`` directly
    — those routes are bug magnets for orphan ChromaDB chunks because
@@ -37,11 +37,11 @@ surfaces, with three load-bearing differences.
    Terminal-state transitions persist the row to ``task_history``
    immediately, and lazy eviction sweeps memory on every
    :meth:`create_task` / :meth:`get_task` / :meth:`list_tasks` call.
-   Mirrors the in-memory credential / EDGAR identity stores and the
-   embedding-provider idle unload — every other in-memory store in
-   this codebase uses caller-driven eviction; one stray background
-   timer makes interpreter shutdown ordering noisy and offers no
-   measurable win.
+    Mirrors the in-memory credential / EDGAR identity stores and the
+    embedding-provider idle unload — every other in-memory store in
+    this codebase uses caller-driven eviction; one stray background
+    timer makes interpreter shutdown ordering noisy and offers no
+    measurable win.
 
 The module intentionally does **not** ship the API routes / WebSocket /
 cooldown plumbing. This file is the worker substrate they wire onto.
