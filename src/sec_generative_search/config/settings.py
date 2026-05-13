@@ -137,10 +137,19 @@ class EmbeddingSettings(BaseSettings):
 
 
 class ChunkingSettings(BaseSettings):
-    """Text chunking configuration."""
+    """Text chunking configuration.
 
-    token_limit: int = 500
-    tolerance: int = 50
+    ``token_limit`` is the target chunk size; ``tolerance`` is the
+    bidirectional (``±``) band around that target inside which the
+    chunker is free to cut at a sentence boundary.  Concretely, chunks
+    are expected to land in ``[token_limit - tolerance,
+    token_limit + tolerance]`` whenever the sentence structure permits;
+    the active-centring cut in :class:`TextChunker` prefers boundaries
+    near ``token_limit`` rather than dragging on to the upper edge.
+    """
+
+    token_limit: int = 1000
+    tolerance: int = 150
 
     model_config = SettingsConfigDict(env_prefix="CHUNKING_")
 
@@ -462,7 +471,12 @@ class RAGSettings(BaseSettings):
     citation_mode: str = "inline"  # "inline" or "footnote"
     default_answer_mode: str = "concise"  # "concise", "analytical", "extractive", "comparative"
     refusal_enabled: bool = True  # refuse when context is insufficient
-    chunk_overlap_tokens: int = 50  # overlap between adjacent chunks for context continuity
+    # Sentence-level overlap between adjacent chunks (≈ 15 % of the
+    # 1000-token default chunk size).  Carries the last whole sentence
+    # of the previous chunk into the next so referent words like
+    # "the Company" / "such filing" survive embedding boundaries.  See
+    # :meth:`TextChunker._tail_for_overlap` for the boundary policy.
+    chunk_overlap_tokens: int = 150
     chat_history_enabled: bool = False  # session-scoped conversation memory (off by default)
     chat_history_max_turns: int = 10  # max turns retained in session memory
 

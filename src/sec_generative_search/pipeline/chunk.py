@@ -34,12 +34,19 @@ class TextChunker:
     that text is split at natural boundaries rather than mid-sentence.
 
     The chunking algorithm:
-        1. If segment fits within token limit, keep as-is
-        2. Otherwise, split on sentence boundaries (. ! ?)
-        3. Accumulate sentences until adding another would exceed limit
-        4. Tolerance band allows slight overrun to avoid tiny final chunks
-          5. Optional sentence-level overlap carries the tail of the
-              previous chunk into the next one for context continuity
+        1. If segment fits within ``token_limit``, keep as-is.
+        2. Otherwise, split on sentence boundaries (``. ! ?``).
+        3. Accumulate sentences and finalise the chunk at the sentence
+           boundary nearest to ``token_limit`` inside the bidirectional
+           ``± tolerance`` band — i.e. once the running total is at or
+           above ``token_limit - tolerance``, the next sentence whose
+           inclusion would push past ``token_limit`` is the cut point.
+        4. The hard upper bound is ``token_limit + tolerance``: a chunk
+           never overshoots it (the only exception is a single-sentence
+           chunk that is itself larger than the upper bound — sentences
+           are never mid-split).
+        5. Optional sentence-level overlap carries the tail of the
+           previous chunk into the next one for context continuity.
 
     Table segments (``ContentType.TABLE``) are never split — table
     structure is preserved as a single chunk even when the token count
@@ -47,8 +54,10 @@ class TextChunker:
     otherwise corrupt row alignment.
 
     Attributes:
-        token_limit: Maximum tokens per chunk (from settings).
-        tolerance: Acceptable overrun tolerance (from settings).
+        token_limit: Target tokens per chunk (from settings).
+        tolerance: Bidirectional ``±`` band around ``token_limit``
+            inside which the chunker may finalise a chunk on a sentence
+            boundary (from settings).
         overlap_tokens: Target number of tokens of trailing context
             carried from one chunk into the next.  Zero disables
             overlap (from :class:`RAGSettings.chunk_overlap_tokens`).
@@ -120,11 +129,20 @@ class TextChunker:
         """
         Split text into chunks respecting sentence boundaries.
 
+        Active-centring cut: once the running total reaches the lower
+        edge of the ``±tolerance`` band (``token_limit - tolerance``),
+        the chunk is finalised at the next sentence boundary whose
+        inclusion would push past ``token_limit``.  This keeps chunks
+        clustered around the target size rather than skewed toward the
+        upper edge of the band.  The upper bound
+        ``token_limit + tolerance`` remains a hard cap and forces a cut
+        even before the lower edge is reached when the next sentence is
+        unusually large.
+
         When ``overlap_tokens > 0``, the trailing sentences of a
-        finalised chunk (up to the overlap target) are retained as the
-        seed of the next chunk — this preserves context across
-        embedding boundaries without requiring the caller to
-        reassemble the filing.
+        finalised chunk (per :meth:`_tail_for_overlap`) are retained as
+        the seed of the next chunk so referent words like ``"the
+        Company"`` / ``"such filing"`` survive embedding boundaries.
 
         Args:
             text: Text content to split.
@@ -148,13 +166,20 @@ class TextChunker:
         current_tokens = 0
 
         for sentence, sentence_tokens in zip(sentences, sentence_token_counts, strict=True):
-            # Check if adding this sentence would exceed limit + tolerance.
-            # If so, finalise current chunk (unless it's empty) and seed
-            # the next chunk with the trailing overlap sentences.
-            if (
-                current_tokens + sentence_tokens > self.token_limit + self.tolerance
-                and current_sentences
-            ):
+            next_total = current_tokens + sentence_tokens
+            should_finalise = bool(current_sentences) and (
+                # Hard upper bound — must cut, otherwise the chunk overshoots.
+                next_total > self.token_limit + self.tolerance
+                # Active-centring: we are already inside the ± band and
+                # adding this sentence would push past the target.  Cut
+                # at the current boundary so the chunk lands near
+                # ``token_limit`` rather than drifting toward the upper edge.
+                or (
+                    current_tokens >= self.token_limit - self.tolerance
+                    and next_total > self.token_limit
+                )
+            )
+            if should_finalise:
                 chunks.append((" ".join(current_sentences), current_tokens))
                 if self.overlap_tokens > 0:
                     current_sentences, current_token_counts = self._tail_for_overlap(
@@ -181,23 +206,53 @@ class TextChunker:
         sentences: list[str],
         token_counts: list[int],
     ) -> tuple[list[str], list[int]]:
-        """Return the trailing sentences whose total tokens ≤ ``overlap_tokens``.
+        """Return the trailing sentences carried into the next chunk.
 
-        Walks backward from the end of the just-finalised chunk,
-        collecting whole sentences until the next sentence would push
-        the running total over :attr:`overlap_tokens`.  Returning whole
-        sentences (rather than an arbitrary word slice) keeps the
-        carried-over context grammatically well-formed.
+        Strategy B (soft upper bound, strict stop):
+
+        1. **Always carry the last whole sentence**, even when it alone
+           exceeds :attr:`overlap_tokens`.  Dropping the only sentence
+           that survived a finalisation creates a silent context gap at
+           exactly the wrong place — long sentences are usually the
+           most information-dense in SEC filings.  The bloat is bounded
+           by the chunker's own ``token_limit + tolerance`` band, so no
+           other invariant breaks.
+
+           The one absolute floor is forward progress: if the last
+           sentence is itself ``≥ token_limit`` the next chunk would
+           never accept further content (the band-check in
+           :meth:`_chunk_text` would immediately re-finalise).  In that
+           pathological case overlap is dropped entirely.
+
+        2. **Otherwise**, walk backward over the preceding sentences and
+           keep adding while ``running_total + next_count ≤
+           overlap_tokens``.  Stop *before* the first overflow — there
+           is no soft margin on prior sentences.
         """
-        tail: list[str] = []
-        tail_counts: list[int] = []
-        running = 0
-        for sentence, count in zip(reversed(sentences), reversed(token_counts), strict=True):
-            # Skip pathological sentences that would single-handedly exceed
-            # the overlap budget — including them would bloat the next
-            # chunk and risk exceeding the hard token limit.
-            if count > self.overlap_tokens:
-                break
+        if not sentences:
+            return [], []
+
+        # Rule 1: the trailing sentence is mandatory unless it would
+        # itself prevent forward progress on the next chunk.
+        last_count = token_counts[-1]
+        if last_count >= self.token_limit:
+            return [], []
+
+        tail: list[str] = [sentences[-1]]
+        tail_counts: list[int] = [last_count]
+        running = last_count
+
+        if running >= self.overlap_tokens:
+            # Last sentence already meets or exceeds the budget; do not
+            # walk further backwards — would only bloat the seed.
+            return tail, tail_counts
+
+        # Rule 2: strict stop-before-overflow on prior sentences.
+        for sentence, count in zip(
+            reversed(sentences[:-1]),
+            reversed(token_counts[:-1]),
+            strict=True,
+        ):
             if running + count > self.overlap_tokens:
                 break
             tail.append(sentence)

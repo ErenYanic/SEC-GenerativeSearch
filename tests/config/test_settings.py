@@ -90,7 +90,7 @@ class TestRAGSettings:
         assert s.citation_mode == "inline"
         assert s.default_answer_mode == "concise"
         assert s.refusal_enabled is True
-        assert s.chunk_overlap_tokens == 50
+        assert s.chunk_overlap_tokens == 150
         # Chat history MUST default to off by default.
         assert s.chat_history_enabled is False
         assert s.chat_history_max_turns == 10
