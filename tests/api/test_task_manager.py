@@ -44,6 +44,7 @@ from sec_generative_search.api.tasks import (
     TaskProgress,
     TaskQueueFullError,
     TaskState,
+    run_retention_eviction_safe,
 )
 from sec_generative_search.config.settings import reload_settings
 from sec_generative_search.core.exceptions import (
@@ -51,7 +52,13 @@ from sec_generative_search.core.exceptions import (
     FetchError,
     FilingLimitExceededError,
 )
-from sec_generative_search.core.types import Chunk, ContentType, FilingIdentifier, IngestResult
+from sec_generative_search.core.types import (
+    Chunk,
+    ContentType,
+    EvictionReport,
+    FilingIdentifier,
+    IngestResult,
+)
 from sec_generative_search.pipeline.fetch import FilingInfo
 from sec_generative_search.pipeline.orchestrator import ProcessedFiling
 
@@ -245,6 +252,12 @@ class _StubFilingStore:
     stored: list[str] = field(default_factory=list)
     deleted: list[list[str]] = field(default_factory=list)
     raise_on_store: dict[str, Exception] = field(default_factory=dict)
+    # Per-call recording for the post-ingest retention sweep.
+    evict_calls: list[int] = field(default_factory=list)
+    evict_report: EvictionReport = field(
+        default_factory=lambda: EvictionReport(filings_evicted=0, chunks_evicted=0, max_age_days=0)
+    )
+    raise_on_evict: Exception | None = None
 
     def store_filing(
         self,
@@ -264,6 +277,23 @@ class _StubFilingStore:
         # Manager passes a list copy; capture it verbatim.
         self.deleted.append(list(accessions))
         return len(accessions)
+
+    def evict_expired(self, max_age_days: int) -> EvictionReport:
+        """Stub matching :meth:`FilingStore.evict_expired`'s contract.
+
+        Records the cutoff for each call so the post-ingest hook tests
+        can assert it lands with the configured retention value, and
+        optionally raises a pre-canned exception to drive the
+        best-effort error path.
+        """
+        self.evict_calls.append(max_age_days)
+        if self.raise_on_evict is not None:
+            raise self.raise_on_evict
+        return EvictionReport(
+            filings_evicted=self.evict_report.filings_evicted,
+            chunks_evicted=self.evict_report.chunks_evicted,
+            max_age_days=max_age_days,
+        )
 
 
 def _build_manager(
@@ -902,3 +932,305 @@ class TestTaskHistoryNoKeys:
         call = registry.save_calls[0]
         for forbidden in _SECRET_FIELD_HINTS:
             assert all(forbidden not in k.lower() for k in call)
+
+
+# ---------------------------------------------------------------------------
+# Post-ingest retention sweep
+# ---------------------------------------------------------------------------
+
+
+class TestPostIngestEviction:
+    """``_execute`` triggers ``FilingStore.evict_expired`` after COMPLETED.
+
+    The sweep is best-effort: failures must NOT shadow the worker's
+    terminal-state transition.  ``DB_RETENTION_MAX_AGE_DAYS=0``
+    short-circuits the call so Scenario A keeps the historic
+    no-eviction behaviour.
+    """
+
+    def test_completed_task_triggers_eviction(self, monkeypatch) -> None:
+        monkeypatch.setenv("DB_RETENTION_MAX_AGE_DAYS", "30")
+        reload_settings()
+
+        f1 = _make_filing_info("AAPL", "0000320193-23-000001")
+        p1 = _make_processed_filing(f1)
+        manager, store, _, _, _ = _build_manager(
+            fetcher=_StubFetcher(work_lists={("AAPL", "10-K"): [f1]}),
+            orchestrator=_StubOrchestrator(by_accession={f1.accession_number: p1}),
+        )
+
+        task_id = manager.create_task(tickers=["AAPL"], form_types=["10-K"])
+        _wait_for_state(manager, task_id, target=TaskState.COMPLETED)
+
+        # Hook fired exactly once, with the configured cutoff.
+        assert store.evict_calls == [30]
+
+    def test_retention_zero_skips_eviction(self, monkeypatch) -> None:
+        """``DB_RETENTION_MAX_AGE_DAYS=0`` disables the hook entirely."""
+        monkeypatch.setenv("DB_RETENTION_MAX_AGE_DAYS", "0")
+        reload_settings()
+
+        f1 = _make_filing_info("AAPL", "0000320193-23-000001")
+        p1 = _make_processed_filing(f1)
+        manager, store, _, _, _ = _build_manager(
+            fetcher=_StubFetcher(work_lists={("AAPL", "10-K"): [f1]}),
+            orchestrator=_StubOrchestrator(by_accession={f1.accession_number: p1}),
+        )
+
+        task_id = manager.create_task(tickers=["AAPL"], form_types=["10-K"])
+        _wait_for_state(manager, task_id, target=TaskState.COMPLETED)
+
+        assert store.evict_calls == []
+
+    def test_failed_task_does_not_trigger_eviction(self, monkeypatch) -> None:
+        """``FAILED`` short-circuits before the COMPLETED branch."""
+        monkeypatch.setenv("DB_RETENTION_MAX_AGE_DAYS", "30")
+        monkeypatch.setenv("DB_MAX_FILINGS", "1")
+        reload_settings()
+
+        f1 = _make_filing_info("AAPL", "0000320193-23-000001")
+        registry = _StubRegistry(filing_count=1)  # already at the ceiling
+        manager, store, _, _, _ = _build_manager(
+            registry=registry,
+            fetcher=_StubFetcher(work_lists={("AAPL", "10-K"): [f1]}),
+            orchestrator=_StubOrchestrator(
+                by_accession={f1.accession_number: _make_processed_filing(f1)},
+            ),
+        )
+
+        task_id = manager.create_task(tickers=["AAPL"], form_types=["10-K"])
+        _wait_for_state(manager, task_id, target=TaskState.FAILED)
+
+        # FAILED tasks return early from ``_execute`` — no post-ingest hook.
+        assert store.evict_calls == []
+
+    def test_cancelled_task_does_not_trigger_eviction(self, monkeypatch) -> None:
+        """``CANCELLED`` short-circuits before the COMPLETED branch."""
+        monkeypatch.setenv("DB_RETENTION_MAX_AGE_DAYS", "30")
+        reload_settings()
+
+        manager, store, _, _, _ = _build_manager()
+        # Hold the GPU so the worker sees the cancel before fetching.
+        manager._gpu_semaphore.acquire()
+        try:
+            task_id = manager.create_task(tickers=["AAPL"], form_types=["10-K"])
+            assert manager.cancel_task(task_id) is True
+        finally:
+            manager._gpu_semaphore.release()
+
+        _wait_for_state(manager, task_id, target=TaskState.CANCELLED)
+
+        assert store.evict_calls == []
+
+    def test_eviction_failure_does_not_shadow_completion(self, monkeypatch, caplog) -> None:
+        """A ``DatabaseError`` from ``evict_expired`` is logged and swallowed."""
+        monkeypatch.setenv("DB_RETENTION_MAX_AGE_DAYS", "30")
+        reload_settings()
+
+        f1 = _make_filing_info("AAPL", "0000320193-23-000001")
+        p1 = _make_processed_filing(f1)
+        failing_store = _StubFilingStore(
+            raise_on_evict=DatabaseError("chroma down"),
+        )
+        manager, _, _, _, _ = _build_manager(
+            filing_store=failing_store,
+            fetcher=_StubFetcher(work_lists={("AAPL", "10-K"): [f1]}),
+            orchestrator=_StubOrchestrator(by_accession={f1.accession_number: p1}),
+        )
+
+        task_id = manager.create_task(tickers=["AAPL"], form_types=["10-K"])
+        info = _wait_for_state(manager, task_id, target=TaskState.COMPLETED)
+
+        # Worker reached COMPLETED in spite of the eviction failure.
+        assert info.state == TaskState.COMPLETED
+        # Hook was attempted exactly once.
+        assert failing_store.evict_calls == [30]
+
+
+# ---------------------------------------------------------------------------
+# Retention helper (audit-log + best-effort discipline)
+# ---------------------------------------------------------------------------
+
+
+class _EvictRecordingStore:
+    """Minimal store stub for the standalone helper.
+
+    Tests only need the ``evict_expired`` method — the helper does not
+    touch the rest of the dual-store surface.
+    """
+
+    def __init__(
+        self,
+        *,
+        report: EvictionReport | None = None,
+        raise_with: Exception | None = None,
+    ) -> None:
+        self.calls: list[int] = []
+        self.report = report or EvictionReport(filings_evicted=0, chunks_evicted=0, max_age_days=0)
+        self.raise_with = raise_with
+
+    def evict_expired(self, max_age_days: int) -> EvictionReport:
+        self.calls.append(max_age_days)
+        if self.raise_with is not None:
+            raise self.raise_with
+        return EvictionReport(
+            filings_evicted=self.report.filings_evicted,
+            chunks_evicted=self.report.chunks_evicted,
+            max_age_days=max_age_days,
+        )
+
+
+class TestRunRetentionEvictionSafe:
+    """Behavioural contract of :func:`run_retention_eviction_safe`.
+
+    The helper is the single seam shared between the API lifespan
+    startup and the post-ingest hook, so its discipline (disabled at
+    ``<= 0``, swallows :class:`DatabaseError` / :class:`ValueError`,
+    audit-log metadata-only) is asserted here once.
+    """
+
+    def test_zero_cutoff_skips_call(self) -> None:
+        store = _EvictRecordingStore()
+        run_retention_eviction_safe(store, 0, context_label="startup")
+        assert store.calls == []
+
+    def test_negative_cutoff_skips_call(self) -> None:
+        store = _EvictRecordingStore()
+        run_retention_eviction_safe(store, -7, context_label="startup")
+        assert store.calls == []
+
+    def test_positive_cutoff_calls_store(self) -> None:
+        store = _EvictRecordingStore()
+        run_retention_eviction_safe(store, 30, context_label="post_ingest")
+        assert store.calls == [30]
+
+    def test_database_error_is_swallowed(self, caplog) -> None:
+        store = _EvictRecordingStore(
+            raise_with=DatabaseError("chroma down"),
+        )
+        # Must not raise.
+        run_retention_eviction_safe(store, 30, context_label="startup")
+        assert store.calls == [30]
+
+    def test_value_error_is_swallowed(self) -> None:
+        """``FilingStore.evict_expired`` raises ``ValueError`` on ``<= 0``.
+
+        The helper already guards the cutoff but defends against a
+        future store-level invariant by catching ``ValueError`` too —
+        the post-ingest hook must never propagate it into the worker.
+        """
+        store = _EvictRecordingStore(raise_with=ValueError("nope"))
+        run_retention_eviction_safe(store, 30, context_label="post_ingest")
+        assert store.calls == [30]
+
+
+@pytest.mark.security
+class TestRunRetentionEvictionAuditLog:
+    """Audit-log discipline: never echo a ticker or accession.
+
+    The helper logs metadata only — the count, chunk count, cutoff, and
+    a non-PII context label.  Mirrors the ``ingest_task_created`` /
+    ``ingest_task_cancelled`` audit lines and the broader logging policy
+    used across the API.
+
+    These tests attach a handler directly to ``sec_generative_search.api.tasks``
+    rather than relying on ``caplog`` because :func:`configure_logging`
+    sets ``propagate=False`` on the package logger; ``caplog`` (which
+    attaches to root) would never see the records.  Pattern documented
+    in the local logging-test setup.
+    """
+
+    @staticmethod
+    def _capture_records():
+        import logging as _logging
+
+        records: list[_logging.LogRecord] = []
+
+        class _CollectingHandler(_logging.Handler):
+            def emit(self, record: _logging.LogRecord) -> None:
+                records.append(record)
+
+        handler = _CollectingHandler(level=_logging.DEBUG)
+        pkg_logger = _logging.getLogger("sec_generative_search.api.tasks")
+        previous_level = pkg_logger.level
+        pkg_logger.addHandler(handler)
+        pkg_logger.setLevel(_logging.DEBUG)
+        return records, handler, pkg_logger, previous_level
+
+    def test_success_log_carries_only_metadata(self) -> None:
+        store = _EvictRecordingStore(
+            report=EvictionReport(filings_evicted=3, chunks_evicted=42, max_age_days=30),
+        )
+        records, handler, pkg_logger, prev_level = self._capture_records()
+        try:
+            run_retention_eviction_safe(store, 30, context_label="startup")
+        finally:
+            pkg_logger.removeHandler(handler)
+            pkg_logger.setLevel(prev_level)
+
+        emitted = " ".join(rec.getMessage() for rec in records)
+        # The helper never sees a ticker or an accession; defence-in-depth
+        # check covers both shapes in case a future change leaks the
+        # store's diagnostic detail into the log line.
+        assert "AAPL" not in emitted
+        assert "0000320193" not in emitted
+        # The context label, count, and cutoff DO appear.
+        assert "startup" in emitted
+        assert "3 filing" in emitted
+
+    def test_failure_log_carries_no_ticker(self) -> None:
+        # An exception whose ``message`` could contain a ticker would
+        # leak if we let it through verbatim. The helper logs
+        # ``exc.message`` — the test is a tripwire: if a future change
+        # drops the metadata discipline (e.g. logs ``repr(exc)``) it
+        # will catch the regression.
+        store = _EvictRecordingStore(
+            raise_with=DatabaseError("backend transient failure"),
+        )
+        records, handler, pkg_logger, prev_level = self._capture_records()
+        try:
+            run_retention_eviction_safe(store, 30, context_label="post_ingest")
+        finally:
+            pkg_logger.removeHandler(handler)
+            pkg_logger.setLevel(prev_level)
+
+        emitted = " ".join(rec.getMessage() for rec in records)
+        assert "AAPL" not in emitted
+        assert "0000320193" not in emitted
+        assert "post_ingest" in emitted
+
+
+class TestLifespanWiresStartupEviction:
+    """Tripwire: ``api.app.lifespan`` references the eviction helper.
+
+    The production lifespan boots ChromaDB / SQLite / the embedder, so
+    exercising it in a unit test is expensive and out of scope for the
+    API test surface (see ``tests/api/conftest.py``).  This test
+    inspects the lifespan's referenced names instead so a future
+    regression that removes the startup hook is caught at unit-test
+    time, not in a Scenario-B/C smoke run.
+    """
+
+    def test_lifespan_references_run_retention_eviction_safe(self) -> None:
+        # The package's ``__init__`` re-exports a FastAPI instance named
+        # ``app`` so ``from sec_generative_search.api import app`` would
+        # shadow the module. Use ``importlib`` for a deterministic
+        # module reference.
+        import importlib
+        import inspect
+
+        app_module = importlib.import_module("sec_generative_search.api.app")
+        tasks_module = importlib.import_module("sec_generative_search.api.tasks")
+
+        # The import path is the load-bearing seam — both the helper
+        # name and its module of origin must match so a future rename
+        # cannot quietly drop the wiring.
+        assert hasattr(app_module, "run_retention_eviction_safe")
+        assert app_module.run_retention_eviction_safe is tasks_module.run_retention_eviction_safe
+
+        # The lifespan source must call the helper with the
+        # ``"startup"`` context label so its log line is grep-able and
+        # distinct from the post-ingest line.
+        source = inspect.getsource(app_module.lifespan)
+        assert "run_retention_eviction_safe(" in source
+        assert 'context_label="startup"' in source

@@ -50,7 +50,7 @@ from sec_generative_search.api.routes.rag import router as rag_router
 from sec_generative_search.api.routes.search import router as search_router
 from sec_generative_search.api.routes.session import router as session_router
 from sec_generative_search.api.routes.status import router as status_router
-from sec_generative_search.api.tasks import TaskManager
+from sec_generative_search.api.tasks import TaskManager, run_retention_eviction_safe
 from sec_generative_search.config.settings import get_settings
 from sec_generative_search.core.credentials import InMemorySessionCredentialStore
 from sec_generative_search.core.edgar_identity import InMemorySessionEdgarIdentityStore
@@ -181,6 +181,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         stamp.model,
         stamp.dimension,
         "yes" if encrypted_store is not None else "no",
+    )
+
+    # One-shot startup retention sweep. Best-effort: a failure inside
+    # the helper is logged and swallowed so a transient backend hiccup
+    # never blocks the API from coming up. The helper short-circuits
+    # when ``DB_RETENTION_MAX_AGE_DAYS=0`` (Scenario A default).
+    run_retention_eviction_safe(
+        filing_store,
+        settings.database.retention_max_age_days,
+        context_label="startup",
     )
 
     try:

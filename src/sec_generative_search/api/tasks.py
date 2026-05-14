@@ -82,6 +82,7 @@ __all__ = [
     "TaskProgress",
     "TaskQueueFullError",
     "TaskState",
+    "run_retention_eviction_safe",
 ]
 
 
@@ -100,6 +101,65 @@ _TASK_TTL_SECONDS = 86_400  # 24 hours
 # fills this in at create time; tests pass ``None`` to exercise the
 # admin-env path.
 EdgarIdentityResolver = Callable[[], "EdgarIdentity | None"]
+
+
+# ---------------------------------------------------------------------------
+# Retention eviction helper
+# ---------------------------------------------------------------------------
+
+
+def run_retention_eviction_safe(
+    filing_store: FilingStore,
+    max_age_days: int,
+    *,
+    context_label: str,
+) -> None:
+    """Run a best-effort time-based eviction sweep.
+
+    Called from two seams: the API lifespan startup (one-shot on boot)
+    and the worker's post-successful-ingest hook (per completed task).
+    Disabled at ``max_age_days <= 0`` — the operator-facing toggle is
+    ``DB_RETENTION_MAX_AGE_DAYS=0``.
+
+    The sweep is defence-in-depth, never load-bearing — operator cron
+    and ``sec-rag manage evict`` remain the canonical paths for
+    scheduled / on-demand eviction.  Any :class:`DatabaseError` or
+    :class:`ValueError` raised by the store is logged at ``warning``
+    and swallowed so a transient backend hiccup does not crash startup
+    or shadow the worker's user-visible terminal-state transition.
+
+    Args:
+        filing_store: The dual-store seam to delegate to.
+        max_age_days: Cutoff age in days; ``<= 0`` short-circuits to a
+            no-op.  Positive values are forwarded verbatim to
+            :meth:`FilingStore.evict_expired`.
+        context_label: Tag distinguishing the two call sites
+            (``"startup"`` / ``"post_ingest"``) in log lines.  Audit-log
+            discipline forbids tickers / accession numbers here; only
+            the count and the cutoff are emitted.
+    """
+    if max_age_days <= 0:
+        return
+
+    try:
+        report = filing_store.evict_expired(max_age_days)
+    except (DatabaseError, ValueError) as exc:
+        message = getattr(exc, "message", str(exc))
+        logger.warning(
+            "Retention sweep (%s) failed; continuing best-effort: %s",
+            context_label,
+            message,
+        )
+        return
+
+    if report.filings_evicted > 0:
+        logger.info(
+            "Retention sweep (%s): evicted %d filing(s) (%d chunk(s)) older than %d day(s)",
+            context_label,
+            report.filings_evicted,
+            report.chunks_evicted,
+            max_age_days,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -888,6 +948,17 @@ class TaskManager:
                 len(info.results),
                 info.progress.filings_skipped,
                 info.progress.filings_failed,
+            )
+
+            # Post-ingest retention sweep. Best-effort: a failure here
+            # MUST NOT shadow the user-visible COMPLETED transition above.
+            # Disabled at ``DB_RETENTION_MAX_AGE_DAYS=0``; the helper is
+            # also the lifespan-startup call site so the discipline
+            # (audit-log, swallowed errors) stays single-sourced.
+            run_retention_eviction_safe(
+                self._filing_store,
+                get_settings().database.retention_max_age_days,
+                context_label="post_ingest",
             )
 
     # ------------------------------------------------------------------
