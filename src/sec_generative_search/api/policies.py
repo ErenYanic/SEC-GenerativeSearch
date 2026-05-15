@@ -175,6 +175,14 @@ ROUTE_POLICIES: tuple[tuple[str, str | None, RoutePolicy], ...] = (
         None,
         RoutePolicy(rate_category="general", max_body_bytes=1 * _KIB),
     ),
+    # Embedder resource introspection.  Read-tier GET with no body —
+    # the 1 KiB cap defends against declared-Content-Length probes
+    # against an authenticated route.
+    (
+        "/api/resources",
+        None,
+        RoutePolicy(rate_category="general", max_body_bytes=1 * _KIB),
+    ),
 )
 
 

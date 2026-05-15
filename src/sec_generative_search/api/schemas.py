@@ -30,6 +30,7 @@ __all__ = [
     "EdgarIdentityRequest",
     "FilingListResponse",
     "FilingSchema",
+    "GpuStatusResponse",
     "HealthResponse",
     "IngestCancelResponse",
     "IngestRequest",
@@ -954,4 +955,73 @@ class IngestCancelResponse(_BaseModel):
     status: str = Field(
         default="cancelling",
         description="Always 'cancelling'; the terminal state is observable via polling.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# GPU / embedder resource schema
+# ---------------------------------------------------------------------------
+
+
+class GpuStatusResponse(_BaseModel):
+    """Result of ``GET /api/resources/gpu``.
+
+    Read-tier operator surface that reports the current state of the
+    embedder. The schema is intentionally provider-neutral: hosted
+    embedders are stateless HTTP clients and report ``is_local=False``
+    with the load-state fields collapsed to a no-op shape, while the
+    on-device :class:`LocalEmbeddingProvider` populates ``device`` /
+    ``idle_seconds`` from its in-memory load handle.
+
+    Privacy contract:
+
+        - No file system paths. Model identifiers are slugs only.
+        - No credentials. The HF token / API key never reach this
+          surface — :class:`_ProviderBase` keeps them off ``repr`` and
+          this schema has no field that could accept one.
+        - ``idle_seconds`` is a derived elapsed-time scalar, not the
+          internal monotonic ``last_used`` timestamp; surfacing the
+          monotonic value would leak process start-time information
+          without operator value.
+    """
+
+    provider: str = Field(
+        description="Embedder provider slug (e.g. 'local', 'openai', 'gemini').",
+    )
+    model: str = Field(
+        description="Embedder model slug (vendor-defined identifier; never a path).",
+    )
+    is_local: bool = Field(
+        description=(
+            "True when the embedder runs on-device (LocalEmbeddingProvider). "
+            "Hosted embedders report False and collapse the load-state fields."
+        ),
+    )
+    is_loaded: bool = Field(
+        description=(
+            "True when the on-device model handle is resident. Hosted "
+            "embedders always report True — there is nothing to load."
+        ),
+    )
+    device: str | None = Field(
+        default=None,
+        description=(
+            "Resolved device for an on-device load (e.g. 'cuda', 'cuda:0', 'cpu'). "
+            "None when not loaded or when the embedder is hosted."
+        ),
+    )
+    idle_seconds: float | None = Field(
+        default=None,
+        description=(
+            "Seconds since the last successful encode call. None when the "
+            "model is not currently loaded or when the embedder is hosted."
+        ),
+    )
+    idle_timeout_minutes: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Operator-configured idle-unload threshold; 0 disables "
+            "auto-unload. Always 0 for hosted embedders."
+        ),
     )

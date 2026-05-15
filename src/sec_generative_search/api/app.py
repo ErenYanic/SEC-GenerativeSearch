@@ -47,6 +47,7 @@ from sec_generative_search.api.routes.health import router as health_router
 from sec_generative_search.api.routes.ingest import router as ingest_router
 from sec_generative_search.api.routes.providers import router as providers_router
 from sec_generative_search.api.routes.rag import router as rag_router
+from sec_generative_search.api.routes.resources import router as resources_router
 from sec_generative_search.api.routes.search import router as search_router
 from sec_generative_search.api.routes.session import router as session_router
 from sec_generative_search.api.routes.status import router as status_router
@@ -302,6 +303,7 @@ def create_app() -> FastAPI:
     app.include_router(search_router, prefix="/api/search", tags=["search"])
     app.include_router(rag_router, prefix="/api/rag", tags=["rag"])
     app.include_router(ingest_router, prefix="/api/ingest", tags=["ingest"])
+    app.include_router(resources_router, prefix="/api/resources", tags=["resources"])
     # WebSocket router is mounted at the root — the path itself
     # (``/ws/ingest/{task_id}``) carries the namespace.  Browser
     # ``WebSocket`` constructors cannot supply custom headers, so the
