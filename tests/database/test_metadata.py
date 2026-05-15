@@ -741,6 +741,222 @@ class TestTaskHistoryPrivacy:
 
 
 @pytest.mark.security
+class TestErrorScrubbingTripwires:
+    """Pin ``_scrub_error_message`` end-to-end behaviour under both
+    ``DB_TASK_HISTORY_PERSIST_TICKERS`` settings.
+
+    The scrub is the load-bearing privacy control on the ``error``
+    column and must fire regardless of the ticker-persistence flag. The
+    unit tests on ``_scrub_error_message`` (above) cover the regex; this
+    class drives the function via :meth:`MetadataRegistry.save_task_history`
+    so a refactor that accidentally couples the scrub to the persist
+    toggle surfaces here, not in a broader integration run.
+    """
+
+    @staticmethod
+    def _set_persist_tickers(value: bool) -> bool:
+        """Flip the cached settings singleton's persist-tickers flag and
+        return the prior value so the test can restore it in ``finally``.
+
+        Mirrors the pattern used by ``TestTaskHistoryPrivacy`` — settings
+        are re-read inside ``save_task_history`` via ``get_settings()``,
+        and patching the cached attribute side-steps pydantic-settings
+        env-var caching.
+        """
+        from sec_generative_search.config import settings as settings_module
+
+        settings = settings_module.get_settings()
+        prior = settings.database.task_history_persist_tickers
+        settings.database.task_history_persist_tickers = value
+        return prior
+
+    @staticmethod
+    def _restore_persist_tickers(value: bool) -> None:
+        from sec_generative_search.config import settings as settings_module
+
+        settings_module.get_settings().database.task_history_persist_tickers = value
+
+    # ------------------------------------------------------------------
+    # Persist=True: error column must STILL be scrubbed.
+    # ------------------------------------------------------------------
+
+    def test_error_scrubbed_even_when_tickers_persisted(
+        self,
+        tmp_db_path: str,
+    ) -> None:
+        """Opting into ticker persistence must not weaken the error scrub.
+
+        Tickers may legitimately appear in the ``tickers`` column under
+        opt-in, but the ``error`` column carries free-form upstream text
+        that an operator on Scenario B/C inspects for triage; ticker /
+        accession identifiers in there leak research patterns to anyone
+        with task-history read access.
+        """
+        prior = self._set_persist_tickers(True)
+        try:
+            reg = MetadataRegistry(db_path=tmp_db_path)
+            _save_sample_task(
+                reg,
+                tickers=["AAPL", "MSFT"],
+                error=(
+                    "AAPL request for 0000320193-23-000077 rate-limited; "
+                    "MSFT 0000789019-22-000011 also failed"
+                ),
+            )
+            row = reg.get_task_history("task-1")
+            assert row is not None
+            # Tickers persisted on the column (opt-in honoured).
+            assert row["tickers"] == ["AAPL", "MSFT"]
+            # But the error column is still fully scrubbed.
+            assert "AAPL" not in row["error"]
+            assert "MSFT" not in row["error"]
+            assert "0000320193-23-000077" not in row["error"]
+            assert "0000789019-22-000011" not in row["error"]
+            assert row["error"].count("[TICKER]") == 2
+            assert row["error"].count("[ACCESSION]") == 2
+        finally:
+            self._restore_persist_tickers(prior)
+
+    # ------------------------------------------------------------------
+    # Persist=False: same scrub guarantee, plus tickers column is NULL.
+    # ------------------------------------------------------------------
+
+    def test_error_scrubbed_when_tickers_not_persisted(
+        self,
+        registry: MetadataRegistry,
+    ) -> None:
+        """Default privacy posture — both layers active simultaneously.
+
+        Pinned separately from ``TestTaskHistoryPrivacy.test_tickers_stripped_by_default``
+        so a regression in either layer (column null OR error scrub) is
+        attributable to a single failing test rather than a compound assertion.
+        """
+        _save_sample_task(
+            registry,
+            tickers=["AAPL"],
+            error="AAPL ingest of 0000320193-23-000077 failed (HTTP 429)",
+        )
+        row = registry.get_task_history("task-1")
+        assert row is not None
+        # Layer 1: tickers column is empty (stored as NULL → decoded as []).
+        assert row["tickers"] == []
+        # Layer 2: error scrubbed of both ticker and accession.
+        assert "AAPL" not in row["error"]
+        assert "0000320193-23-000077" not in row["error"]
+        assert "[TICKER]" in row["error"]
+        assert "[ACCESSION]" in row["error"]
+
+    # ------------------------------------------------------------------
+    # Edge cases that historically catch regex regressions.
+    # ------------------------------------------------------------------
+
+    def test_case_insensitive_ticker_redaction(
+        self,
+        registry: MetadataRegistry,
+    ) -> None:
+        """Lower-case / mixed-case ticker mentions must redact too.
+
+        Edgartools / urllib3 sometimes echo the ticker in lower case in
+        their error strings; the scrub uses ``re.IGNORECASE``, but a
+        naive refactor that built a case-sensitive alternation would
+        silently leak the mention.
+        """
+        _save_sample_task(
+            registry,
+            tickers=["AAPL"],
+            error="lower-case aapl and Mixed Aapl both should redact",
+        )
+        row = registry.get_task_history("task-1")
+        assert row is not None
+        assert "aapl" not in row["error"].lower()
+        assert row["error"].count("[TICKER]") == 2
+
+    def test_ticker_word_boundary_discipline(
+        self,
+        registry: MetadataRegistry,
+    ) -> None:
+        """Substring containment must NOT match.
+
+        ``\\b{ticker}\\b`` is the contract; a substring like ``MSFTX`` or
+        ``XMSFT`` is a different identifier (often deliberate noise from
+        an upstream tool) and must survive the scrub. Tripwires the
+        word-boundary anchors against accidental removal.
+        """
+        _save_sample_task(
+            registry,
+            tickers=["MSFT"],
+            error="Token MSFTX and prefix XMSFT must remain; standalone MSFT must redact",
+        )
+        row = registry.get_task_history("task-1")
+        assert row is not None
+        assert "MSFTX" in row["error"]
+        assert "XMSFT" in row["error"]
+        # Standalone MSFT redacted exactly once.
+        assert row["error"].count("[TICKER]") == 1
+
+    def test_mixed_accession_formats_in_one_error(
+        self,
+        registry: MetadataRegistry,
+    ) -> None:
+        """Both dashed and undashed accession spellings redact in one pass.
+
+        ``_ACCESSION_RE`` matches optional dashes; if a future tightening
+        accidentally splits the two forms across separate patterns, this
+        test breaks before it ships.
+        """
+        _save_sample_task(
+            registry,
+            tickers=[],
+            error="Failed: 0000320193-23-000077 and also 000078901922000011",
+        )
+        row = registry.get_task_history("task-1")
+        assert row is not None
+        assert "0000320193-23-000077" not in row["error"]
+        assert "000078901922000011" not in row["error"]
+        assert row["error"].count("[ACCESSION]") == 2
+
+    def test_no_identifiers_passes_through_untouched(
+        self,
+        registry: MetadataRegistry,
+    ) -> None:
+        """Generic upstream errors with no PII must reach the operator
+        verbatim — over-aggressive scrubbing would degrade triage value.
+        """
+        original = "Connection reset by peer (errno=104) after 30s"
+        _save_sample_task(registry, tickers=["AAPL"], error=original)
+        row = registry.get_task_history("task-1")
+        assert row is not None
+        assert row["error"] == original
+
+    def test_scrub_invocation_is_unconditional(self) -> None:
+        """White-box tripwire: the scrub call site in ``save_task_history``
+        must NOT be wrapped in a ``persist_tickers`` conditional.
+
+        Historically, the ticker-persist toggle is the kind of flag a
+        well-intentioned refactor reaches for to ``optimise away`` work
+        when ``tickers`` is null; that would re-couple the scrub to the
+        flag and silently regress the privacy contract. Reading the
+        source for the gating expression directly catches that drift in
+        unit tests instead of a Scenario-B/C smoke run.
+        """
+        import inspect
+
+        from sec_generative_search.database.metadata import MetadataRegistry
+
+        source = inspect.getsource(MetadataRegistry.save_task_history)
+        # The scrub line is guarded only on `error` truthiness, never on
+        # the persist-tickers flag.
+        assert "_scrub_error_message(error, tickers) if error else None" in source
+        # Defensive: no persist_tickers token may share a line with the
+        # scrub call.
+        for line in source.splitlines():
+            if "_scrub_error_message" in line:
+                assert "persist_tickers" not in line, (
+                    "Error scrub must not be gated on DB_TASK_HISTORY_PERSIST_TICKERS"
+                )
+
+
+@pytest.mark.security
 class TestEncryptionKeyHandling:
     """SQLCipher key wiring — safe fallback and no key leakage via repr/str."""
 
