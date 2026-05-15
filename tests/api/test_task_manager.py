@@ -1488,3 +1488,228 @@ class TestLifespanWiresStartupEviction:
         source = inspect.getsource(app_module.lifespan)
         assert "run_retention_eviction_safe(" in source
         assert 'context_label="startup"' in source
+
+
+# ---------------------------------------------------------------------------
+# Caller-driven embedder idle-unload
+# ---------------------------------------------------------------------------
+
+
+class _StubEmbedder:
+    """Minimal duck-type for the manager's ``maybe_unload`` hook.
+
+    Records every invocation so the lifecycle-boundary tests can
+    assert on call ordering. Mirrors the public surface of
+    :class:`LocalEmbeddingProvider` that the manager actually touches —
+    ``maybe_unload(now=None)`` only, no ``encode`` / ``unload`` because
+    the manager never calls them directly.
+    """
+
+    def __init__(self, *, raise_on_unload: Exception | None = None) -> None:
+        self.calls: int = 0
+        self.raise_on_unload = raise_on_unload
+
+    def maybe_unload(self, now: float | None = None) -> bool:
+        self.calls += 1
+        if self.raise_on_unload is not None:
+            raise self.raise_on_unload
+        return False
+
+
+class _HostedEmbedderStub:
+    """Stand-in for a hosted embedder (no idle state to release).
+
+    Has no ``maybe_unload`` attribute — the manager's helper must
+    duck-type around its absence rather than crash with
+    ``AttributeError``.
+    """
+
+    def embed_query(self, text: str):
+        raise NotImplementedError
+
+
+class TestEmbedderIdleUnloadHook:
+    """The manager fires ``maybe_unload`` at task lifecycle boundaries.
+
+    Lifecycle boundaries:
+
+        - Worker ``finally`` after the GPU semaphore release — every
+          task transition (COMPLETED / FAILED / CANCELLED) reaches it.
+        - Lazy-eviction sweep on every ``get_task`` / ``list_tasks`` /
+          ``create_task`` — picks up the steady-state operator-poll
+          path even when no new ingestion task arrives.
+
+    The provider's :meth:`maybe_unload` honours its configured
+    ``EMBEDDING_IDLE_TIMEOUT_MINUTES`` threshold internally; the
+    manager's responsibility is solely to *call* the hook at the
+    right boundary.
+    """
+
+    def test_completed_task_triggers_unload_hook(self) -> None:
+        f1 = _make_filing_info("AAPL", "0000320193-23-000001")
+        p1 = _make_processed_filing(f1)
+        embedder = _StubEmbedder()
+        manager, _, _, _, _ = _build_manager(
+            fetcher=_StubFetcher(work_lists={("AAPL", "10-K"): [f1]}),
+            orchestrator=_StubOrchestrator(by_accession={f1.accession_number: p1}),
+        )
+        # Inject the embedder after construction so the existing
+        # ``_build_manager`` helper signature stays minimal — the
+        # manager-level attribute is the same seam the lifespan binds.
+        manager._embedder = embedder
+
+        task_id = manager.create_task(tickers=["AAPL"], form_types=["10-K"])
+        _wait_for_state(manager, task_id, target=TaskState.COMPLETED)
+
+        # At least one call from the worker ``finally``; lazy reads
+        # may have added more (the get_task poll inside _wait_for_state
+        # also fires the hook), so the lower bound is what we pin.
+        assert embedder.calls >= 1
+
+    def test_failed_task_still_triggers_unload_hook(self, monkeypatch) -> None:
+        """``FAILED`` paths must release VRAM too — the worker exits via
+        ``finally`` regardless of which terminal state it reached."""
+        monkeypatch.setenv("DB_MAX_FILINGS", "1")
+        reload_settings()
+
+        f1 = _make_filing_info("AAPL", "0000320193-23-000001")
+        registry = _StubRegistry(filing_count=1)  # at the ceiling
+        embedder = _StubEmbedder()
+        manager, _, _, _, _ = _build_manager(
+            registry=registry,
+            fetcher=_StubFetcher(work_lists={("AAPL", "10-K"): [f1]}),
+            orchestrator=_StubOrchestrator(
+                by_accession={f1.accession_number: _make_processed_filing(f1)},
+            ),
+        )
+        manager._embedder = embedder
+
+        task_id = manager.create_task(tickers=["AAPL"], form_types=["10-K"])
+        _wait_for_state(manager, task_id, target=TaskState.FAILED)
+
+        assert embedder.calls >= 1
+
+    def test_cancelled_task_still_triggers_unload_hook(self) -> None:
+        """Cancellation in-flight reaches the same ``finally``."""
+        embedder = _StubEmbedder()
+        manager, _, _, _, _ = _build_manager()
+        manager._embedder = embedder
+
+        manager._gpu_semaphore.acquire()
+        try:
+            task_id = manager.create_task(tickers=["AAPL"], form_types=["10-K"])
+            assert manager.cancel_task(task_id) is True
+        finally:
+            manager._gpu_semaphore.release()
+
+        _wait_for_state(manager, task_id, target=TaskState.CANCELLED)
+
+        assert embedder.calls >= 1
+
+    def test_lazy_eviction_sweep_fires_unload_hook(self) -> None:
+        """``_evict_stale_locked`` runs the hook on every read.
+
+        Drives the operator-poll seam: in steady state, no new task is
+        created, but a periodic ``GET /api/ingest/tasks`` poll still
+        triggers the idle-unload check.  Pin the contract by calling
+        ``list_tasks`` directly.
+        """
+        embedder = _StubEmbedder()
+        manager, _, _, _, _ = _build_manager()
+        manager._embedder = embedder
+
+        # No task created — ``list_tasks`` exercises the lazy seam alone.
+        manager.list_tasks()
+        manager.get_task("nonexistent")
+        manager.list_tasks_for_session(None)
+
+        # All three reads run the eviction sweep, which now fires the
+        # unload hook on each pass.
+        assert embedder.calls >= 3
+
+    def test_hosted_embedder_without_maybe_unload_is_noop(self) -> None:
+        """Duck-typed: hosted embedder lacks ``maybe_unload`` and must not crash.
+
+        OpenAI / Gemini / Anthropic embedders have no idle state to
+        release — the helper must skip them silently instead of
+        crashing with ``AttributeError`` on a hot read path.
+        """
+        f1 = _make_filing_info("AAPL", "0000320193-23-000001")
+        p1 = _make_processed_filing(f1)
+        manager, _, _, _, _ = _build_manager(
+            fetcher=_StubFetcher(work_lists={("AAPL", "10-K"): [f1]}),
+            orchestrator=_StubOrchestrator(by_accession={f1.accession_number: p1}),
+        )
+        manager._embedder = _HostedEmbedderStub()
+
+        task_id = manager.create_task(tickers=["AAPL"], form_types=["10-K"])
+        info = _wait_for_state(manager, task_id, target=TaskState.COMPLETED)
+
+        # Worker reached COMPLETED — the hook silently no-op'd on the
+        # hosted embedder rather than collapsing the task.
+        assert info.state == TaskState.COMPLETED
+
+    def test_unload_failure_does_not_shadow_terminal_state(self, caplog) -> None:
+        """A raising ``maybe_unload`` is logged and swallowed.
+
+        Best-effort discipline mirrors the retention sweep: a transient
+        cleanup glitch must NEVER shadow the worker's terminal-state
+        transition or block a polling read.
+        """
+        f1 = _make_filing_info("AAPL", "0000320193-23-000001")
+        p1 = _make_processed_filing(f1)
+        embedder = _StubEmbedder(raise_on_unload=RuntimeError("cuda blip"))
+        manager, _, _, _, _ = _build_manager(
+            fetcher=_StubFetcher(work_lists={("AAPL", "10-K"): [f1]}),
+            orchestrator=_StubOrchestrator(by_accession={f1.accession_number: p1}),
+        )
+        manager._embedder = embedder
+
+        task_id = manager.create_task(tickers=["AAPL"], form_types=["10-K"])
+        info = _wait_for_state(manager, task_id, target=TaskState.COMPLETED)
+
+        # COMPLETED reached even though the unload hook raised.
+        assert info.state == TaskState.COMPLETED
+        # The hook was attempted (the exception came from inside it).
+        assert embedder.calls >= 1
+
+    def test_no_embedder_bound_is_safe(self) -> None:
+        """Manager constructed without an ``embedder`` is the test path.
+
+        Existing tests use ``_build_manager`` which omits the embedder
+        argument — the helper must not break that pattern.
+        """
+        f1 = _make_filing_info("AAPL", "0000320193-23-000001")
+        p1 = _make_processed_filing(f1)
+        manager, _, _, _, _ = _build_manager(
+            fetcher=_StubFetcher(work_lists={("AAPL", "10-K"): [f1]}),
+            orchestrator=_StubOrchestrator(by_accession={f1.accession_number: p1}),
+        )
+        # No ``manager._embedder = ...`` — explicit None on construction.
+
+        task_id = manager.create_task(tickers=["AAPL"], form_types=["10-K"])
+        info = _wait_for_state(manager, task_id, target=TaskState.COMPLETED)
+
+        assert info.state == TaskState.COMPLETED
+
+
+class TestLifespanWiresEmbedderHook:
+    """Tripwire: ``api.app.lifespan`` passes the embedder to TaskManager.
+
+    The helper hook is only useful if the lifespan actually wires the
+    embedder reference through. Inspect the lifespan source rather
+    than booting it (the production path pulls in ChromaDB / SQLite /
+    sentence-transformers) — same pattern as the retention-eviction
+    tripwire above.
+    """
+
+    def test_lifespan_passes_embedder_kwarg_to_task_manager(self) -> None:
+        import importlib
+        import inspect
+
+        app_module = importlib.import_module("sec_generative_search.api.app")
+        source = inspect.getsource(app_module.lifespan)
+        # The keyword binding must be present so a future refactor
+        # that drops it surfaces here, not in a Scenario-A smoke run.
+        assert "TaskManager(" in source
+        assert "embedder=embedder" in source

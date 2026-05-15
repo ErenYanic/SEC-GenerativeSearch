@@ -56,6 +56,18 @@ load-bearing differences.
     orchestrator via the progress callback) so a long-running fetch /
     embed step cannot defer cancellation.
 
+6. **Caller-driven embedder idle-unload.**
+    The manager optionally holds a reference to the bound embedder
+    (passed by the lifespan; absent in unit tests) and fires
+    :meth:`maybe_unload` at task lifecycle boundaries — in the worker's
+    ``finally`` block immediately after the GPU semaphore release, and
+    on every lazy-eviction sweep so a steady-state operator UI poll
+    triggers VRAM release after the configured idle window.  Hosted
+    embedders have no idle state to release; the helper duck-types on
+    the public ``maybe_unload`` method so an OpenAI-only deployment
+
+    never imports :mod:`torch`.
+
 The module intentionally does **not** ship the API routes / WebSocket /
 cooldown plumbing. This file is the worker substrate they wire onto.
 """
@@ -87,6 +99,7 @@ if TYPE_CHECKING:
     from sec_generative_search.core.edgar_identity import EdgarIdentity
     from sec_generative_search.database.metadata import MetadataRegistry
     from sec_generative_search.database.store import FilingStore
+    from sec_generative_search.providers.base import BaseEmbeddingProvider
 
 __all__ = [
     "FilingResult",
@@ -391,11 +404,17 @@ class TaskManager:
         registry: MetadataRegistry,
         fetcher: FilingFetcher,
         orchestrator: PipelineOrchestrator,
+        embedder: BaseEmbeddingProvider | None = None,
     ) -> None:
         self._filing_store = filing_store
         self._registry = registry
         self._fetcher = fetcher
         self._orchestrator = orchestrator
+        # Optional embedder reference. Only used to fire the idle-unload
+        # hook on local providers — hosted embedders have no idle state
+        # to release. ``None`` is the documented test path; production
+        # wiring lives in the app lifespan.
+        self._embedder = embedder
 
         self._tasks: dict[str, TaskInfo] = {}
         # Per-task EDGAR identity resolver, kept off ``TaskInfo`` so
@@ -655,6 +674,11 @@ class TaskManager:
             with self._lock:
                 self._task_resolvers.pop(info.task_id, None)
             self._gpu_semaphore.release()
+            # Fire idle-unload after releasing the GPU gate so a queued
+            # task can grab the slot without waiting on cleanup;
+            # ``maybe_unload`` is a cheap threshold check when the model
+            # is still warm, so the lifecycle boundary is the right seam.
+            self._maybe_unload_embedder()
 
     def _execute(self, info: TaskInfo) -> None:
         """Ingest one filing at a time, fetching HTML on demand.
@@ -1384,6 +1408,44 @@ class TaskManager:
             )
 
     # ------------------------------------------------------------------
+    # Caller-driven embedder idle-unload
+    # ------------------------------------------------------------------
+
+    def _maybe_unload_embedder(self) -> None:
+        """Best-effort idle-unload check on the bound embedder.
+
+        Fires at task lifecycle boundaries (worker ``finally`` after
+        the GPU semaphore release) and on every lazy eviction sweep.
+        The provider's :meth:`maybe_unload` honours its configured
+        ``EMBEDDING_IDLE_TIMEOUT_MINUTES`` threshold; back-to-back
+        tasks therefore do not churn (``_last_used`` was just
+        refreshed inside the worker's ``encode`` call).
+
+        Hosted embedders have no idle state to release, so the helper
+        short-circuits when ``maybe_unload`` is absent — duck-typing on
+        the public method keeps the manager free of an import-time
+        dependency on :class:`LocalEmbeddingProvider` (and its optional
+        ``[local-embeddings]`` extra).  Errors are logged at ``warning``
+        and swallowed; an unload failure must not shadow the worker's
+        terminal-state transition or block a polling read.
+
+        The lifecycle boundary + lazy seam is the sanctioned pattern
+        here; a background timer would fight CUDA teardown ordering.
+        """
+        if self._embedder is None:
+            return
+        unload = getattr(self._embedder, "maybe_unload", None)
+        if unload is None:
+            return
+        try:
+            unload()
+        except Exception:
+            logger.warning(
+                "Embedder idle-unload check failed; continuing",
+                exc_info=True,
+            )
+
+    # ------------------------------------------------------------------
     # Lazy eviction (no background thread)
     # ------------------------------------------------------------------
 
@@ -1397,6 +1459,11 @@ class TaskManager:
         :class:`InMemorySessionEdgarIdentityStore` — every short-lived
         in-memory store in this codebase evicts lazily rather than
         running a background timer.
+
+        Also fires the idle-unload check so a steady-state operator UI
+        poll can release VRAM after the configured idle window even
+        when no new ingestion task arrives.  Hosted embedders no-op via
+        duck-typing in :meth:`_maybe_unload_embedder`.
         """
         now = time.time()
         to_remove: list[str] = []
@@ -1413,6 +1480,11 @@ class TaskManager:
             for task_id in to_remove:
                 self._tasks.pop(task_id, None)
                 self._task_resolvers.pop(task_id, None)
+
+        # Lazy embedder unload runs outside the manager lock — the
+        # provider has its own load lock and unload can take a moment
+        # when the CUDA cache flush is non-trivial.
+        self._maybe_unload_embedder()
 
         if to_remove:
             logger.debug("Evicted %d stale task(s) from memory", len(to_remove))

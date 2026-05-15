@@ -159,6 +159,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         registry=registry,
         fetcher=fetcher,
         orchestrator=pipeline_orchestrator,
+        # Thread the embedder reference through so the worker's
+        # post-task cleanup and the lazy-eviction sweep can fire the
+        # idle-unload hook. Hosted embedders no-op via duck-typing in
+        # the manager, which keeps the optional local-embeddings
+        # import path out of the app wiring.
+        embedder=embedder,
     )
     # The running asyncio loop is what ``_push`` uses to bridge the sync
     # worker thread to the per-task message queue. Capture it once here;
