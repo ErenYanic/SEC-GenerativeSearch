@@ -862,6 +862,260 @@ class TestFetcherErrors:
 
 
 # ---------------------------------------------------------------------------
+# Worker policy — per-filing failure isolation
+# ---------------------------------------------------------------------------
+
+
+class TestPerFilingFailureIsolation:
+    """A bare ``Exception`` from fetch / process / store stays local.
+
+    A single malformed filing emits ``filing_failed`` and the loop
+    continues with the next item. Without the broader ``except
+    Exception`` net, a ``KeyError`` from doc2dict on undocumented HTML
+    would collapse the whole task to ``FAILED`` and lose unrelated
+    work.
+    """
+
+    def test_bare_exception_from_fetch_marks_filing_failed_and_continues(self) -> None:
+        f1 = _make_filing_info("AAPL", "0000320193-23-000001")
+        f2 = _make_filing_info("AAPL", "0000320193-23-000002")
+        p2 = _make_processed_filing(f2)
+
+        fetcher = _StubFetcher(
+            work_lists={("AAPL", "10-K"): [f1, f2]},
+            # ``RuntimeError`` mimics the bare exception edgartools can
+            # surface from undocumented EDGAR response shapes.
+            raise_on_fetch={f1.accession_number: RuntimeError("edgar payload mangled")},
+        )
+        manager, store, _, _, _ = _build_manager(
+            fetcher=fetcher,
+            orchestrator=_StubOrchestrator(by_accession={f2.accession_number: p2}),
+        )
+
+        task_id = manager.create_task(tickers=["AAPL"], form_types=["10-K"])
+        info = _wait_for_state(manager, task_id, target=TaskState.COMPLETED)
+
+        # f1 marked failed via the bare-exception net, f2 succeeded.
+        assert info.progress.filings_failed == 1
+        assert store.stored == [f2.accession_number]
+        # Whole task did NOT collapse to FAILED.
+        assert info.state == TaskState.COMPLETED
+
+    def test_bare_exception_from_process_marks_filing_failed_and_continues(self) -> None:
+        f1 = _make_filing_info("AAPL", "0000320193-23-000001")
+        f2 = _make_filing_info("AAPL", "0000320193-23-000002")
+        p2 = _make_processed_filing(f2)
+
+        orchestrator = _StubOrchestrator(
+            by_accession={f2.accession_number: p2},
+            # Bare ``KeyError`` mimics doc2dict's tree-walker on a
+            # filing whose section path map is missing an expected key.
+            raise_on={f1.accession_number: KeyError("Part I > Item 1A")},
+        )
+        manager, store, _, _, _ = _build_manager(
+            fetcher=_StubFetcher(work_lists={("AAPL", "10-K"): [f1, f2]}),
+            orchestrator=orchestrator,
+        )
+
+        task_id = manager.create_task(tickers=["AAPL"], form_types=["10-K"])
+        info = _wait_for_state(manager, task_id, target=TaskState.COMPLETED)
+
+        assert info.progress.filings_failed == 1
+        assert store.stored == [f2.accession_number]
+        assert info.state == TaskState.COMPLETED
+
+    def test_bare_exception_from_store_marks_filing_failed_and_continues(self) -> None:
+        f1 = _make_filing_info("AAPL", "0000320193-23-000001")
+        f2 = _make_filing_info("AAPL", "0000320193-23-000002")
+        p1 = _make_processed_filing(f1)
+        p2 = _make_processed_filing(f2)
+
+        store = _StubFilingStore(
+            # Bare ``RuntimeError`` mimics a transient ChromaDB driver
+            # glitch — the project normally surfaces it as
+            # :class:`DatabaseError` but defence-in-depth catches the
+            # untyped path.
+            raise_on_store={f1.accession_number: RuntimeError("chroma backend glitch")},
+        )
+        manager, store, _, _, _ = _build_manager(
+            filing_store=store,
+            fetcher=_StubFetcher(work_lists={("AAPL", "10-K"): [f1, f2]}),
+            orchestrator=_StubOrchestrator(
+                by_accession={f1.accession_number: p1, f2.accession_number: p2},
+            ),
+        )
+
+        task_id = manager.create_task(tickers=["AAPL"], form_types=["10-K"])
+        info = _wait_for_state(manager, task_id, target=TaskState.COMPLETED)
+
+        assert info.progress.filings_failed == 1
+        # f2 still stored — the bare-exception net did not abort the loop.
+        assert store.stored == [f2.accession_number]
+        assert info.state == TaskState.COMPLETED
+
+
+@pytest.mark.security
+class TestPerFilingFailureWireDiscipline:
+    """The bare-exception net must never leak class names / paths.
+
+    The wire envelope on the WebSocket is a generic ``"<stage> failed"``
+    string; the full traceback lands in the operator's log via
+    ``logger.exception``. Mirrors the broader API discipline that
+    internal exception text never reaches a user-visible payload.
+    """
+
+    def test_bare_exception_envelope_does_not_carry_internal_message(self) -> None:
+        f1 = _make_filing_info("AAPL", "0000320193-23-000001")
+
+        # Sentinel string we never want to see on the wire.
+        sentinel = "/internal/path/to/parser.py line 42 KeyError"
+        orchestrator = _StubOrchestrator(
+            by_accession={},
+            raise_on={f1.accession_number: KeyError(sentinel)},
+        )
+        manager, _, _, _, _ = _build_manager(
+            fetcher=_StubFetcher(work_lists={("AAPL", "10-K"): [f1]}),
+            orchestrator=orchestrator,
+        )
+
+        task_id = manager.create_task(tickers=["AAPL"], form_types=["10-K"])
+        info = _wait_for_state(manager, task_id, target=TaskState.COMPLETED)
+
+        # Drain the WebSocket queue and assert the sentinel never
+        # surfaces on any envelope.
+        assert info._message_queue is not None
+        envelopes: list[dict] = []
+        while True:
+            try:
+                envelopes.append(info._message_queue.get_nowait())
+            except Exception:
+                break
+        for envelope in envelopes:
+            for value in envelope.values():
+                assert sentinel not in str(value), (
+                    "bare-exception net leaked internal exception text onto the wire"
+                )
+
+
+# ---------------------------------------------------------------------------
+# Cancellation — auto-cancel by ``_duration_timer``
+# ---------------------------------------------------------------------------
+
+
+class TestDurationTimerAutoCancel:
+    """``_duration_timer`` auto-cancel must roll back through ``FilingStore``.
+
+    The auto-cancel routes through the same ``cancel_event`` path as a
+    user cancellation, so the rollback contract (ChromaDB-first via
+    :meth:`FilingStore.delete_filings_batch`) must apply identically.
+    The test forces the policy by invoking ``_timeout_task`` directly
+    rather than waiting on a real ``threading.Timer`` — the contract is
+    on the rollback, not on the wall-clock.
+    """
+
+    def test_timer_auto_cancel_rolls_back_via_filing_store(self) -> None:
+        f1 = _make_filing_info("AAPL", "0000320193-23-000001")
+        f2 = _make_filing_info("AAPL", "0000320193-23-000002")
+        p1 = _make_processed_filing(f1)
+        p2 = _make_processed_filing(f2)
+
+        manager_holder: dict[str, TaskManager] = {}
+
+        class _TimeoutOnSecond(_StubOrchestrator):
+            """Trip ``_timeout_task`` mid-second-filing.
+
+            Mirrors the production path: the duration timer fires from
+            its own daemon thread, sets ``cancel_event`` via
+            :meth:`TaskManager._timeout_task`, and the worker observes
+            it on the next stage boundary.
+            """
+
+            def process_filing(self, filing_id, html_content, progress_callback=None):
+                if filing_id.accession_number == f2.accession_number:
+                    mgr = manager_holder["mgr"]
+                    for task in mgr.list_tasks():
+                        if task.state == TaskState.RUNNING:
+                            # Drive the auto-cancel path through the
+                            # public timer entry point — proves rollback
+                            # consistency between user cancel and
+                            # timer-driven cancel.
+                            mgr._timeout_task(task)
+                    if progress_callback is not None:
+                        progress_callback("Embedding", 3, 4)
+                return self.by_accession[filing_id.accession_number]
+
+        manager, store, _, _, _ = _build_manager(
+            fetcher=_StubFetcher(work_lists={("AAPL", "10-K"): [f1, f2]}),
+            orchestrator=_TimeoutOnSecond(
+                by_accession={f1.accession_number: p1, f2.accession_number: p2},
+            ),
+        )
+        manager_holder["mgr"] = manager
+
+        task_id = manager.create_task(tickers=["AAPL"], form_types=["10-K"])
+        info = _wait_for_state(manager, task_id, target=TaskState.CANCELLED)
+
+        # f1 was stored, then rolled back via FilingStore — same path
+        # as user cancel.
+        assert store.stored == [f1.accession_number]
+        assert store.deleted == [[f1.accession_number]]
+        assert info._stored_accessions == []
+
+
+# ---------------------------------------------------------------------------
+# Cancellation — between-stage check
+# ---------------------------------------------------------------------------
+
+
+class TestCancelBetweenStages:
+    """``cancel_event`` is observed at every stage boundary.
+
+    A long-running fetch (EDGAR rate-limited at 9 req/s + network
+    latency) can defer cancellation by many seconds without a check
+    immediately after fetch. This test pins the post-fetch check.
+    """
+
+    def test_cancel_after_fetch_skips_processing_and_rolls_back(self) -> None:
+        f1 = _make_filing_info("AAPL", "0000320193-23-000001")
+        f2 = _make_filing_info("AAPL", "0000320193-23-000002")
+        p1 = _make_processed_filing(f1)
+        p2 = _make_processed_filing(f2)
+
+        manager_holder: dict[str, TaskManager] = {}
+
+        # Cancel inside the fetch stub for f2 — by the time the worker
+        # exits ``fetch_filing_content`` the cancel flag is set, and
+        # the post-fetch check must catch it before processing /
+        # storing f2.
+        class _CancelInsideFetch(_StubFetcher):
+            def fetch_filing_content(self, filing_info):
+                if filing_info.accession_number == f2.accession_number:
+                    mgr = manager_holder["mgr"]
+                    for task in mgr.list_tasks():
+                        if task.state == TaskState.RUNNING:
+                            task.cancel_event.set()
+                return super().fetch_filing_content(filing_info)
+
+        manager, store, _, _, _ = _build_manager(
+            fetcher=_CancelInsideFetch(work_lists={("AAPL", "10-K"): [f1, f2]}),
+            orchestrator=_StubOrchestrator(
+                by_accession={f1.accession_number: p1, f2.accession_number: p2},
+            ),
+        )
+        manager_holder["mgr"] = manager
+
+        task_id = manager.create_task(tickers=["AAPL"], form_types=["10-K"])
+        info = _wait_for_state(manager, task_id, target=TaskState.CANCELLED)
+
+        # f1 stored then rolled back; f2 fetched but never stored
+        # because the post-fetch cancel check fired first.
+        assert store.stored == [f1.accession_number]
+        assert store.deleted == [[f1.accession_number]]
+        assert f2.accession_number not in store.stored
+        assert info._stored_accessions == []
+
+
+# ---------------------------------------------------------------------------
 # Security — zero-key contract
 # ---------------------------------------------------------------------------
 

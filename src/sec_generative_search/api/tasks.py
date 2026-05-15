@@ -43,6 +43,19 @@ load-bearing differences.
     timer makes interpreter shutdown ordering noisy and offers no
     measurable win.
 
+5. **Per-filing failure isolation.**
+    Fetch / process / store stages each catch the project's
+    :class:`SECGenerativeSearchError` family **and** a broader
+    :class:`Exception` net so a single malformed filing emits
+    ``filing_failed`` and the worker continues with the next item. The
+    bare-exception net logs ``logger.exception`` with the full traceback
+    for the operator and pushes a generic ``"<stage> failed"`` envelope
+    onto the WebSocket so internal class names / file paths never reach
+    the wire. ``cancel_event`` is checked between every stage (top of
+    loop, after fetch, between processing and storing, and inside the
+    orchestrator via the progress callback) so a long-running fetch /
+    embed step cannot defer cancellation.
+
 The module intentionally does **not** ship the API routes / WebSocket /
 cooldown plumbing. This file is the worker substrate they wire onto.
 """
@@ -750,6 +763,43 @@ class TaskManager:
                     exc.message,
                 )
                 continue
+            except Exception as exc:
+                # Defence-in-depth: edgartools occasionally surfaces a
+                # bare RuntimeError / ValueError on EDGAR responses that
+                # do not match its parsed shape (truncated HTML, server
+                # rendering glitches, undocumented form variants).
+                # Per-filing failure isolation keeps one malformed
+                # response from collapsing the whole task.
+                info.progress.filings_failed += 1
+                info.progress.filings_done += 1
+                self._push(
+                    info,
+                    {
+                        "type": "filing_failed",
+                        "ticker": ticker,
+                        "form_type": form_type,
+                        "accession_number": filing_id.accession_number,
+                        "error": "fetch failed",
+                    },
+                )
+                logger.exception(
+                    "Task %s: unexpected fetch failure for %s — %s",
+                    info.task_id[:8],
+                    filing_id.accession_number,
+                    type(exc).__name__,
+                )
+                continue
+
+            # Stage boundary cancel check: fetch can run for many
+            # seconds, so checking before kicking off parse / chunk /
+            # embed avoids burning work that will be rolled back. The
+            # progress callback covers the later stages.
+            if info.cancel_event.is_set():
+                self._rollback(info)
+                self._mark_terminal(info, TaskState.CANCELLED)
+                self._push(info, {"type": "cancelled"})
+                logger.info("Task %s cancelled after fetch", info.task_id[:8])
+                return
 
             def _progress_cb(
                 step: str,
@@ -823,6 +873,36 @@ class TaskManager:
                     exc.message,
                 )
                 continue
+            except Exception as exc:
+                # Defence-in-depth: parse / chunk / embed wrap their
+                # known failure modes in :class:`SECGenerativeSearchError`,
+                # but a malformed filing can still surface a bare
+                # ``KeyError`` / ``ValueError`` from the doc2dict tree
+                # walker on undocumented HTML shapes. Per-filing failure
+                # isolation means one bad filing must not collapse the
+                # whole task. ``logger.exception`` records the full
+                # traceback for the operator; the WebSocket envelope
+                # carries a generic ``"processing failed"`` to avoid
+                # leaking implementation detail onto the wire.
+                info.progress.filings_failed += 1
+                info.progress.filings_done += 1
+                self._push(
+                    info,
+                    {
+                        "type": "filing_failed",
+                        "ticker": ticker,
+                        "form_type": form_type,
+                        "accession_number": filing_id.accession_number,
+                        "error": "processing failed",
+                    },
+                )
+                logger.exception(
+                    "Task %s: unexpected processing failure for %s — %s",
+                    info.task_id[:8],
+                    filing_id.accession_number,
+                    type(exc).__name__,
+                )
+                continue
 
             info.progress.step_label = "Storing"
             info.progress.step_index = 4
@@ -882,6 +962,31 @@ class TaskManager:
                     info.task_id[:8],
                     filing_id.accession_number,
                     exc.message,
+                )
+                continue
+            except Exception as exc:
+                # Defence-in-depth: ChromaDB / SQLite normally surface
+                # backend issues as :class:`DatabaseError`, but a
+                # corrupted index or transient driver glitch can leak a
+                # bare exception. One store failure must not collapse
+                # the task.
+                info.progress.filings_failed += 1
+                info.progress.filings_done += 1
+                self._push(
+                    info,
+                    {
+                        "type": "filing_failed",
+                        "ticker": ticker,
+                        "form_type": form_type,
+                        "accession_number": filing_id.accession_number,
+                        "error": "storage failed",
+                    },
+                )
+                logger.exception(
+                    "Task %s: unexpected storage failure for %s — %s",
+                    info.task_id[:8],
+                    filing_id.accession_number,
+                    type(exc).__name__,
                 )
                 continue
 
