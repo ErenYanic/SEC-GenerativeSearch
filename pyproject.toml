@@ -110,7 +110,6 @@ line-length = 100
 # removed from this list once the module is brought up to the same lint
 # standard as the rest of the project.
 extend-exclude = [
-    "src/sec_generative_search/api/websocket.py",
     "src/sec_generative_search/api/routes/filings.py",
     "src/sec_generative_search/api/routes/resources.py",
     "src/sec_generative_search/cli",

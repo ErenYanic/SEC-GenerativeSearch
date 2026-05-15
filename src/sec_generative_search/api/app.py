@@ -51,6 +51,7 @@ from sec_generative_search.api.routes.search import router as search_router
 from sec_generative_search.api.routes.session import router as session_router
 from sec_generative_search.api.routes.status import router as status_router
 from sec_generative_search.api.tasks import TaskManager, run_retention_eviction_safe
+from sec_generative_search.api.websocket import router as websocket_router
 from sec_generative_search.config.settings import get_settings
 from sec_generative_search.core.credentials import InMemorySessionCredentialStore
 from sec_generative_search.core.edgar_identity import InMemorySessionEdgarIdentityStore
@@ -301,6 +302,12 @@ def create_app() -> FastAPI:
     app.include_router(search_router, prefix="/api/search", tags=["search"])
     app.include_router(rag_router, prefix="/api/rag", tags=["rag"])
     app.include_router(ingest_router, prefix="/api/ingest", tags=["ingest"])
+    # WebSocket router is mounted at the root — the path itself
+    # (``/ws/ingest/{task_id}``) carries the namespace.  Browser
+    # ``WebSocket`` constructors cannot supply custom headers, so the
+    # route owns its own origin + API-key + ownership handshake; the
+    # HTTP middleware stack is bypassed for upgrades.
+    app.include_router(websocket_router, tags=["ingest"])
 
     return app
 

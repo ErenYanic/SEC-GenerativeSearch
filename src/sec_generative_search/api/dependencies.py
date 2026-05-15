@@ -85,6 +85,7 @@ __all__ = [
     "get_task_manager",
     "header_resolver",
     "is_admin_request",
+    "is_valid_session_id_shape",
     "parse_provider_key_headers",
     "request_scoped_resolver",
     "verify_admin_key",
@@ -238,6 +239,26 @@ _MAX_SESSION_ID_LEN = 256
 _VALID_SESSION_ID_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 
 
+def is_valid_session_id_shape(raw: str | None) -> bool:
+    """Return ``True`` when ``raw`` matches the server-mint shape.
+
+    The shape check is the only seam between a browser-supplied cookie
+    value and the credential / EDGAR / task stores; both the HTTP
+    resolver (:func:`extract_session_id`) and the WebSocket route call
+    through here so a single change to the alphabet or length bound
+    propagates everywhere.
+
+    ``None`` and any out-of-bound / non-alphabet value rounds to
+    ``False`` rather than raising — the resolver chain treats a forged
+    shape identically to "no session" so the next tier can take over.
+    """
+    if raw is None:
+        return False
+    if not (_MIN_SESSION_ID_LEN <= len(raw) <= _MAX_SESSION_ID_LEN):
+        return False
+    return all(ch in _VALID_SESSION_ID_CHARS for ch in raw)
+
+
 def extract_session_id(request: Request) -> str | None:
     """Return the validated ``session_id`` cookie value, or ``None``.
 
@@ -253,11 +274,7 @@ def extract_session_id(request: Request) -> str | None:
     log, store contents) to bypass.
     """
     raw = request.cookies.get(SESSION_COOKIE_NAME)
-    if raw is None:
-        return None
-    if not (_MIN_SESSION_ID_LEN <= len(raw) <= _MAX_SESSION_ID_LEN):
-        return None
-    if any(ch not in _VALID_SESSION_ID_CHARS for ch in raw):
+    if not is_valid_session_id_shape(raw):
         return None
     return raw
 
