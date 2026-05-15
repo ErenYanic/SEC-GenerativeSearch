@@ -265,7 +265,7 @@ class TestApiKeyHandshake:
             ) as ws,
         ):
             # Header is wrong → route waits for the auth message.
-            ws.send_json({"type": "auth", "api_key": "wrong"})
+            ws.send_json({"type": "auth", "api_key": "wrong"})  # pragma:allowlist secret
             ws.receive_json()  # never arrives — close instead
         assert exc.value.code == 4001
 
@@ -274,7 +274,7 @@ class TestApiKeyHandshake:
         manager.tasks["a" * 32] = _build_task(state=TaskState.COMPLETED)
         client = TestClient(app, base_url="https://testserver")
         with _connect(client, "a" * 32) as ws:
-            ws.send_json({"type": "auth", "api_key": "secret"})
+            ws.send_json({"type": "auth", "api_key": "secret"})  # pragma:allowlist secret
             snapshot = ws.receive_json()
             assert snapshot["type"] == "snapshot"
 
