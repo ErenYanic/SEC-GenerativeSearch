@@ -95,7 +95,7 @@ test = [
 ]
 
 [project.scripts]
-sec-rag = "sec_generative_search.cli.main:app"
+sec-rag = "sec_generative_search.cli.main:main"
 
 # ---------------------------------------------------------------------------
 # Ruff — linter and formatter configuration
