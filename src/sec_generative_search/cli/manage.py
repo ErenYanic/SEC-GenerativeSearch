@@ -1,49 +1,211 @@
-"""Database management subcommands (status, list, remove)."""
+"""Synchronous CLI wrappers over the management surface.
+
+Four operator-facing subcommands live here:
+
+- ``sec-rag manage status`` — snapshot of filing / chunk counts and
+  per-form breakdown.
+- ``sec-rag manage list``   — table of ingested filings with optional
+  ticker / form filters.
+- ``sec-rag manage remove`` — delete one filing by accession number, or
+  every filing matching ``--ticker`` and/or ``--form``.
+- ``sec-rag manage clear``  — drop everything from both backing stores.
+
+Operator trust model:
+
+1. **Reads** go directly through :class:`MetadataRegistry` (no
+   dual-store invariant on the read side; mirrors the API filings GETs).
+2. **Writes** go exclusively through :class:`FilingStore` — never a
+   direct :class:`ChromaDBClient` / :class:`MetadataRegistry` mutation
+   from this surface.  The store owns the ChromaDB-first ordering and
+   the best-effort rollback semantics.
+3. The CLI does **not** honour ``API_DEMO_MODE`` — it is an
+   operator-scope tool that bypasses every API control.  ``--yes`` is a "skip prompt"
+   ergonomic knob, never a demo-mode bypass.
+4. Like the other adapted CLIs, every user-facing string flows through
+   :func:`rich.markup.escape` so accession numbers / ticker lists with
+   incidental square brackets render verbatim.
+"""
+
+from __future__ import annotations
 
 from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from sec_semantic_search.config import get_settings
-from sec_semantic_search.core import DatabaseError
-from sec_semantic_search.database import ChromaDBClient, MetadataRegistry, delete_filings_batch
+from sec_generative_search.config.settings import get_settings
+from sec_generative_search.core.exceptions import DatabaseError
+from sec_generative_search.core.types import EmbedderStamp
+from sec_generative_search.database import (
+    ChromaDBClient,
+    FilingRecord,
+    FilingStore,
+    MetadataRegistry,
+)
+from sec_generative_search.providers.registry import ProviderRegistry
+
+__all__ = ["manage_app"]
+
 
 console = Console()
 
-manage_app = typer.Typer(no_args_is_help=True)
+manage_app = typer.Typer(
+    name="manage",
+    help="Inspect and prune the local ChromaDB + SQLite filing store.",
+    no_args_is_help=True,
+)
+
+
+# ---------------------------------------------------------------------------
+# Rendering helpers
+# ---------------------------------------------------------------------------
+
+
+def _print_error(
+    label: str,
+    message: str,
+    *,
+    details: str | None = None,
+    hint: str | None = None,
+) -> None:
+    """Render an error with optional details and a single hint line.
+
+    Mirrors the helper shape in :mod:`cli.evict` / :mod:`cli.ingest` —
+    every operator-facing string passes through :func:`rich.markup.escape`
+    so accession numbers / install hints with literal square brackets
+    render verbatim.
+    """
+    console.print(f"[red]{escape(label)}:[/red] {escape(message)}")
+    if details:
+        console.print(f"  [dim]{escape(details)}[/dim]")
+    if hint:
+        console.print(f"  [dim italic]Hint: {escape(hint)}[/dim italic]")
+
+
+# ---------------------------------------------------------------------------
+# Storage construction (shared by the four subcommands)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_stamp() -> EmbedderStamp:
+    """Compose the embedder stamp from settings + registry.
+
+    No factory call — :class:`ChromaDBClient` only needs the stamp to
+    seal the collection, and ``manage`` performs no embedding work.
+    This mirrors :mod:`cli.evict`'s posture: opening the collection is
+    a stamp-verification step, never a credential-gated path.
+    """
+    settings = get_settings()
+    embedding = settings.embedding
+    try:
+        dim = ProviderRegistry.get_dimension(embedding.provider, embedding.model_name)
+    except (KeyError, ValueError) as exc:
+        _print_error(
+            "Embedder configuration invalid",
+            f"Cannot resolve dimension for {embedding.provider}/{embedding.model_name}.",
+            details=str(exc),
+            hint=(
+                "Check EMBEDDING_PROVIDER and EMBEDDING_MODEL_NAME against "
+                "the registry — defaults live in providers/registry.py."
+            ),
+        )
+        raise typer.Exit(code=1) from None
+
+    return EmbedderStamp(
+        provider=embedding.provider,
+        model=embedding.model_name,
+        dimension=dim,
+    )
+
+
+def _open_registry_only() -> MetadataRegistry:
+    """Open the metadata registry for read-only queries.
+
+    Read paths (``status`` filing-count read, ``list``, ``remove``
+    detail lookup) do not need a stamped ChromaDB client.  Keeping the
+    happy-path open minimal avoids spurious
+    :class:`EmbeddingCollectionMismatchError` surfaces from the seal in
+    case a future flag flips the embedder stamp out from under an
+    operator that only wants to *read*.
+    """
+    try:
+        return MetadataRegistry()
+    except DatabaseError as exc:
+        _print_error(
+            "Registry initialisation failed",
+            exc.message,
+            details=exc.details,
+            hint="Check DB_METADATA_DB_PATH is readable and SQLCipher is set up if encrypted.",
+        )
+        raise typer.Exit(code=1) from None
+
+
+def _open_store() -> tuple[ChromaDBClient, MetadataRegistry, FilingStore]:
+    """Open both backing stores + the dual-store coordinator.
+
+    Required by every write path (``remove``, ``clear``) and by
+    ``status`` because the chunk count lives on the ChromaDB collection.
+    Failures surface as a single operator-facing envelope — the caller
+    never sees a stack trace.
+    """
+    stamp = _resolve_stamp()
+    try:
+        chroma = ChromaDBClient(stamp)
+        registry = MetadataRegistry()
+    except DatabaseError as exc:
+        _print_error(
+            "Storage initialisation failed",
+            exc.message,
+            details=exc.details,
+            hint=(
+                "Check DB_CHROMA_PATH / DB_METADATA_DB_PATH are accessible and "
+                "that the existing collection's embedder stamp matches EMBEDDING_*."
+            ),
+        )
+        raise typer.Exit(code=1) from None
+
+    return chroma, registry, FilingStore(chroma, registry)
+
+
+# ---------------------------------------------------------------------------
+# status
+# ---------------------------------------------------------------------------
 
 
 @manage_app.command("status")
 def status() -> None:
-    """
-    Show database status and filing statistics.
+    """Show filing / chunk counts, ticker list, and form-type breakdown.
 
-    Examples:
+    Example:
 
-        sec-search manage status
+        sec-rag manage status
     """
-    registry = MetadataRegistry()
-    chroma = ChromaDBClient()
+    chroma, registry, _ = _open_store()
     settings = get_settings()
 
-    stats = registry.get_statistics()
-    chunk_count = chroma.collection_count()
+    try:
+        stats = registry.get_statistics()
+        chunk_count = chroma.collection_count()
+    except DatabaseError as exc:
+        _print_error("Status query failed", exc.message, details=exc.details)
+        raise typer.Exit(code=1) from None
+
     max_filings = settings.database.max_filings
 
-    # Build a key-value table for the status metrics.
     table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column("Key", style="bold")
     table.add_column("Value")
 
-    # Filings count with capacity indicator.
     filing_style = "green" if stats.filing_count > 0 else "dim"
-    table.add_row("Filings", Text(f"{stats.filing_count}/{max_filings}", style=filing_style))
+    table.add_row(
+        "Filings",
+        Text(f"{stats.filing_count}/{max_filings}", style=filing_style),
+    )
 
-    # Chunk count.
     chunk_style = "green" if chunk_count > 0 else "dim"
     table.add_row("Chunks", Text(str(chunk_count), style=chunk_style))
 
@@ -53,14 +215,20 @@ def status() -> None:
             "Tickers",
             Text(f"{len(stats.tickers)} ({ticker_list})", style="cyan"),
         )
-
-        breakdown = "  |  ".join(f"{form}: {count}" for form, count in stats.form_breakdown.items())
+        breakdown = "  |  ".join(
+            f"{form}: {count}" for form, count in stats.form_breakdown.items()
+        )
         table.add_row("Forms", Text(breakdown))
     else:
         table.add_row("Tickers", Text("—", style="dim"))
         table.add_row("Forms", Text("—", style="dim"))
 
     console.print(Panel(table, title="[bold]Database Status[/bold]", expand=False))
+
+
+# ---------------------------------------------------------------------------
+# list
+# ---------------------------------------------------------------------------
 
 
 @manage_app.command("list")
@@ -74,22 +242,30 @@ def list_filings(
         typer.Option("--form", "-f", help="Filter by form type."),
     ] = None,
 ) -> None:
-    """
-    List all ingested filings.
+    """List ingested filings, optionally filtered by ticker / form.
+
+    Reads :class:`MetadataRegistry` directly — listing does not require
+    a stamped ChromaDB client (no dual-store invariant on the read
+    side).
 
     Examples:
 
-        sec-search manage list
+        sec-rag manage list
 
-        sec-search manage list -k AAPL
+        sec-rag manage list -k AAPL
 
-        sec-search manage list -f 10-K
+        sec-rag manage list -f 10-K
     """
-    registry = MetadataRegistry()
-    filings = registry.list_filings(
-        ticker=ticker.upper() if ticker else None,
-        form_type=form.upper() if form else None,
-    )
+    registry = _open_registry_only()
+
+    try:
+        filings = registry.list_filings(
+            ticker=ticker.upper() if ticker else None,
+            form_type=form.upper() if form else None,
+        )
+    except DatabaseError as exc:
+        _print_error("List failed", exc.message, details=exc.details)
+        raise typer.Exit(code=1) from None
 
     if not filings:
         console.print("[yellow]No filings found.[/yellow]")
@@ -109,15 +285,35 @@ def list_filings(
 
     for f in filings:
         table.add_row(
-            f.ticker,
-            f.form_type,
-            f.filing_date,
-            f.accession_number,
+            escape(f.ticker),
+            escape(f.form_type),
+            escape(f.filing_date),
+            escape(f.accession_number),
             str(f.chunk_count),
-            f.ingested_at,
+            escape(f.ingested_at),
         )
 
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# remove
+# ---------------------------------------------------------------------------
+
+
+def _render_filing_detail(filing: FilingRecord, *, title: str) -> None:
+    """Render a single-filing detail panel for the remove-confirmation prompt."""
+    detail = Table(show_header=False, box=None, padding=(0, 2))
+    detail.add_column("Key", style="bold")
+    detail.add_column("Value")
+    detail.add_row(
+        "Filing",
+        Text(f"{filing.ticker} {filing.form_type}", style="cyan"),
+    )
+    detail.add_row("Date", Text(filing.filing_date))
+    detail.add_row("Chunks", Text(str(filing.chunk_count), style="bold"))
+    detail.add_row("Accession", Text(filing.accession_number, style="dim"))
+    console.print(Panel(detail, title=title, expand=False))
 
 
 @manage_app.command("remove")
@@ -128,68 +324,85 @@ def remove(
     ] = None,
     ticker: Annotated[
         str | None,
-        typer.Option("--ticker", "-k", help="Remove all filings for this ticker."),
+        typer.Option(
+            "--ticker", "-k", help="Remove all filings for this ticker."
+        ),
     ] = None,
     form: Annotated[
         str | None,
-        typer.Option("--form", "-f", help="Remove all filings of this form type."),
+        typer.Option(
+            "--form", "-f", help="Remove all filings of this form type."
+        ),
     ] = None,
     yes: Annotated[
         bool,
-        typer.Option("--yes", "-y", help="Skip confirmation prompt."),
+        typer.Option(
+            "--yes",
+            "-y",
+            help="Skip the destructive-action confirmation prompt.",
+        ),
     ] = False,
 ) -> None:
-    """
-    Remove filing(s) from the database.
+    """Remove filing(s) from both backing stores.
 
-    Remove a single filing by accession number, or remove multiple filings
-    matching --ticker and/or --form filters.
+    Two modes:
+
+    - **Single**: positional accession number — deletes one filing.
+    - **Bulk**: ``--ticker`` and/or ``--form`` — deletes every filing
+      matching the filter combination.
+
+    Every write flows through :class:`FilingStore` — never a direct
+    :class:`ChromaDBClient` / :class:`MetadataRegistry` mutation.  The
+    coordinator owns the ChromaDB-first delete order and rolls back
+    SQLite-side on a ChromaDB failure.
 
     Examples:
 
-        sec-search manage remove 0000320193-24-000123
+        sec-rag manage remove 0000320193-24-000123
 
-        sec-search manage remove --ticker AAPL
+        sec-rag manage remove --ticker AAPL
 
-        sec-search manage remove --form 10-K
+        sec-rag manage remove --form 10-K
 
-        sec-search manage remove --ticker AAPL --form 10-K
+        sec-rag manage remove --ticker AAPL --form 10-K
 
-        sec-search manage remove --ticker MSFT -y
+        sec-rag manage remove --ticker MSFT -y
     """
     has_filters = ticker is not None or form is not None
 
     if accession_number is None and not has_filters:
-        console.print(
-            "[red]Provide an accession number or use --ticker/--form to select filings.[/red]"
+        _print_error(
+            "Missing target",
+            "Provide an accession number or use --ticker/--form to select filings.",
         )
         raise typer.Exit(code=1)
 
     if accession_number is not None and has_filters:
-        console.print("[red]Cannot combine an accession number with --ticker/--form filters.[/red]")
+        _print_error(
+            "Invalid flag combination",
+            "Cannot combine an accession number with --ticker/--form filters.",
+        )
         raise typer.Exit(code=1)
 
-    registry = MetadataRegistry()
+    _chroma, registry, store = _open_store()
 
-    # --- Single filing by accession number -----------------------------------
+    # --- Single filing by accession number ----------------------------------
     if accession_number is not None:
-        filing = registry.get_filing(accession_number)
+        try:
+            filing = registry.get_filing(accession_number)
+        except DatabaseError as exc:
+            _print_error("Lookup failed", exc.message, details=exc.details)
+            raise typer.Exit(code=1) from None
+
         if filing is None:
-            console.print(f"[red]Filing not found:[/red] {accession_number}")
-            console.print(
-                "  [dim italic]Hint: Run 'sec-search manage list' to see available "
-                "accession numbers.[/dim italic]"
+            _print_error(
+                "Filing not found",
+                escape(accession_number),
+                hint="Run 'sec-rag manage list' to see available accession numbers.",
             )
             raise typer.Exit(code=1)
 
-        detail = Table(show_header=False, box=None, padding=(0, 2))
-        detail.add_column("Key", style="bold")
-        detail.add_column("Value")
-        detail.add_row("Filing", Text(f"{filing.ticker} {filing.form_type}", style="cyan"))
-        detail.add_row("Date", Text(filing.filing_date))
-        detail.add_row("Chunks", Text(str(filing.chunk_count), style="bold"))
-        detail.add_row("Accession", Text(filing.accession_number, style="dim"))
-        console.print(Panel(detail, title="[bold yellow]Remove Filing[/bold yellow]", expand=False))
+        _render_filing_detail(filing, title="[bold yellow]Remove Filing[/bold yellow]")
 
         if not yes:
             confirmed = typer.confirm("Remove this filing?")
@@ -198,47 +411,53 @@ def remove(
                 raise typer.Exit(code=0)
 
         try:
-            chroma = ChromaDBClient()
-            chroma.delete_filing(accession_number)
-            registry.remove_filing(accession_number)
-        except DatabaseError as e:
-            console.print(f"[red]Removal failed:[/red] {e.message}")
-            console.print(
-                "  [dim italic]Hint: Check that the data directory is writable.[/dim italic]"
+            store.delete_filing(filing.accession_number)
+        except DatabaseError as exc:
+            _print_error(
+                "Removal failed",
+                exc.message,
+                details=exc.details,
+                hint="Check that the data directory is writable.",
             )
             raise typer.Exit(code=1) from None
 
         console.print(
-            f"[green]Removed:[/green] {filing.ticker} {filing.form_type} "
-            f"({filing.filing_date}) — {filing.chunk_count} chunks deleted"
+            f"[green]Removed:[/green] {escape(filing.ticker)} "
+            f"{escape(filing.form_type)} ({escape(filing.filing_date)}) — "
+            f"{filing.chunk_count} chunks deleted"
         )
         return
 
-    # --- Bulk removal by --ticker and/or --form ------------------------------
-    filings = registry.list_filings(
-        ticker=ticker.upper() if ticker else None,
-        form_type=form.upper() if form else None,
-    )
+    # --- Bulk removal by --ticker and/or --form -----------------------------
+    try:
+        filings = registry.list_filings(
+            ticker=ticker.upper() if ticker else None,
+            form_type=form.upper() if form else None,
+        )
+    except DatabaseError as exc:
+        _print_error("Lookup failed", exc.message, details=exc.details)
+        raise typer.Exit(code=1) from None
 
     if not filings:
         filter_desc = " and ".join(
             part
-            for part in [
+            for part in (
                 f"ticker={ticker.upper()}" if ticker else None,
                 f"form={form.upper()}" if form else None,
-            ]
+            )
             if part
         )
-        console.print(f"[yellow]No filings found matching {filter_desc}.[/yellow]")
+        console.print(
+            f"[yellow]No filings found matching {escape(filter_desc)}.[/yellow]"
+        )
         return
 
-    # Show what will be deleted.
     total_chunks = sum(f.chunk_count for f in filings)
     filter_parts: list[str] = []
     if ticker:
-        filter_parts.append(f"ticker=[cyan]{ticker.upper()}[/cyan]")
+        filter_parts.append(f"ticker=[cyan]{escape(ticker.upper())}[/cyan]")
     if form:
-        filter_parts.append(f"form=[green]{form.upper()}[/green]")
+        filter_parts.append(f"form=[green]{escape(form.upper())}[/green]")
     filter_desc = ", ".join(filter_parts)
 
     console.print(
@@ -248,52 +467,80 @@ def remove(
 
     for f in filings:
         console.print(
-            f"  [dim]•[/dim] {f.ticker} {f.form_type} ({f.filing_date}) — {f.chunk_count} chunks"
+            f"  [dim]•[/dim] {escape(f.ticker)} {escape(f.form_type)} "
+            f"({escape(f.filing_date)}) — {f.chunk_count} chunks"
         )
 
     console.print()
 
     if not yes:
-        confirmed = typer.confirm(f"{len(filings)} filing(s) will be deleted. Are you sure?")
+        confirmed = typer.confirm(
+            f"{len(filings)} filing(s) will be deleted. Are you sure?"
+        )
         if not confirmed:
             console.print("[dim]Cancelled.[/dim]")
             raise typer.Exit(code=0)
 
     try:
-        chroma = ChromaDBClient()
-        total_deleted = delete_filings_batch(
-            filings,
-            registry=registry,
-            chroma=chroma,
+        rows_removed = store.delete_filings_batch(
+            [f.accession_number for f in filings]
         )
-    except DatabaseError as e:
-        console.print(f"[red]Removal failed:[/red] {e.message}")
-        console.print("  [dim italic]Hint: Check that the data directory is writable.[/dim italic]")
+    except DatabaseError as exc:
+        _print_error(
+            "Removal failed",
+            exc.message,
+            details=exc.details,
+            hint="Check that the data directory is writable.",
+        )
         raise typer.Exit(code=1) from None
 
     console.print(
-        f"\n[green]Done:[/green] {len(filings)} filing(s) removed, {total_deleted} chunks deleted"
+        f"\n[green]Done:[/green] {rows_removed} filing(s) removed, "
+        f"{total_chunks} chunks deleted"
     )
+
+
+# ---------------------------------------------------------------------------
+# clear
+# ---------------------------------------------------------------------------
 
 
 @manage_app.command("clear")
 def clear(
     yes: Annotated[
         bool,
-        typer.Option("--yes", "-y", help="Skip confirmation prompt."),
+        typer.Option(
+            "--yes",
+            "-y",
+            help="Skip the destructive-action confirmation prompt.",
+        ),
     ] = False,
 ) -> None:
-    """
-    One command to rule them all — delete every filing from the database.
+    """Drop every filing from both backing stores.
+
+    Delegates to :meth:`FilingStore.clear_all`, which truncates the
+    SQLite ``filings`` table (``schema_version`` is preserved) and
+    re-seals the ChromaDB ``sec_filings`` collection.
+
+    The CLI is operator-scope and does **not** honour
+    ``API_DEMO_MODE`` — that flag exists to lock the API surface against
+    web users in cloud / demo profiles, not to gate an admin's local
+    tooling.  ``--yes`` is a "skip prompt" ergonomic knob, never a
+    demo-mode bypass.
 
     Examples:
 
-        sec-search manage clear
+        sec-rag manage clear
 
-        sec-search manage clear -y
+        sec-rag manage clear -y
     """
-    registry = MetadataRegistry()
-    filings = registry.list_filings()
+    _chroma, registry, store = _open_store()
+
+    try:
+        filings = registry.list_filings()
+    except DatabaseError as exc:
+        _print_error("Lookup failed", exc.message, details=exc.details)
+        raise typer.Exit(code=1) from None
 
     if not filings:
         console.print("[yellow]Database is already empty.[/yellow]")
@@ -305,28 +552,30 @@ def clear(
     console.print(
         f"\n[bold red]Clear Database[/bold red]\n"
         f"  {len(filings)} filing(s), {total_chunks} chunks, "
-        f"{len(unique_tickers)} ticker(s): {', '.join(unique_tickers)}\n"
+        f"{len(unique_tickers)} ticker(s): "
+        f"{escape(', '.join(unique_tickers))}\n"
     )
 
     if not yes:
-        confirmed = typer.confirm(f"ALL {len(filings)} filing(s) will be deleted. Are you sure?")
+        confirmed = typer.confirm(
+            f"ALL {len(filings)} filing(s) will be deleted. Are you sure?"
+        )
         if not confirmed:
             console.print("[dim]Cancelled.[/dim]")
             raise typer.Exit(code=0)
 
     try:
-        chroma = ChromaDBClient()
-        total_deleted = delete_filings_batch(
-            filings,
-            registry=registry,
-            chroma=chroma,
+        chunks_removed, filings_removed = store.clear_all()
+    except DatabaseError as exc:
+        _print_error(
+            "Clear failed",
+            exc.message,
+            details=exc.details,
+            hint="Check that the data directory is writable.",
         )
-    except DatabaseError as e:
-        console.print(f"[red]Clear failed:[/red] {e.message}")
-        console.print("  [dim italic]Hint: Check that the data directory is writable.[/dim italic]")
         raise typer.Exit(code=1) from None
 
     console.print(
-        f"\n[green]Database cleared:[/green] {len(filings)} filing(s) removed, "
-        f"{total_deleted} chunks deleted"
+        f"\n[green]Database cleared:[/green] {filings_removed} filing(s) removed, "
+        f"{chunks_removed} chunks deleted"
     )

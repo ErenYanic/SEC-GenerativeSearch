@@ -308,6 +308,12 @@ class TestCommandRegistration:
         group_names = {g.name for g in app.registered_groups}
         assert "ingest" in group_names
 
+    def test_manage_sub_typer_registered(self) -> None:
+        """``manage`` must be registered as a sub-Typer carrying ``status`` /
+        ``list`` / ``remove`` / ``clear``."""
+        group_names = {g.name for g in app.registered_groups}
+        assert "manage" in group_names
+
     def test_unfinished_groups_not_yet_registered(self) -> None:
         """The shell must not expose unfinished groups.
 
@@ -316,6 +322,6 @@ class TestCommandRegistration:
         """
         command_names = {c.name for c in app.registered_commands}
         group_names = {g.name for g in app.registered_groups}
-        forbidden = {"manage", "search", "rag", "provider"}
+        forbidden = {"search", "rag", "provider"}
         assert command_names.isdisjoint(forbidden)
         assert group_names.isdisjoint(forbidden)
