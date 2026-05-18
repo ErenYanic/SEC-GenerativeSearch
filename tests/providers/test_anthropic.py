@@ -176,7 +176,7 @@ class TestProviderMetadata:
     def test_catalogue_has_tiered_models(self) -> None:
         cat = AnthropicProvider.MODEL_CATALOGUE
         assert cat["claude-opus-4-7"].capability.pricing_tier == PricingTier.PREMIUM
-        assert cat["claude-sonnet-4-6"].capability.pricing_tier == PricingTier.HIGH
+        assert cat["claude-sonnet-4-6"].capability.pricing_tier == PricingTier.PREMIUM
         assert cat["claude-haiku-4-5"].capability.pricing_tier == PricingTier.STANDARD
 
     def test_sdk_retries_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:

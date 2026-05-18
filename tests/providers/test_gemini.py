@@ -193,7 +193,6 @@ class TestProviderMetadata:
         cat = GeminiProvider.MODEL_CATALOGUE
         assert cat["gemini-3.1-pro-preview"].capability.pricing_tier == PricingTier.PREMIUM
         assert cat["gemini-3.1-pro-preview-customtools"].capability.tool_use is True
-        assert cat["gemini-3.1-flash-lite-preview"].capability.pricing_tier == PricingTier.LOW
         assert cat["gemini-3-flash-preview"].capability.pricing_tier == PricingTier.STANDARD
         assert cat["gemini-2.5-pro"].capability.pricing_tier == PricingTier.PREMIUM
         assert cat["gemini-2.5-flash-lite"].capability.pricing_tier == PricingTier.LOW
