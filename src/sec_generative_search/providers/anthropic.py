@@ -130,7 +130,7 @@ class AnthropicProvider(BaseLLMProvider):
                 vision=True,
                 context_window_tokens=1_000_000,
                 max_output_tokens=64_000,
-                pricing_tier=PricingTier.HIGH,
+                pricing_tier=PricingTier.PREMIUM,
             ),
         ),
         "claude-haiku-4-5": ModelInfo(
