@@ -302,15 +302,20 @@ class TestCommandRegistration:
         names = {c.name for c in app.registered_commands}
         assert {"reindex", "evict", "backup", "restore", "export", "import"} <= names
 
+    def test_ingest_sub_typer_registered(self) -> None:
+        """The ingest shell must surface ``ingest`` as a group carrying
+        ``add`` and ``batch`` subcommands, not as a top-level command."""
+        group_names = {g.name for g in app.registered_groups}
+        assert "ingest" in group_names
+
     def test_unfinished_groups_not_yet_registered(self) -> None:
-        """Phases 12.2 - 12.8 introduce ``ingest`` / ``manage`` / ``search``
-        / ``rag`` / ``provider``.  Until then they MUST NOT be exposed —
-        registering a half-finished surface would be misleading to
-        operators.  This test fails loudly the moment a later phase wires
-        one of them so the doc / TODO catch up at the same time.
+        """The shell must not expose unfinished groups.
+
+        Registering a half-finished surface would be misleading to
+        operators.
         """
         command_names = {c.name for c in app.registered_commands}
         group_names = {g.name for g in app.registered_groups}
-        forbidden = {"ingest", "manage", "search", "rag", "provider"}
+        forbidden = {"manage", "search", "rag", "provider"}
         assert command_names.isdisjoint(forbidden)
         assert group_names.isdisjoint(forbidden)

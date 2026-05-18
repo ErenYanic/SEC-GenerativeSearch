@@ -17,6 +17,7 @@ from rich.markup import escape
 
 from sec_generative_search.cli.backup import backup, restore
 from sec_generative_search.cli.evict import evict
+from sec_generative_search.cli.ingest import ingest_app
 from sec_generative_search.cli.portable import export, import_
 from sec_generative_search.cli.reindex import reindex
 from sec_generative_search.config.settings import get_settings
@@ -123,6 +124,11 @@ app.command(name="backup")(backup)
 app.command(name="restore")(restore)
 app.command(name="export")(export)
 app.command(name="import")(import_)
+
+# ``ingest`` is a sub-Typer (``ingest add`` / ``ingest batch``) — it is
+# wired via ``add_typer`` so the two subcommands surface as ``sec-rag
+# ingest add ...`` / ``sec-rag ingest batch ...``.
+app.add_typer(ingest_app, name="ingest")
 
 
 def main() -> None:
