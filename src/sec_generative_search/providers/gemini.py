@@ -248,6 +248,19 @@ class GeminiProvider(_GeminiClientMixin, BaseLLMProvider):
                 pricing_tier=PricingTier.PREMIUM,
             ),
         ),
+        "gemini-3.1-flash-lite": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                vision=True,
+                context_window_tokens=1_048_576,
+                max_output_tokens=65_536,
+                pricing_tier=PricingTier.LOW,
+            ),
+        ),
         "gemini-3.1-flash-lite-preview": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
