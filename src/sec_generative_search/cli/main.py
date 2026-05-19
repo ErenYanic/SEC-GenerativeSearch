@@ -21,6 +21,7 @@ from sec_generative_search.cli.ingest import ingest_app
 from sec_generative_search.cli.manage import manage_app
 from sec_generative_search.cli.portable import export, import_
 from sec_generative_search.cli.reindex import reindex
+from sec_generative_search.cli.search import search
 from sec_generative_search.config.settings import get_settings
 from sec_generative_search.core.logging import configure_logging, suppress_third_party_loggers
 
@@ -125,6 +126,7 @@ app.command(name="backup")(backup)
 app.command(name="restore")(restore)
 app.command(name="export")(export)
 app.command(name="import")(import_)
+app.command(name="search")(search)
 
 # ``ingest`` is a sub-Typer (``ingest add`` / ``ingest batch``) — it is
 # wired via ``add_typer`` so the two subcommands surface as ``sec-rag

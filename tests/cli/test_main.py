@@ -300,7 +300,15 @@ class TestSignalHandling:
 class TestCommandRegistration:
     def test_adapted_operator_commands_registered(self) -> None:
         names = {c.name for c in app.registered_commands}
-        assert {"reindex", "evict", "backup", "restore", "export", "import"} <= names
+        assert {
+            "reindex",
+            "evict",
+            "backup",
+            "restore",
+            "export",
+            "import",
+            "search",
+        } <= names
 
     def test_ingest_sub_typer_registered(self) -> None:
         """The ingest shell must surface ``ingest`` as a group carrying
@@ -322,6 +330,6 @@ class TestCommandRegistration:
         """
         command_names = {c.name for c in app.registered_commands}
         group_names = {g.name for g in app.registered_groups}
-        forbidden = {"search", "rag", "provider"}
+        forbidden = {"rag", "provider"}
         assert command_names.isdisjoint(forbidden)
         assert group_names.isdisjoint(forbidden)
