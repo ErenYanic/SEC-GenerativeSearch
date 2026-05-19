@@ -1595,3 +1595,472 @@ class TestChatSecurity:
         assert result.exit_code == 0, result.output
         assert len(patched["embedders"]) == 1
         assert len(patched["llms"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# `--provider` / `--model` / `--openrouter-*` flags
+# ---------------------------------------------------------------------------
+
+
+class TestProviderModelOverride:
+    """``--provider`` / ``--model`` must override LLM_PROVIDER /
+    LLM_DEFAULT_MODEL exactly the way the API body does on
+    ``POST /api/rag/query``.
+
+    Validated through the same seams ``rag query`` uses internally:
+    the ``ProviderRegistry.get_capability`` probe receives the
+    overridden name + model, the ``build_llm_provider`` factory is
+    invoked with the overridden provider name, and the orchestrator
+    sees the overridden model on the ``model`` kwarg.
+    """
+
+    def test_provider_override_propagates_to_factory(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seen_names: list[str] = []
+
+        def _record_build(name: str, *, api_key_resolver: Any = None) -> Any:
+            seen_names.append(name)
+            return _FakeLLM()
+
+        monkeypatch.setattr(rag_module, "build_llm_provider", _record_build)
+
+        result = runner.invoke(
+            app,
+            ["rag", "query", "q", "--skip-plan", "--provider", "anthropic"],
+        )
+        assert result.exit_code == 0, result.output
+        # The factory was invoked with the override, not the settings default
+        # (which is ``openai`` in ``_StubSettings``).
+        assert seen_names == ["anthropic"]
+
+    def test_model_override_reaches_orchestrator(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        result = runner.invoke(
+            app,
+            [
+                "rag",
+                "query",
+                "q",
+                "--skip-plan",
+                "--model",
+                "claude-haiku-4-5",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        orch = patched["orchestrators"][-1]
+        assert orch.calls[0]["model"] == "claude-haiku-4-5"
+
+    def test_provider_and_model_combine(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``get_capability`` MUST see both overrides — the capability probe
+        is what drives ``prefer_structured_output``."""
+        seen: dict[str, Any] = {}
+
+        def _capability(name: str, surface: Any, *, model: Any = None) -> ProviderCapability:
+            seen["name"] = name
+            seen["model"] = model
+            return ProviderCapability(chat=True, structured_output=False)
+
+        monkeypatch.setattr(
+            "sec_generative_search.providers.registry.ProviderRegistry.get_capability",
+            classmethod(lambda cls, *a, **kw: _capability(*a, **kw)),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "rag",
+                "query",
+                "q",
+                "--skip-plan",
+                "--provider",
+                "anthropic",
+                "--model",
+                "claude-opus-4-7",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert seen["name"] == "anthropic"
+        assert seen["model"] == "claude-opus-4-7"
+
+    def test_empty_string_overrides_fall_back_to_settings(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Empty ``--provider`` / ``--model`` strings must not override the
+        settings defaults.  The settings fallback is the documented
+        contract: an empty string here would otherwise crash the
+        capability probe and surface as ``Unknown LLM provider``."""
+        seen_names: list[str] = []
+
+        def _record_build(name: str, *, api_key_resolver: Any = None) -> Any:
+            seen_names.append(name)
+            return _FakeLLM()
+
+        monkeypatch.setattr(rag_module, "build_llm_provider", _record_build)
+
+        result = runner.invoke(
+            app,
+            ["rag", "query", "q", "--skip-plan", "--provider", "", "--model", ""],
+        )
+        assert result.exit_code == 0, result.output
+        # Fell back to the settings default (``openai``).
+        assert seen_names == ["openai"]
+
+    def test_chat_provider_override_propagates(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seen_names: list[str] = []
+
+        def _record_build(name: str, *, api_key_resolver: Any = None) -> Any:
+            seen_names.append(name)
+            return _FakeLLM()
+
+        monkeypatch.setattr(rag_module, "build_llm_provider", _record_build)
+        _arm_stream_events([[_make_stream_final()]])
+
+        result = runner.invoke(
+            app,
+            ["rag", "chat", "--skip-plan", "--provider", "anthropic"],
+            input="q\n/exit\n",
+        )
+        assert result.exit_code == 0, result.output
+        assert seen_names == ["anthropic"]
+
+    def test_chat_model_override_reaches_every_turn(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        """Session-scope ``--model`` shadows the plan on every turn —
+        not just the first."""
+        _arm_stream_events([[_make_stream_final()], [_make_stream_final()]])
+        result = runner.invoke(
+            app,
+            ["rag", "chat", "--skip-plan", "--model", "claude-haiku-4-5"],
+            input="q1\nq2\n/exit\n",
+        )
+        assert result.exit_code == 0, result.output
+        orch = patched["orchestrators"][-1]
+        assert len(orch.stream_calls) == 2
+        for call in orch.stream_calls:
+            assert call["model"] == "claude-haiku-4-5"
+
+
+class TestOpenRouterRoutingHints:
+    """``--openrouter-provider`` / ``--openrouter-fallbacks`` must build
+    a frozen :class:`OpenRouterRoutingHints` and forward it into the
+    orchestrator's ``routing_hints`` kwarg.
+
+    The orchestrator is recorded; the actual hint pass-through to
+    OpenRouter's ``provider`` block is unit-tested separately in
+    ``tests/providers/test_openrouter.py``.  Here we only assert the
+    CLI wires the hint correctly and rejects mismatched provider /
+    flag combinations.
+    """
+
+    def test_routing_hints_forwarded_to_orchestrator(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # OpenRouter must register as a routing-honouring provider.
+        # ``ProviderRegistry`` ships this for real but stub
+        # ``get_capability`` to avoid touching the catalogue.
+        monkeypatch.setattr(
+            "sec_generative_search.providers.registry.ProviderRegistry.get_capability",
+            classmethod(
+                lambda cls, name, surface, *, model=None: ProviderCapability(
+                    chat=True, structured_output=False
+                )
+            ),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "rag",
+                "query",
+                "q",
+                "--skip-plan",
+                "--provider",
+                "openrouter",
+                "--model",
+                "openai/gpt-4o",
+                "--openrouter-provider",
+                "anthropic",
+                "--openrouter-provider",
+                "openai",
+                "--no-openrouter-fallbacks",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        orch = patched["orchestrators"][-1]
+        hint = orch.calls[0]["routing_hints"]
+        from sec_generative_search.providers.openrouter import (
+            OpenRouterRoutingHints,
+        )
+
+        assert isinstance(hint, OpenRouterRoutingHints)
+        assert hint.order == ("anthropic", "openai")
+        assert hint.allow_fallbacks is False
+
+    def test_no_routing_flags_yields_none(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        """Default behaviour: no openrouter flags → ``routing_hints=None``.
+        Confirms the hint surface is opt-in and adds no overhead to the
+        common path."""
+        result = runner.invoke(app, ["rag", "query", "q", "--skip-plan"])
+        assert result.exit_code == 0, result.output
+        orch = patched["orchestrators"][-1]
+        assert orch.calls[0]["routing_hints"] is None
+
+    def test_routing_hints_rejected_when_provider_mismatch(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        """The hard-fail guard: openrouter flags + non-openrouter
+        provider exits 1 with an actionable hint, BEFORE the storage
+        layer opens — a flag mismatch is a boundary error."""
+        result = runner.invoke(
+            app,
+            [
+                "rag",
+                "query",
+                "q",
+                "--skip-plan",
+                "--openrouter-provider",
+                "anthropic",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "Invalid flag combination" in result.output
+        assert "openrouter" in result.output.lower()
+        # No retrieval stack was constructed — the guard fires early.
+        assert patched["embedders"] == []
+        assert patched["orchestrators"] == []
+
+    def test_routing_fallback_flag_alone_rejected_on_mismatch(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        """``--no-openrouter-fallbacks`` alone (no ``--openrouter-provider``)
+        also trips the guard — the flag set is bound together."""
+        result = runner.invoke(
+            app,
+            [
+                "rag",
+                "query",
+                "q",
+                "--skip-plan",
+                "--no-openrouter-fallbacks",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "Invalid flag combination" in result.output
+        assert patched["embedders"] == []
+
+    def test_chat_routing_hints_forwarded_on_every_turn(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """In the REPL, the session-scope hint applies to every turn —
+        not just the first."""
+        monkeypatch.setattr(
+            "sec_generative_search.providers.registry.ProviderRegistry.get_capability",
+            classmethod(
+                lambda cls, name, surface, *, model=None: ProviderCapability(
+                    chat=True, structured_output=False
+                )
+            ),
+        )
+        _arm_stream_events([[_make_stream_final()], [_make_stream_final()]])
+        result = runner.invoke(
+            app,
+            [
+                "rag",
+                "chat",
+                "--skip-plan",
+                "--provider",
+                "openrouter",
+                "--openrouter-provider",
+                "anthropic",
+            ],
+            input="q1\nq2\n/exit\n",
+        )
+        assert result.exit_code == 0, result.output
+        orch = patched["orchestrators"][-1]
+        assert len(orch.stream_calls) == 2
+        from sec_generative_search.providers.openrouter import (
+            OpenRouterRoutingHints,
+        )
+
+        for call in orch.stream_calls:
+            hint = call["routing_hints"]
+            assert isinstance(hint, OpenRouterRoutingHints)
+            assert hint.order == ("anthropic",)
+
+    def test_chat_routing_hints_rejected_when_provider_mismatch(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        result = runner.invoke(
+            app,
+            [
+                "rag",
+                "chat",
+                "--openrouter-provider",
+                "anthropic",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "Invalid flag combination" in result.output
+        # No turn ever began.
+        assert patched["orchestrators"] == []
+
+
+@pytest.mark.security
+class TestOpenRouterRoutingSecurity:
+    """The routing-hints flag set MUST never leak credential-shaped data
+    into operator output or audit lines.
+
+    :class:`OpenRouterRoutingHints` carries no credential-shaped
+    fields by design (a registry-level security test enforces the
+    field set), but the CLI is a fresh surface — we re-verify the
+    discipline here so a future regression at this layer fails fast.
+    """
+
+    def test_audit_line_reports_metadata_only(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The audit log MUST record routing metadata (counts /
+        fallback toggle) — never the upstream slugs themselves.
+
+        Operators pivot on "was routing pinned?" without needing the
+        slug list, and keeping the slugs out of the audit line avoids a
+        Tier-2 disclosure of which vendors a given run preferred.
+        """
+        import logging
+
+        # Package logger has ``propagate = False`` by default; enable it
+        # so caplog (which attaches to root) sees the audit line.
+        pkg_logger = logging.getLogger("sec_generative_search")
+        prior_propagate = pkg_logger.propagate
+        pkg_logger.propagate = True
+        try:
+            monkeypatch.setattr(
+                "sec_generative_search.providers.registry.ProviderRegistry.get_capability",
+                classmethod(
+                    lambda cls, name, surface, *, model=None: ProviderCapability(
+                        chat=True, structured_output=False
+                    )
+                ),
+            )
+            with caplog.at_level("INFO", logger="sec_generative_search"):
+                result = runner.invoke(
+                    app,
+                    [
+                        "rag",
+                        "query",
+                        "q",
+                        "--skip-plan",
+                        "--provider",
+                        "openrouter",
+                        "--openrouter-provider",
+                        "secret-vendor-slug",
+                        "--no-openrouter-fallbacks",
+                    ],
+                )
+        finally:
+            pkg_logger.propagate = prior_propagate
+
+        assert result.exit_code == 0, result.output
+        # ``or_hints=`` lands on the audit line in a metadata-only shape.
+        audit_records = [r for r in caplog.records if "SECURITY_AUDIT" in r.getMessage()]
+        assert audit_records, "expected an audit log record"
+        joined = "\n".join(r.getMessage() for r in audit_records)
+        assert "or_hints=" in joined
+        # The upstream slug name MUST NOT appear in the audit line.
+        assert "secret-vendor-slug" not in joined
+
+    def test_routing_hints_is_frozen_after_construction(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The hint object handed to the orchestrator MUST be the
+        frozen :class:`OpenRouterRoutingHints` — never a mutable bag.
+        Mutating it after construction would let a future bug rewrite
+        the routing decision mid-call."""
+        monkeypatch.setattr(
+            "sec_generative_search.providers.registry.ProviderRegistry.get_capability",
+            classmethod(
+                lambda cls, name, surface, *, model=None: ProviderCapability(
+                    chat=True, structured_output=False
+                )
+            ),
+        )
+        result = runner.invoke(
+            app,
+            [
+                "rag",
+                "query",
+                "q",
+                "--skip-plan",
+                "--provider",
+                "openrouter",
+                "--openrouter-provider",
+                "anthropic",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        orch = patched["orchestrators"][-1]
+        hint = orch.calls[0]["routing_hints"]
+        from dataclasses import FrozenInstanceError
+
+        with pytest.raises(FrozenInstanceError):
+            hint.allow_fallbacks = True  # type: ignore[misc]

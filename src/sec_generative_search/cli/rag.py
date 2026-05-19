@@ -46,6 +46,18 @@ Trust model and load-bearing rules:
      orchestrator embeds the raw query.  Useful when the operator
      knows the question is plain English and does not want to spend
      the structured-output round-trip.
+   - ``--provider`` / ``--model`` override ``LLM_PROVIDER`` /
+     ``LLM_DEFAULT_MODEL`` for a single invocation (``query``) or for
+     the lifetime of the REPL (``chat``).
+   - ``--openrouter-provider`` (repeatable) and
+     ``--openrouter-fallbacks/--no-openrouter-fallbacks`` populate
+     :class:`OpenRouterRoutingHints` on the generation request.  The
+     hint is consumed only by :class:`OpenRouterProvider`; the CLI
+     hard-fails when either flag is supplied while the resolved
+     provider is not OpenRouter, so the operator never silently loses
+     a routing decision (every non-OpenRouter adapter drops the hint
+     via the OpenAI-compatible base's empty ``_extra_request_kwargs``
+     default).
 
 Logging discipline:
 
@@ -100,6 +112,7 @@ from sec_generative_search.providers.factory import (
     build_llm_provider,
     default_api_key_resolver,
 )
+from sec_generative_search.providers.openrouter import OpenRouterRoutingHints
 from sec_generative_search.providers.registry import (
     ProviderRegistry,
     ProviderSurface,
@@ -518,18 +531,107 @@ def _render_result(result: GenerationResult, *, refused: bool) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_provider_and_model() -> tuple[str, str]:
-    """Pick provider + model from settings.
+def _resolve_provider_and_model(
+    provider_override: str | None,
+    model_override: str | None,
+) -> tuple[str, str]:
+    """Pick provider + model from CLI overrides, with settings as fallback.
 
-    The CLI deliberately does NOT expose ``--provider`` / ``--model``
-    flags on the CLI surface yet.  Until those flags are added, the CLI
-    honours ``LLM_PROVIDER`` / ``LLM_DEFAULT_MODEL`` from the
-    environment, the same as the API tier.
+    Mirrors :func:`api.routes.rag._resolve_provider_and_model_query`'s
+    precedence (request body wins, settings is the fallback) so the CLI
+    and API surfaces describe the same operator mental model: an
+    explicit override always beats ``LLM_PROVIDER`` / ``LLM_DEFAULT_MODEL``
+    from the environment.  Empty strings on either flag fall back to the
+    settings value — Typer renders ``--model ""`` for empty input, and
+    silently treating that as "use the default" matches the API
+    schema's ``model: str | None`` field semantics.
     """
     settings = get_settings()
-    provider = settings.llm.default_provider
-    model = settings.llm.default_model or ""
+    provider = (provider_override or "").strip() or settings.llm.default_provider
+    model = (model_override or "").strip() or (settings.llm.default_model or "")
     return provider, model
+
+
+def _resolve_routing_hints(
+    provider_name: str,
+    *,
+    openrouter_provider: list[str] | None,
+    openrouter_fallbacks: bool | None,
+) -> OpenRouterRoutingHints | None:
+    """Build :class:`OpenRouterRoutingHints` from CLI flags, with a strict guard.
+
+    The orchestrator forwards the hint object verbatim into
+    :class:`GenerationRequest.routing_hints`; only
+    :class:`OpenRouterProvider` consumes it.  Allowing the flags to land
+    on a non-OpenRouter run would silently no-op (the OpenAI-compatible
+    base's empty ``_extra_request_kwargs`` default drops them), which is
+    a misleading UX: an operator who supplied ``--openrouter-provider
+    anthropic`` against ``--provider openai`` would expect the routing
+    to be honoured.  We fail closed instead.
+
+    The :meth:`ProviderRegistry.supports_upstream_routing` query is the
+    single source of truth — currently only the ``openrouter`` LLM entry
+    advertises the capability, and any future meta-provider that lights
+    it up would pick up the flags automatically.
+
+    Returns ``None`` when no openrouter flags are supplied; otherwise a
+    frozen :class:`OpenRouterRoutingHints` populated from the flag values.
+    """
+    has_any = bool(openrouter_provider) or openrouter_fallbacks is not None
+    if not has_any:
+        return None
+
+    try:
+        honours = ProviderRegistry.supports_upstream_routing(
+            provider_name, ProviderSurface.LLM
+        )
+    except KeyError:
+        # Unknown provider — the caller's capability probe will already
+        # have raised an envelope, but be defensive here in case this
+        # helper is ever invoked before that probe.
+        honours = False
+
+    if not honours:
+        _print_error(
+            "Invalid flag combination",
+            (
+                f"--openrouter-provider / --openrouter-fallbacks were supplied "
+                f"but the resolved LLM provider is {provider_name!r}, which "
+                "does not honour upstream-routing hints."
+            ),
+            hint=(
+                "Re-run with --provider openrouter (the only provider that "
+                "consumes these flags), or drop the --openrouter-* flags."
+            ),
+        )
+        raise typer.Exit(code=1)
+
+    # OpenRouterRoutingHints is frozen and tuple-valued; coerce the
+    # mutable list[str] from Typer into a tuple for hashability.  Pass
+    # the explicit None bool through verbatim so OpenRouter's own
+    # default for ``allow_fallbacks`` applies when the operator did
+    # not toggle ``--openrouter-fallbacks/--no-openrouter-fallbacks``.
+    return OpenRouterRoutingHints(
+        order=tuple(openrouter_provider or ()),
+        allow_fallbacks=openrouter_fallbacks,
+    )
+
+
+def _format_routing_hints_audit(hints: OpenRouterRoutingHints | None) -> str:
+    """Render routing hints as an audit-safe metadata fragment.
+
+    Reports only the count of upstream slugs and the boolean toggle —
+    the upstream-provider names themselves are deliberately omitted so
+    operators can pivot on "was routing pinned?" without leaking which
+    vendors a given run preferred (the slug list is operator-supplied
+    but still a Tier-2 disclosure that telemetry pipelines rarely need).
+    """
+    if hints is None:
+        return "none"
+    return (
+        f"order={len(hints.order)} "
+        f"fallbacks={hints.allow_fallbacks if hints.allow_fallbacks is not None else 'default'}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -604,6 +706,51 @@ def query(
             max=8192,
         ),
     ] = None,
+    provider: Annotated[
+        str | None,
+        typer.Option(
+            "--provider",
+            "-P",
+            help=(
+                "Override the LLM provider (e.g. openai / anthropic / openrouter). "
+                "Defaults to LLM_PROVIDER."
+            ),
+        ),
+    ] = None,
+    llm_model: Annotated[
+        str | None,
+        typer.Option(
+            "--model",
+            "-M",
+            help=(
+                "Override the LLM model slug (e.g. gpt-4o, claude-haiku-4-5, "
+                "openai/gpt-4o on openrouter).  Defaults to LLM_DEFAULT_MODEL "
+                "or the provider's own default."
+            ),
+        ),
+    ] = None,
+    openrouter_provider: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--openrouter-provider",
+            help=(
+                "Preferred upstream-provider slug for OpenRouter routing "
+                "(e.g. anthropic, openai).  Repeatable — earlier entries "
+                "take priority.  Rejected when --provider != openrouter."
+            ),
+        ),
+    ] = None,
+    openrouter_fallbacks: Annotated[
+        bool | None,
+        typer.Option(
+            "--openrouter-fallbacks/--no-openrouter-fallbacks",
+            help=(
+                "Allow OpenRouter to fall back to upstreams outside the "
+                "--openrouter-provider order.  Defaults to OpenRouter's "
+                "own default when unset.  Rejected when --provider != openrouter."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Run the full RAG pipeline non-streaming and render the answer.
 
@@ -617,6 +764,10 @@ def query(
         sec-rag rag query "Risk factors related to AI" --show-plan
 
         sec-rag rag query "What is revenue?" --skip-plan --ticker AAPL
+
+        sec-rag rag query "Risk factors" \\
+            --provider openrouter --model anthropic/claude-sonnet-4-6 \\
+            --openrouter-provider anthropic --no-openrouter-fallbacks
     """
     if show_plan and skip_plan:
         _print_error(
@@ -633,7 +784,7 @@ def query(
     _validate_date(until, "--until")
     effective_mode = _coerce_mode(mode)
 
-    provider_name, model_name = _resolve_provider_and_model()
+    provider_name, model_name = _resolve_provider_and_model(provider, llm_model)
 
     # Reject unknown providers up front (same shape as POST /api/rag/query).
     try:
@@ -658,6 +809,16 @@ def query(
             hint="Unset LLM_DEFAULT_MODEL to use the provider default.",
         )
         raise typer.Exit(code=1) from None
+
+    # Build routing hints (or hard-fail on a provider mismatch) BEFORE
+    # touching the storage layer — a misconfigured flag combination is
+    # a boundary error, not a runtime error, and surfacing it before any
+    # ChromaDB / SQLite open keeps the failure cheap and obvious.
+    routing_hints = _resolve_routing_hints(
+        provider_name,
+        openrouter_provider=openrouter_provider,
+        openrouter_fallbacks=openrouter_fallbacks,
+    )
 
     retrieval, registry = _build_retrieval()
     llm = _build_llm(registry, provider_name)
@@ -721,6 +882,7 @@ def query(
             model=model_name or None,
             max_output_tokens=max_output_tokens,
             prefer_structured_output=capability.structured_output,
+            routing_hints=routing_hints,
         )
     except ProviderAuthError:
         _print_error(
@@ -778,6 +940,10 @@ def query(
     refused = not result.retrieved_chunks and not result.citations
 
     # Metadata-only audit line — never the question, plan, or key.
+    # ``or_hints`` reports only counts / the boolean toggle so the
+    # routing decision is auditable without leaking the upstream slugs
+    # (operators can pivot on whether routing was active without seeing
+    # which vendors a given run preferred).
     audit_log(
         "cli_rag_query",
         endpoint="cli rag query",
@@ -788,7 +954,8 @@ def query(
             f"mode={(effective_mode or plan.suggested_answer_mode).value} "
             f"prompt_version={result.prompt_version} "
             f"chunks={len(result.retrieved_chunks)} "
-            f"citations={len(result.citations)} refused={refused}"
+            f"citations={len(result.citations)} refused={refused} "
+            f"or_hints={_format_routing_hints_audit(routing_hints)}"
         ),
     )
 
@@ -884,6 +1051,7 @@ def _run_chat_stream(
     history: list[ConversationTurn] | None,
     prefer_structured_output: bool,
     provider_name: str,
+    routing_hints: OpenRouterRoutingHints | None = None,
 ) -> tuple[GenerationResult | None, bool]:
     """Consume ``orchestrator.generate_stream`` interactively.
 
@@ -938,6 +1106,7 @@ def _run_chat_stream(
                 max_output_tokens=max_output_tokens,
                 history=history,
                 prefer_structured_output=prefer_structured_output,
+                routing_hints=routing_hints,
             ):
                 if cancel_event.is_set():
                     # Stop pushing further events; the consumer has
@@ -1126,6 +1295,49 @@ def chat(
             max=8192,
         ),
     ] = None,
+    provider: Annotated[
+        str | None,
+        typer.Option(
+            "--provider",
+            "-P",
+            help=(
+                "Override the LLM provider for every turn in this session. "
+                "Defaults to LLM_PROVIDER."
+            ),
+        ),
+    ] = None,
+    llm_model: Annotated[
+        str | None,
+        typer.Option(
+            "--model",
+            "-M",
+            help=(
+                "Override the LLM model slug for every turn in this session. "
+                "Defaults to LLM_DEFAULT_MODEL or the provider's own default."
+            ),
+        ),
+    ] = None,
+    openrouter_provider: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--openrouter-provider",
+            help=(
+                "Preferred upstream-provider slug for OpenRouter routing. "
+                "Repeatable.  Rejected when --provider != openrouter."
+            ),
+        ),
+    ] = None,
+    openrouter_fallbacks: Annotated[
+        bool | None,
+        typer.Option(
+            "--openrouter-fallbacks/--no-openrouter-fallbacks",
+            help=(
+                "Allow OpenRouter to fall back to upstreams outside the "
+                "--openrouter-provider order.  Rejected when "
+                "--provider != openrouter."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Open an interactive RAG chat over ingested SEC filings.
 
@@ -1154,7 +1366,7 @@ def chat(
     _validate_date(until, "--until")
     effective_mode = _coerce_mode(mode)
 
-    provider_name, model_name = _resolve_provider_and_model()
+    provider_name, model_name = _resolve_provider_and_model(provider, llm_model)
 
     # Pre-stack validation mirrors `rag query`: reject unknown
     # providers / models before we open ChromaDB or the registry so
@@ -1181,6 +1393,15 @@ def chat(
             hint="Unset LLM_DEFAULT_MODEL to use the provider default.",
         )
         raise typer.Exit(code=1) from None
+
+    # Session-scope routing hints — built once, applied to every turn.
+    # The hard-fail on provider mismatch fires before any storage open
+    # so the operator never opens an SQLite handle on a doomed session.
+    routing_hints = _resolve_routing_hints(
+        provider_name,
+        openrouter_provider=openrouter_provider,
+        openrouter_fallbacks=openrouter_fallbacks,
+    )
 
     retrieval, registry = _build_retrieval()
     llm = _build_llm(registry, provider_name)
@@ -1304,6 +1525,7 @@ def chat(
             history=history or None,
             prefer_structured_output=capability.structured_output,
             provider_name=provider_name,
+            routing_hints=routing_hints,
         )
 
         if interrupted or result is None:
@@ -1330,7 +1552,8 @@ def chat(
                 f"prompt_version={result.prompt_version} "
                 f"chunks={len(result.retrieved_chunks)} "
                 f"citations={len(result.citations)} "
-                f"history_turns={len(history)} refused={refused}"
+                f"history_turns={len(history)} refused={refused} "
+                f"or_hints={_format_routing_hints_audit(routing_hints)}"
             ),
         )
 

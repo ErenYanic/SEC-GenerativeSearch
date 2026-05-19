@@ -73,6 +73,9 @@ if TYPE_CHECKING:
         BaseLLMProvider,
         GenerationRequest,
     )
+    from sec_generative_search.providers.openrouter import (
+        OpenRouterRoutingHints,
+    )
     from sec_generative_search.search.retrieval import (
         RetrievalService,
         TokenCounter,
@@ -186,6 +189,7 @@ class RAGOrchestrator:
         history: list[ConversationTurn] | None = None,
         prefer_structured_output: bool = False,
         extra_filters: dict | None = None,
+        routing_hints: OpenRouterRoutingHints | None = None,
     ) -> GenerationResult:
         """Run the full pipeline non-streaming and return the final result.
 
@@ -210,6 +214,16 @@ class RAGOrchestrator:
                 on top of the plan's filters (e.g. UI-edited chips
                 that the user wants to take effect even though
                 ``plan`` was generated before the edit).
+            routing_hints: Optional :class:`OpenRouterRoutingHints` for
+                upstream-provider routing.  Forwarded verbatim into the
+                :class:`GenerationRequest` and consumed only when the
+                resolved provider is :class:`OpenRouterProvider`; every
+                other adapter silently ignores the field via the
+                OpenAI-compatible base's empty ``_extra_request_kwargs``
+                default.  Callers (CLI / API / web) are responsible for
+                rejecting hints when the provider does not advertise
+                ``supports_upstream_routing`` — the orchestrator is the
+                neutral plumbing layer.
 
         Returns:
             :class:`GenerationResult` with citations, retrieved chunks,
@@ -263,6 +277,7 @@ class RAGOrchestrator:
             model=effective_model,
             max_output_tokens=allocation.answer_tokens,
             prefer_structured_output=prefer_structured_output,
+            routing_hints=routing_hints,
         )
 
         logger.info(
@@ -308,6 +323,7 @@ class RAGOrchestrator:
         history: list[ConversationTurn] | None = None,
         prefer_structured_output: bool = False,
         extra_filters: dict | None = None,
+        routing_hints: OpenRouterRoutingHints | None = None,
     ) -> Iterator[StreamEvent]:
         """Stream the answer and yield :class:`StreamEvent` deltas.
 
@@ -370,6 +386,7 @@ class RAGOrchestrator:
             model=effective_model,
             max_output_tokens=allocation.answer_tokens,
             prefer_structured_output=prefer_structured_output,
+            routing_hints=routing_hints,
         )
 
         logger.info(
@@ -595,6 +612,7 @@ class RAGOrchestrator:
         model: str,
         max_output_tokens: int,
         prefer_structured_output: bool,
+        routing_hints: OpenRouterRoutingHints | None = None,
     ) -> GenerationRequest:
         """Build the :class:`GenerationRequest` passed to the provider."""
         # Local import keeps top-level imports light.
@@ -607,6 +625,7 @@ class RAGOrchestrator:
             max_output_tokens=max_output_tokens,
             response_format="json" if prefer_structured_output else "text",
             response_schema=_CITATION_ENVELOPE_SCHEMA if prefer_structured_output else None,
+            routing_hints=routing_hints,
         )
 
     def _build_refusal_result(
