@@ -20,6 +20,7 @@ from sec_generative_search.cli.evict import evict
 from sec_generative_search.cli.ingest import ingest_app
 from sec_generative_search.cli.manage import manage_app
 from sec_generative_search.cli.portable import export, import_
+from sec_generative_search.cli.provider import provider_app
 from sec_generative_search.cli.rag import rag_app
 from sec_generative_search.cli.reindex import reindex
 from sec_generative_search.cli.search import search
@@ -139,9 +140,13 @@ app.add_typer(ingest_app, name="ingest")
 # ``sec-rag manage <verb> ...``.
 app.add_typer(manage_app, name="manage")
 
-# ``rag`` is a sub-Typer (``rag query`` now; ``rag chat`` is wired later)
-# — wired so the verbs surface as ``sec-rag rag query ...``.
+# ``rag`` is a sub-Typer (``rag query`` + ``rag chat``) — wired so the
+# verbs surface as ``sec-rag rag <verb> ...``.
 app.add_typer(rag_app, name="rag")
+
+# ``provider`` is a sub-Typer (``provider list`` / ``validate`` / ``set``).
+# Operator-scope only — admin-default credentials in the encrypted store.
+app.add_typer(provider_app, name="provider")
 
 
 def main() -> None:

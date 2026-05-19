@@ -323,19 +323,12 @@ class TestCommandRegistration:
         assert "manage" in group_names
 
     def test_rag_sub_typer_registered(self) -> None:
-        """``rag`` must be registered as a sub-Typer carrying ``query``
-        (and later ``chat``)."""
+        """``rag`` must be registered as a sub-Typer carrying ``query`` and ``chat``."""
         group_names = {g.name for g in app.registered_groups}
         assert "rag" in group_names
 
-    def test_unfinished_groups_not_yet_registered(self) -> None:
-        """The shell must not expose unfinished groups.
-
-        Registering a half-finished surface would be misleading to
-        operators.
-        """
-        command_names = {c.name for c in app.registered_commands}
+    def test_provider_sub_typer_registered(self) -> None:
+        """``provider`` must be registered as a sub-Typer carrying ``list`` /
+        ``validate`` / ``set``."""
         group_names = {g.name for g in app.registered_groups}
-        forbidden = {"provider"}
-        assert command_names.isdisjoint(forbidden)
-        assert group_names.isdisjoint(forbidden)
+        assert "provider" in group_names
