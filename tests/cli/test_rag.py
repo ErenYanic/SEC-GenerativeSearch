@@ -31,6 +31,7 @@ Goals:
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from typing import Any, ClassVar
 
@@ -66,6 +67,32 @@ from sec_generative_search.core.types import (
 from sec_generative_search.providers.base import ProviderCapability
 from sec_generative_search.rag.modes import AnswerMode
 from sec_generative_search.rag.query_understanding import QueryPlan
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+# Strips ANSI colour escapes; Click renders :class:`typer.BadParameter`
+# inside a Rich-styled panel that injects colour codes between words and
+# soft-wraps the message to the panel width.  In a narrow CI terminal
+# that means a literal substring like ``"--since and --until must be
+# supplied together"`` is broken by both colour codes and newlines, so a
+# raw ``in`` check fails even when the message is intact.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _stripped(output: str) -> str:
+    """Return *output* with ANSI codes removed and whitespace collapsed.
+
+    Click / Rich panels render error messages with colour codes and
+    word-wrap that vary with terminal width.  Tests that need to assert
+    on a substring should anchor against this normalised view rather
+    than against the raw bytes — otherwise CI runs with narrower
+    terminals than the developer's local box flake.
+    """
+    return re.sub(r"\s+", " ", _ANSI_RE.sub("", output))
+
 
 # ---------------------------------------------------------------------------
 # Test doubles
@@ -522,7 +549,7 @@ class TestPlanOverrides:
             ["rag", "query", "q", "--skip-plan", "--since", "2023-01-01"],
         )
         assert result.exit_code == 2
-        assert "--since and --until must be supplied together" in result.output
+        assert "--since and --until must be supplied together" in _stripped(result.output)
         assert patched["orchestrators"] == []
 
     def test_mode_override(
@@ -555,7 +582,7 @@ class TestPlanOverrides:
             ["rag", "query", "q", "--skip-plan", "--mode", "analyitcal"],
         )
         assert result.exit_code == 2
-        assert "Invalid --mode" in result.output
+        assert "Invalid --mode" in _stripped(result.output)
         assert patched["orchestrators"] == []
 
 
