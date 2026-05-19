@@ -285,7 +285,7 @@ def _process_and_store(
     The dual-store coordinator owns the ChromaDB-first ordering + the
     SQLite rollback semantics — the CLI never touches either backend
     directly.  ``register_if_new=False`` matches the carry-over path
-    AGENT.md prescribes for pre-checked callers.
+    used for pre-checked callers.
     """
     store.store_filing(processed, register_if_new=False)
 

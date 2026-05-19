@@ -1,0 +1,786 @@
+"""Synchronous CLI wrappers over :class:`RAGOrchestrator`.
+
+One operator-facing subcommand lives here:
+
+- ``sec-rag rag query QUESTION`` — run the full understand → retrieve →
+  generate pipeline non-streaming and render the answer + citations +
+  traceability.
+
+Trust model and load-bearing rules:
+
+1. The embedder is built via :func:`build_embedder`; the LLM via
+   :func:`build_llm_provider` — both *sole construction seams*.  Direct
+   adapter instantiation is forbidden at this surface so the resolver
+   chain stays the only credential path.
+2. The CLI runs at operator scope: no auth gate, no per-session EDGAR
+   identity, no rate limit, no access-log redaction.  Distributing CLI
+   access to team users in Scenario B/C is unsupported — the web is
+   the team-user surface.
+3. The CLI resolver chain is ``encrypted-user (ADMIN_USER_ID="__admin__")
+   → admin-env (default_api_key_resolver)`` — no header tier, no
+   session tier (neither exists at the terminal).  The encrypted tier
+   is only added when both ``DB_PERSIST_PROVIDER_CREDENTIALS=true`` and
+   SQLCipher are configured; otherwise the chain collapses to admin-env
+   alone.  No ``--api-key`` flag on any command — the shell history
+   and ``/proc/<pid>/environ`` footgun is intentional.
+4. ``rag query`` accepts a positional QUESTION and synthesises the
+   ``QueryPlan`` itself.  The wire-tier ``/api/rag/query`` enforces a
+   plan-only shape because the web UI's chip-edit review is the
+   human-in-the-loop step; at the operator terminal that gate is the
+   operator themselves, and we offer two equivalent affordances:
+
+   - ``--show-plan`` runs ``understand_query``, prints the plan, exits
+     0.  The operator reads the plan, then re-runs the command after
+     applying any overrides via the flags below.  This is the CLI
+     analogue of the web's chip-edit step.
+   - ``--ticker`` / ``--form`` / ``--since`` / ``--until`` / ``--mode``
+     override individual plan fields after the auto-plan.  The
+     overrides shadow the model's extraction whenever supplied.
+   - ``--skip-plan`` bypasses ``understand_query`` entirely; the
+     orchestrator embeds the raw query.  Useful when the operator
+     knows the question is plain English and does not want to spend
+     the structured-output round-trip.
+
+Logging discipline:
+
+- The raw question is Tier 3 user-generated content.  ``audit_log``
+  emits a single ``cli_rag_query`` line carrying only metadata
+  (provider, model, mode, language, counts) — never the question, the
+  plan body, or the resolved provider key.
+- :func:`redact_for_log` already wraps every internal query reference
+  inside :class:`RAGOrchestrator` / :class:`RetrievalService`; this
+  module never re-emits the raw question at any log level.
+
+Output discipline mirrors the rest of the adapted CLI surface: every
+operator-facing string flows through :func:`rich.markup.escape` so
+retrieved text containing literal ``[red]...[/red]`` cannot repaint
+operator output — the same hostile-markup defence ``cli.search`` ships.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Annotated
+
+import typer
+from rich.console import Console
+from rich.markup import escape
+from rich.panel import Panel
+from rich.table import Table
+
+from sec_generative_search.config.settings import get_settings
+from sec_generative_search.core.exceptions import (
+    ConfigurationError,
+    DatabaseError,
+    GenerationError,
+    ProviderAuthError,
+    ProviderError,
+    ProviderRateLimitError,
+    ProviderTimeoutError,
+    SearchError,
+)
+from sec_generative_search.core.logging import audit_log
+from sec_generative_search.core.types import (
+    Citation,
+    EmbedderStamp,
+    GenerationResult,
+)
+from sec_generative_search.database import ChromaDBClient, MetadataRegistry
+from sec_generative_search.providers.factory import (
+    build_embedder,
+    build_llm_provider,
+    default_api_key_resolver,
+)
+from sec_generative_search.providers.registry import (
+    ProviderRegistry,
+    ProviderSurface,
+)
+from sec_generative_search.rag.modes import AnswerMode
+from sec_generative_search.rag.orchestrator import RAGOrchestrator
+from sec_generative_search.rag.query_understanding import (
+    QueryPlan,
+    understand_query,
+)
+from sec_generative_search.search import RetrievalService
+
+__all__ = ["rag_app"]
+
+
+console = Console()
+
+rag_app = typer.Typer(
+    name="rag",
+    help="Ask grounded questions over ingested SEC filings.",
+    no_args_is_help=True,
+)
+
+
+# Permanent admin-user id for the encrypted store.  Mirrors
+# ``api.dependencies.ADMIN_USER_ID``; duplicated here so the CLI does not
+# import from ``api/`` (the two surfaces are deliberately decoupled).
+_ADMIN_USER_ID = "__admin__"
+
+
+# ---------------------------------------------------------------------------
+# Rendering helpers
+# ---------------------------------------------------------------------------
+
+
+def _print_error(
+    label: str,
+    message: str,
+    *,
+    details: str | None = None,
+    hint: str | None = None,
+) -> None:
+    """Render an error with optional details and a single hint line."""
+    console.print(f"[red]{escape(label)}:[/red] {escape(message)}")
+    if details:
+        console.print(f"  [dim]{escape(details)}[/dim]")
+    if hint:
+        console.print(f"  [dim italic]Hint: {escape(hint)}[/dim italic]")
+
+
+def _validate_date(value: str | None, param_name: str) -> str | None:
+    """Validate ``YYYY-MM-DD`` strings at the CLI boundary.
+
+    Same shape as ``cli.search`` / ``cli.ingest``.  Surfacing a
+    :class:`typer.BadParameter` keeps the error consistent with the rest
+    of the CLI.
+    """
+    if value is None:
+        return None
+    try:
+        datetime.strptime(value, "%Y-%m-%d")  # noqa: DTZ007 — naive ISO date is intentional
+    except ValueError:
+        raise typer.BadParameter(
+            f"Invalid date format for {param_name}: {value!r}. Expected YYYY-MM-DD."
+        ) from None
+    return value
+
+
+def _coerce_mode(value: str | None) -> AnswerMode | None:
+    """Lift the ``--mode`` flag onto :class:`AnswerMode` strictly.
+
+    Unlike :meth:`AnswerMode.from_string` (which falls back to
+    ``CONCISE`` on unknown values to keep the orchestrator tolerant of
+    LLM output), the CLI fails closed: an unknown ``--mode`` value
+    must surface as a :class:`typer.BadParameter`.  Otherwise an
+    operator typing ``--mode analyitcal`` would silently receive
+    ``concise`` and never see the typo.
+    """
+    if value is None:
+        return None
+    normalised = value.strip().lower()
+    try:
+        return AnswerMode(normalised)
+    except ValueError as exc:
+        valid = ", ".join(m.value for m in AnswerMode)
+        raise typer.BadParameter(
+            f"Invalid --mode: {value!r}. Expected one of: {valid}."
+        ) from exc
+
+
+# ---------------------------------------------------------------------------
+# Resolver chain (operator scope)
+# ---------------------------------------------------------------------------
+
+
+def _build_api_key_resolver(registry: MetadataRegistry):  # type: ignore[no-untyped-def]
+    """Compose the operator-scope resolver chain.
+
+    The CLI uses ``encrypted-user (ADMIN_USER_ID="__admin__") →
+    admin-env (default_api_key_resolver)`` — no header tier, no session
+    tier (neither exists at the terminal).
+
+    The encrypted-user tier is only added when both
+    ``DB_PERSIST_PROVIDER_CREDENTIALS=true`` *and* SQLCipher are
+    configured: :class:`EncryptedCredentialStore` refuses construction
+    otherwise.  A misconfigured environment is silently degraded to
+    admin-env alone rather than failing closed — ``rag query`` should
+    still work in Scenario A where the operator passes
+    ``OPENAI_API_KEY`` directly.  The ``provider set`` command in
+    the provider-management flow hard-fails when the encrypted tier is missing because
+    *writing* a credential under those conditions would silently fall
+    back to plaintext; *reading* through admin-env is the documented
+    Scenario A path.
+
+    Returns:
+        A first-hit-wins callable matching the ``ApiKeyResolver``
+        shape — plugs straight into :func:`build_llm_provider`.
+    """
+    # Local imports keep this module's top-level import surface
+    # decoupled from the encrypted-store code path; operators on
+    # admin-env only never pay the import cost.
+    from sec_generative_search.core.credentials import (
+        chain_resolvers,
+        encrypted_user_resolver,
+    )
+
+    settings = get_settings()
+    chain = []
+    if settings.database.persist_provider_credentials and registry.encrypted:
+        # Local import to avoid pulling sqlcipher symbols when the
+        # encrypted tier is not in play.
+        from sec_generative_search.database.credentials import (
+            EncryptedCredentialStore,
+        )
+
+        try:
+            store = EncryptedCredentialStore(registry)
+            chain.append(encrypted_user_resolver(store, _ADMIN_USER_ID))
+        except ConfigurationError:
+            # Defensive: settings validation should make this
+            # unreachable, but a hand-crafted registry could land
+            # here.  Fall through to admin-env silently.
+            pass
+
+    chain.append(default_api_key_resolver)
+    return chain_resolvers(*chain)
+
+
+# ---------------------------------------------------------------------------
+# Stack construction
+# ---------------------------------------------------------------------------
+
+
+def _resolve_stamp() -> EmbedderStamp:
+    """Compose the embedder stamp from settings + registry.
+
+    Mirrors :mod:`cli.manage`'s ``_resolve_stamp`` so the failure
+    envelope is uniform across the adapted CLI surface.
+    """
+    settings = get_settings()
+    embedding = settings.embedding
+    try:
+        dim = ProviderRegistry.get_dimension(embedding.provider, embedding.model_name)
+    except (KeyError, ValueError) as exc:
+        _print_error(
+            "Embedder configuration invalid",
+            f"Cannot resolve dimension for {embedding.provider}/{embedding.model_name}.",
+            details=str(exc),
+            hint=(
+                "Check EMBEDDING_PROVIDER and EMBEDDING_MODEL_NAME against "
+                "the registry — defaults live in providers/registry.py."
+            ),
+        )
+        raise typer.Exit(code=1) from None
+    return EmbedderStamp(
+        provider=embedding.provider,
+        model=embedding.model_name,
+        dimension=dim,
+    )
+
+
+def _build_retrieval() -> tuple[RetrievalService, MetadataRegistry]:
+    """Build the retrieval primitive + open the registry handle.
+
+    The registry handle is returned so the caller can compose the
+    encrypted-user resolver tier (which reuses the registry's
+    connection) without re-opening SQLite/SQLCipher.
+    """
+    settings = get_settings()
+    embedding = settings.embedding
+
+    try:
+        embedder = build_embedder(embedding)
+    except ConfigurationError as exc:
+        _print_error(
+            "Embedder construction failed",
+            exc.message,
+            hint="Set the expected API-key env var for the embedding provider.",
+        )
+        raise typer.Exit(code=1) from None
+    except KeyError as exc:
+        _print_error(
+            "Embedder unavailable",
+            f"Provider {embedding.provider!r} requires additional packages.",
+            details=str(exc),
+            hint=(
+                "Install the matching extra, e.g. "
+                "`uv pip install -e '.[local-embeddings]'` for the local provider."
+            ),
+        )
+        raise typer.Exit(code=1) from None
+
+    stamp = _resolve_stamp()
+
+    try:
+        chroma = ChromaDBClient(stamp)
+        registry = MetadataRegistry()
+    except DatabaseError as exc:
+        _print_error(
+            "Storage initialisation failed",
+            exc.message,
+            details=exc.details,
+            hint=(
+                "Check DB_CHROMA_PATH / DB_METADATA_DB_PATH are accessible and "
+                "that the existing collection's embedder stamp matches EMBEDDING_*."
+            ),
+        )
+        raise typer.Exit(code=1) from None
+
+    return RetrievalService(embedder=embedder, chroma_client=chroma), registry
+
+
+def _build_llm(registry: MetadataRegistry, provider_name: str):  # type: ignore[no-untyped-def]
+    """Build the LLM via the operator-scope resolver chain.
+
+    Failures map onto the same operator-facing envelopes the API uses
+    so the operator never sees a stack trace for a credential / extras
+    misconfiguration.
+    """
+    resolver = _build_api_key_resolver(registry)
+    try:
+        return build_llm_provider(provider_name, api_key_resolver=resolver)
+    except ConfigurationError as exc:
+        _print_error(
+            "LLM provider key required",
+            f"No API key resolved for provider '{provider_name}'.",
+            details=exc.message,
+            hint=(
+                "Set the provider's admin-env var "
+                "(e.g. OPENAI_API_KEY / ANTHROPIC_API_KEY) or register it via "
+                "'sec-rag provider set' once that command lands."
+            ),
+        )
+        raise typer.Exit(code=1) from None
+    except KeyError as exc:
+        _print_error(
+            "LLM provider unavailable",
+            f"Provider {provider_name!r} requires additional packages.",
+            details=str(exc),
+            hint="Install the provider's optional extras and try again.",
+        )
+        raise typer.Exit(code=1) from None
+
+
+# ---------------------------------------------------------------------------
+# Plan handling
+# ---------------------------------------------------------------------------
+
+
+def _apply_overrides(
+    plan: QueryPlan,
+    *,
+    ticker: list[str] | None,
+    form: list[str] | None,
+    since: str | None,
+    until: str | None,
+    mode: AnswerMode | None,
+) -> QueryPlan:
+    """Apply CLI flag overrides onto the plan in place.
+
+    Each override shadows the model's extraction whenever supplied.
+    Date overrides honour partial input: ``--since`` alone overrides
+    the lower bound only when ``until`` is also provided (the
+    dataclass field is a 2-tuple, not a pair of optionals).  Supplying
+    only one of ``--since`` / ``--until`` while the plan has no
+    ``date_range`` raises a clear :class:`typer.BadParameter`.
+    """
+    if ticker is not None:
+        plan.tickers = [t.upper() for t in ticker]
+    if form is not None:
+        plan.form_types = [f.upper() for f in form]
+    if since is not None or until is not None:
+        existing = plan.date_range
+        start = since if since is not None else (existing[0] if existing else None)
+        end = until if until is not None else (existing[1] if existing else None)
+        if start is None or end is None:
+            raise typer.BadParameter(
+                "--since and --until must be supplied together when no plan "
+                "date_range is present.  Supply both, or omit both."
+            )
+        plan.date_range = (start, end)
+    if mode is not None:
+        plan.suggested_answer_mode = mode
+    return plan
+
+
+def _render_plan(plan: QueryPlan) -> None:
+    """Render the plan as a Rich panel, mirroring the web's chip UI.
+
+    Mode names, dates, tickers, form types render verbatim — none of
+    these are user-controlled at this point (the model produces them,
+    or the operator typed them as CLI flags).  ``intent`` and
+    ``query_en`` flow through :func:`rich.markup.escape` defensively
+    because the model could in principle emit literal brackets.
+    """
+    detail = Table(show_header=False, box=None, padding=(0, 2))
+    detail.add_column("Key", style="bold")
+    detail.add_column("Value")
+    detail.add_row("Query (raw)", escape(plan.raw_query))
+    detail.add_row("Query (en)", escape(plan.query_en))
+    detail.add_row("Language", escape(plan.detected_language))
+    detail.add_row("Mode", f"[cyan]{escape(plan.suggested_answer_mode.value)}[/cyan]")
+    detail.add_row(
+        "Tickers",
+        f"[cyan]{escape(', '.join(plan.tickers) or '—')}[/cyan]",
+    )
+    detail.add_row(
+        "Form types",
+        f"[green]{escape(', '.join(plan.form_types) or '—')}[/green]",
+    )
+    if plan.date_range is not None:
+        detail.add_row(
+            "Date range",
+            f"{escape(plan.date_range[0])} → {escape(plan.date_range[1])}",
+        )
+    else:
+        detail.add_row("Date range", "[dim]any[/dim]")
+    if plan.intent:
+        detail.add_row("Intent", escape(plan.intent))
+    console.print(Panel(detail, title="[bold]Query Plan[/bold]", expand=False))
+
+
+# ---------------------------------------------------------------------------
+# Generation result rendering
+# ---------------------------------------------------------------------------
+
+
+def _render_citations(citations: list[Citation]) -> None:
+    """Render citations as a Rich table.
+
+    The flat shape mirrors the API's :class:`CitationSchema`
+    (``ticker / form_type / filing_date / accession_number /
+    section_path / display_index / similarity``) so the operator
+    visual contract aligns with the wire contract.  Every cell flows
+    through :func:`rich.markup.escape` so a hostile section path or
+    text span cannot repaint operator output.
+    """
+    if not citations:
+        console.print("[yellow]No citations.[/yellow]")
+        return
+    table = Table(
+        title="[bold]Citations[/bold]",
+        border_style="dim",
+        header_style="bold",
+        expand=True,
+    )
+    table.add_column("#", style="bold", width=3, justify="right")
+    table.add_column("Source", style="cyan", width=20, no_wrap=True)
+    table.add_column("Section", style="dim", max_width=40)
+    table.add_column("Similarity", width=10, justify="right")
+    table.add_column("Excerpt")
+
+    for c in citations:
+        fid = c.filing_id
+        source = f"{fid.ticker} {fid.form_type}\n{fid.date_str}"
+        idx = str(c.display_index) if c.display_index > 0 else "—"
+        excerpt = c.text_span
+        if len(excerpt) > 400:
+            excerpt = excerpt[:400] + "..."
+        table.add_row(
+            idx,
+            escape(source),
+            escape(c.section_path),
+            f"{c.similarity:.1%}",
+            escape(excerpt),
+        )
+    console.print(table)
+
+
+def _render_result(result: GenerationResult, *, refused: bool) -> None:
+    """Render the answer panel + citations + traceability footer.
+
+    Footer mirrors the API's :class:`RagQueryResponse` traceability
+    fields (``provider``, ``model``, ``prompt_version``,
+    ``token_usage``, ``latency_seconds``) so the operator sees the
+    same evidence the web UI would.
+    """
+    title = "[bold red]Refused[/bold red]" if refused else "[bold]Answer[/bold]"
+    console.print(Panel(escape(result.answer), title=title, expand=True))
+
+    _render_citations(result.citations)
+
+    usage = result.token_usage
+    console.print(
+        f"\n[dim]Provider:[/dim] [cyan]{escape(result.provider)}[/cyan]  "
+        f"[dim]Model:[/dim] [green]{escape(result.model or '—')}[/green]  "
+        f"[dim]Prompt:[/dim] {escape(result.prompt_version)}  "
+        f"[dim]Tokens:[/dim] {usage.input_tokens}+{usage.output_tokens}"
+        f"={usage.total_tokens}  "
+        f"[dim]Latency:[/dim] {result.latency_seconds:.2f}s"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Provider / model resolution
+# ---------------------------------------------------------------------------
+
+
+def _resolve_provider_and_model() -> tuple[str, str]:
+    """Pick provider + model from settings.
+
+    The CLI deliberately does NOT expose ``--provider`` / ``--model``
+    flags on the CLI surface yet.  Until those flags are added, the CLI
+    honours ``LLM_PROVIDER`` / ``LLM_DEFAULT_MODEL`` from the
+    environment, the same as the API tier.
+    """
+    settings = get_settings()
+    provider = settings.llm.default_provider
+    model = settings.llm.default_model or ""
+    return provider, model
+
+
+# ---------------------------------------------------------------------------
+# Public command — `sec-rag rag query QUESTION`
+# ---------------------------------------------------------------------------
+
+
+@rag_app.command("query")
+def query(
+    question: Annotated[
+        str,
+        typer.Argument(help="Natural language question to answer over ingested filings."),
+    ],
+    show_plan: Annotated[
+        bool,
+        typer.Option(
+            "--show-plan",
+            "-p",
+            help="Run query-understanding, print the plan, and exit without generating.",
+        ),
+    ] = False,
+    skip_plan: Annotated[
+        bool,
+        typer.Option(
+            "--skip-plan",
+            "-s",
+            help=(
+                "Bypass query-understanding entirely; the raw question is "
+                "embedded directly.  Overrides may still be applied via "
+                "--ticker / --form / --since / --until / --mode."
+            ),
+        ),
+    ] = False,
+    ticker: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--ticker",
+            "-k",
+            help="Override plan tickers.  Repeatable.",
+        ),
+    ] = None,
+    form: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--form",
+            "-f",
+            help="Override plan form types (e.g. 10-K).  Repeatable.",
+        ),
+    ] = None,
+    since: Annotated[
+        str | None,
+        typer.Option("--since", help="Override plan date range start (YYYY-MM-DD)."),
+    ] = None,
+    until: Annotated[
+        str | None,
+        typer.Option("--until", help="Override plan date range end (YYYY-MM-DD)."),
+    ] = None,
+    mode: Annotated[
+        str | None,
+        typer.Option(
+            "--mode",
+            "-m",
+            help="Override plan answer mode (concise / analytical / extractive / comparative).",
+        ),
+    ] = None,
+    max_output_tokens: Annotated[
+        int | None,
+        typer.Option(
+            "--max-output-tokens",
+            help="Cap on the answer slice (defaults to LLM_MAX_OUTPUT_TOKENS).",
+            min=1,
+            max=8192,
+        ),
+    ] = None,
+) -> None:
+    """Run the full RAG pipeline non-streaming and render the answer.
+
+    Examples:
+
+        sec-rag rag query "What are Apple's main revenue segments?"
+
+        sec-rag rag query "Compare AAPL and MSFT cloud strategy" \\
+            --mode comparative --ticker AAPL --ticker MSFT
+
+        sec-rag rag query "Risk factors related to AI" --show-plan
+
+        sec-rag rag query "What is revenue?" --skip-plan --ticker AAPL
+    """
+    if show_plan and skip_plan:
+        _print_error(
+            "Invalid flag combination",
+            "--show-plan and --skip-plan are mutually exclusive.",
+        )
+        raise typer.Exit(code=1)
+
+    if not question or not question.strip():
+        _print_error("Invalid question", "Question must not be empty.")
+        raise typer.Exit(code=1)
+
+    _validate_date(since, "--since")
+    _validate_date(until, "--until")
+    effective_mode = _coerce_mode(mode)
+
+    provider_name, model_name = _resolve_provider_and_model()
+
+    # Reject unknown providers up front (same shape as POST /api/rag/query).
+    try:
+        capability = ProviderRegistry.get_capability(
+            provider_name,
+            ProviderSurface.LLM,
+            model=model_name or None,
+        )
+    except KeyError as exc:
+        _print_error(
+            "Unknown LLM provider",
+            f"{provider_name!r} is not a registered LLM provider.",
+            details=str(exc),
+            hint="Set LLM_PROVIDER to a registered slug (openai / anthropic / gemini / ...).",
+        )
+        raise typer.Exit(code=1) from None
+    except ValueError as exc:
+        _print_error(
+            "Unknown LLM model",
+            f"{model_name!r} is not registered for provider {provider_name!r}.",
+            details=str(exc),
+            hint="Unset LLM_DEFAULT_MODEL to use the provider default.",
+        )
+        raise typer.Exit(code=1) from None
+
+    retrieval, registry = _build_retrieval()
+    llm = _build_llm(registry, provider_name)
+
+    # --- Plan resolution ------------------------------------------------------
+    if skip_plan:
+        plan = QueryPlan(raw_query=question)
+    else:
+        try:
+            plan = understand_query(
+                question,
+                llm=llm,
+                model=model_name,
+                structured_output_supported=capability.structured_output,
+            )
+        except ProviderAuthError:
+            _print_error(
+                "Provider unauthorised",
+                "The upstream provider rejected the supplied API key.",
+                hint=(
+                    "Verify or rotate the provider key for "
+                    f"{provider_name!r}; do not retry until corrected."
+                ),
+            )
+            raise typer.Exit(code=1) from None
+        except (ProviderRateLimitError, ProviderTimeoutError):
+            _print_error(
+                "Provider unavailable",
+                "The upstream provider is rate-limited or timed out.",
+                hint="Retry after a short backoff; do not rotate the key.",
+            )
+            raise typer.Exit(code=1) from None
+        except ProviderError as exc:
+            _print_error(
+                "Provider error",
+                "The upstream provider returned an error during query understanding.",
+                details=type(exc).__name__,
+                hint="Inspect the audit log; do not rotate the key on a non-auth error.",
+            )
+            raise typer.Exit(code=1) from None
+
+    plan = _apply_overrides(
+        plan,
+        ticker=ticker,
+        form=form,
+        since=since,
+        until=until,
+        mode=effective_mode,
+    )
+
+    if show_plan:
+        _render_plan(plan)
+        return
+
+    # --- Generation ----------------------------------------------------------
+    orchestrator = RAGOrchestrator(retrieval=retrieval, llm=llm)
+    try:
+        result = orchestrator.generate(
+            plan,
+            mode=effective_mode,
+            model=model_name or None,
+            max_output_tokens=max_output_tokens,
+            prefer_structured_output=capability.structured_output,
+        )
+    except ProviderAuthError:
+        _print_error(
+            "Provider unauthorised",
+            "The upstream provider rejected the supplied API key during generation.",
+            hint=(
+                "Verify or rotate the provider key for "
+                f"{provider_name!r}; do not retry until corrected."
+            ),
+        )
+        raise typer.Exit(code=1) from None
+    except (ProviderRateLimitError, ProviderTimeoutError):
+        _print_error(
+            "Provider unavailable",
+            "The upstream provider is rate-limited or timed out.",
+            hint="Retry after a short backoff; do not rotate the key.",
+        )
+        raise typer.Exit(code=1) from None
+    except ProviderError as exc:
+        _print_error(
+            "Provider error",
+            "The upstream provider returned an error during generation.",
+            details=type(exc).__name__,
+            hint="Inspect the audit log; do not rotate the key on a non-auth error.",
+        )
+        raise typer.Exit(code=1) from None
+    except GenerationError as exc:
+        _print_error(
+            "Generation failed",
+            "The orchestrator could not assemble a valid answer.",
+            details=exc.message,
+            hint="Retry the request; if it persists, switch model or provider.",
+        )
+        raise typer.Exit(code=1) from None
+    except SearchError as exc:
+        _print_error(
+            "Retrieval failed",
+            exc.message,
+            details=exc.details,
+            hint=(
+                "Check that filings have been ingested (`sec-rag manage status`) "
+                "and that --since / --until are valid YYYY-MM-DD values."
+            ),
+        )
+        raise typer.Exit(code=1) from None
+    except DatabaseError as exc:
+        _print_error(
+            "Database failure",
+            exc.message,
+            details=exc.details,
+            hint="Check DB_CHROMA_PATH is readable and the collection is intact.",
+        )
+        raise typer.Exit(code=1) from None
+
+    refused = not result.retrieved_chunks and not result.citations
+
+    # Metadata-only audit line — never the question, plan, or key.
+    audit_log(
+        "cli_rag_query",
+        endpoint="cli rag query",
+        detail=(
+            f"provider={provider_name} model={model_name or '<provider default>'} "
+            f"lang={plan.detected_language} tickers={len(plan.tickers)} "
+            f"forms={len(plan.form_types)} "
+            f"mode={(effective_mode or plan.suggested_answer_mode).value} "
+            f"prompt_version={result.prompt_version} "
+            f"chunks={len(result.retrieved_chunks)} "
+            f"citations={len(result.citations)} refused={refused}"
+        ),
+    )
+
+    _render_result(result, refused=refused)

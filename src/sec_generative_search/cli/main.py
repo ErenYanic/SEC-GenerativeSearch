@@ -20,6 +20,7 @@ from sec_generative_search.cli.evict import evict
 from sec_generative_search.cli.ingest import ingest_app
 from sec_generative_search.cli.manage import manage_app
 from sec_generative_search.cli.portable import export, import_
+from sec_generative_search.cli.rag import rag_app
 from sec_generative_search.cli.reindex import reindex
 from sec_generative_search.cli.search import search
 from sec_generative_search.config.settings import get_settings
@@ -137,6 +138,10 @@ app.add_typer(ingest_app, name="ingest")
 # ``clear``) — wired the same way so the four subcommands surface as
 # ``sec-rag manage <verb> ...``.
 app.add_typer(manage_app, name="manage")
+
+# ``rag`` is a sub-Typer (``rag query`` now; ``rag chat`` is wired later)
+# — wired so the verbs surface as ``sec-rag rag query ...``.
+app.add_typer(rag_app, name="rag")
 
 
 def main() -> None:
