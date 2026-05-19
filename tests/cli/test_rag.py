@@ -32,6 +32,7 @@ Goals:
 from __future__ import annotations
 
 import re
+import threading
 from datetime import date
 from typing import Any, ClassVar
 
@@ -145,6 +146,29 @@ def _make_citation(
     )
 
 
+def _make_stream_delta(text: str) -> Any:
+    """Construct a ``StreamEvent``-shaped delta-only event.
+
+    ``cli.rag._run_chat_stream`` duck-types stream events via
+    ``getattr(item, "delta", None)`` / ``getattr(item, "final", None)``,
+    so a hand-rolled stand-in works fine.  Using the real
+    :class:`StreamEvent` would also work but the dataclass is frozen
+    and we want to mutate ``final`` in helpers occasionally.
+    """
+    from sec_generative_search.rag.orchestrator import StreamEvent
+
+    return StreamEvent(delta=text)
+
+
+def _make_stream_final(
+    result: GenerationResult | None = None,
+) -> Any:
+    """Construct a ``StreamEvent``-shaped final event."""
+    from sec_generative_search.rag.orchestrator import StreamEvent
+
+    return StreamEvent(final=result if result is not None else _make_result())
+
+
 def _make_result(
     *,
     answer: str = "Apple has three main revenue segments [1].",
@@ -224,7 +248,13 @@ class _FakeRetrievalService:
 
 
 class _FakeOrchestrator:
-    """Recording :class:`RAGOrchestrator` stand-in."""
+    """Recording :class:`RAGOrchestrator` stand-in.
+
+    ``generate`` (non-streaming) is the surface ``rag query`` consumes.
+    ``generate_stream`` is the surface ``rag chat`` consumes — the
+    chat-test classes arm it to yield a configured sequence of stream
+    events or to raise a configured exception.
+    """
 
     instances: ClassVar[list[_FakeOrchestrator]] = []
 
@@ -232,8 +262,16 @@ class _FakeOrchestrator:
         self.retrieval = retrieval
         self.llm = llm
         self.calls: list[dict[str, Any]] = []
+        self.stream_calls: list[dict[str, Any]] = []
         self.returns: GenerationResult = _make_result()
         self.raises: BaseException | None = None
+        # Per-call stream-event sequence.  Each item is the list of
+        # ``StreamEvent`` instances ``generate_stream`` will yield.
+        self.stream_events_per_call: list[list[Any]] = []
+        # Per-call raises for ``generate_stream`` — when the entry is
+        # not None the producer raises that exception instead of
+        # yielding the corresponding events list.
+        self.stream_raises_per_call: list[BaseException | None] = []
         _FakeOrchestrator.instances.append(self)
 
     def generate(self, plan: QueryPlan, **kwargs: Any) -> GenerationResult:
@@ -241,6 +279,24 @@ class _FakeOrchestrator:
         if self.raises is not None:
             raise self.raises
         return self.returns
+
+    def generate_stream(self, plan: QueryPlan, **kwargs: Any) -> Any:
+        idx = len(self.stream_calls)
+        # Snapshot mutable kwargs at call time — the CLI passes the
+        # live ``history`` list by reference and appends to it after
+        # the call returns, so storing the bare reference would alias
+        # the post-mutation state across all earlier recorded calls.
+        recorded = {"plan": plan, **kwargs}
+        if isinstance(recorded.get("history"), list):
+            recorded["history"] = list(recorded["history"])
+        self.stream_calls.append(recorded)
+        if idx < len(self.stream_raises_per_call) and self.stream_raises_per_call[idx] is not None:
+            raise self.stream_raises_per_call[idx]
+        if idx < len(self.stream_events_per_call):
+            events = self.stream_events_per_call[idx]
+        else:
+            events = [_make_stream_final()]
+        yield from events
 
 
 # ---------------------------------------------------------------------------
@@ -398,8 +454,11 @@ def _reset_orchestrator_init() -> Any:
         self.retrieval = kwargs.get("retrieval")
         self.llm = kwargs.get("llm")
         self.calls = []
+        self.stream_calls = []
         self.returns = _make_result()
         self.raises = None
+        self.stream_events_per_call = []
+        self.stream_raises_per_call = []
         _FakeOrchestrator.instances.append(self)
 
     _FakeOrchestrator.__init__ = _default  # type: ignore[method-assign]
@@ -935,3 +994,604 @@ class TestSecurity:
         result = runner.invoke(app, ["rag", "query", "q", "--skip-plan"])
         assert result.exit_code == 0, result.output
         assert "[red]EVIL[/red]" in result.output
+
+
+# ---------------------------------------------------------------------------
+# `sec-rag rag chat` — REPL-level tests
+# ---------------------------------------------------------------------------
+
+
+def _arm_stream_events(events_per_call: list[list[Any]]) -> None:
+    """Seed ``generate_stream`` outputs onto every future orchestrator."""
+    original = _FakeOrchestrator.__init__
+
+    def _seeded(self: _FakeOrchestrator, **kwargs: Any) -> None:
+        original(self, **kwargs)
+        self.stream_events_per_call = events_per_call
+
+    _FakeOrchestrator.__init__ = _seeded  # type: ignore[method-assign]
+
+
+def _arm_stream_raises(exc_per_call: list[BaseException | None]) -> None:
+    """Seed ``generate_stream`` exceptions onto every future orchestrator."""
+    original = _FakeOrchestrator.__init__
+
+    def _seeded(self: _FakeOrchestrator, **kwargs: Any) -> None:
+        original(self, **kwargs)
+        self.stream_raises_per_call = exc_per_call
+
+    _FakeOrchestrator.__init__ = _seeded  # type: ignore[method-assign]
+
+
+class TestChatHappyPath:
+    def test_one_turn_then_exit(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        """Single question → stream produces deltas + final → /exit."""
+        _arm_stream_events(
+            [
+                [
+                    _make_stream_delta("Apple "),
+                    _make_stream_delta("revenue grew."),
+                    _make_stream_final(),
+                ]
+            ]
+        )
+        result = runner.invoke(app, ["rag", "chat"], input="What is revenue?\n/exit\n")
+        assert result.exit_code == 0, result.output
+        # Banner appeared.
+        assert "sec-rag rag chat" in result.output
+        # Stream deltas surfaced.
+        assert "Apple " in result.output
+        assert "revenue grew." in result.output
+        # Citations panel rendered.
+        assert "Citations" in result.output
+        # /exit closes cleanly.
+        assert "Bye." in result.output
+        # Exactly one stream call.
+        orch = patched["orchestrators"][-1]
+        assert len(orch.stream_calls) == 1
+
+    def test_skip_plan_bypasses_understanding(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        """``--skip-plan`` short-circuits ``understand_query`` per turn."""
+        _arm_stream_events([[_make_stream_final()]])
+        result = runner.invoke(
+            app,
+            ["rag", "chat", "--skip-plan"],
+            input="raw question\n/exit\n",
+        )
+        assert result.exit_code == 0, result.output
+        assert patched["understand_calls"] == []
+        orch = patched["orchestrators"][-1]
+        assert len(orch.stream_calls) == 1
+        plan: QueryPlan = orch.stream_calls[0]["plan"]
+        assert plan.raw_query == "raw question"
+
+    def test_show_plan_prints_plan_but_still_generates(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        """``--show-plan`` in chat is informational — generation still runs.
+
+        Differs from ``rag query --show-plan`` (which exits before
+        generation) because the chat REPL would degenerate to a no-op
+        otherwise.
+        """
+        _arm_stream_events([[_make_stream_final()]])
+        result = runner.invoke(app, ["rag", "chat", "--show-plan"], input="hello\n/exit\n")
+        assert result.exit_code == 0, result.output
+        assert "Query Plan" in result.output
+        orch = patched["orchestrators"][-1]
+        # Generation still ran.
+        assert len(orch.stream_calls) == 1
+
+    def test_session_overrides_apply_to_every_turn(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        """Session-scope ``--ticker`` / ``--mode`` shadow plan fields on
+        every turn — not just the first."""
+        _arm_stream_events([[_make_stream_final()], [_make_stream_final()]])
+        result = runner.invoke(
+            app,
+            [
+                "rag",
+                "chat",
+                "--skip-plan",
+                "--ticker",
+                "aapl",
+                "--mode",
+                "analytical",
+            ],
+            input="q1\nq2\n/exit\n",
+        )
+        assert result.exit_code == 0, result.output
+        orch = patched["orchestrators"][-1]
+        assert len(orch.stream_calls) == 2
+        for call in orch.stream_calls:
+            plan: QueryPlan = call["plan"]
+            assert plan.tickers == ["AAPL"]
+            assert plan.suggested_answer_mode == AnswerMode.ANALYTICAL
+
+
+class TestChatHistory:
+    def test_history_accumulates_across_turns(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        """The orchestrator MUST see prior turns on follow-up calls.
+
+        First turn: no history passed.
+        Second turn: history of length 1 passed.
+        """
+        _arm_stream_events([[_make_stream_final()], [_make_stream_final()]])
+        result = runner.invoke(
+            app,
+            ["rag", "chat", "--skip-plan"],
+            input="first\nsecond\n/exit\n",
+        )
+        assert result.exit_code == 0, result.output
+        orch = patched["orchestrators"][-1]
+        assert len(orch.stream_calls) == 2
+        first_history = orch.stream_calls[0]["history"]
+        second_history = orch.stream_calls[1]["history"]
+        # First turn: no prior history (None passed).
+        assert first_history is None
+        # Second turn: one ConversationTurn passed.
+        assert second_history is not None
+        assert len(second_history) == 1
+
+    def test_clear_drops_history(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        """``/clear`` empties the in-memory history."""
+        _arm_stream_events([[_make_stream_final()], [_make_stream_final()]])
+        result = runner.invoke(
+            app,
+            ["rag", "chat", "--skip-plan"],
+            input="first\n/clear\nafter-clear\n/exit\n",
+        )
+        assert result.exit_code == 0, result.output
+        assert "History cleared" in result.output
+        orch = patched["orchestrators"][-1]
+        # The second generation call sees no history again.
+        second_history = orch.stream_calls[1]["history"]
+        assert second_history is None
+
+    def test_cancelled_turn_not_committed(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A turn cancelled mid-stream MUST NOT enter history.
+
+        Patches ``_run_chat_stream`` at the import site so we can drive
+        the (None, interrupted=True) return synchronously.  The
+        underlying streaming primitive is exercised by
+        ``TestRunChatStream`` separately.
+        """
+        captured: list[Any] = []
+
+        def _fake_run_chat_stream(
+            orchestrator: Any,
+            plan: QueryPlan,
+            **kwargs: Any,
+        ) -> tuple[GenerationResult | None, bool]:
+            captured.append({"history": kwargs.get("history")})
+            # First call: cancel.  Second call: succeed.
+            if len(captured) == 1:
+                return None, True
+            return _make_result(), False
+
+        monkeypatch.setattr(rag_module, "_run_chat_stream", _fake_run_chat_stream)
+
+        result = runner.invoke(
+            app,
+            ["rag", "chat", "--skip-plan"],
+            input="first-cancelled\nsecond-success\n/exit\n",
+        )
+        assert result.exit_code == 0, result.output
+        # Second turn must see history of length 0 — the cancelled
+        # turn was not committed.
+        assert len(captured) == 2
+        assert captured[1]["history"] is None
+
+
+class TestChatSlashCommands:
+    def test_unknown_slash_command_is_rejected(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        """A typo like ``/exti`` MUST NOT silently flow into the
+        generation pipeline as a question."""
+        _arm_stream_events([[_make_stream_final()]])
+        result = runner.invoke(app, ["rag", "chat", "--skip-plan"], input="/exti\n/exit\n")
+        assert result.exit_code == 0, result.output
+        assert "Unknown command" in result.output
+        # No generation was triggered.
+        orch = patched["orchestrators"][-1]
+        assert orch.stream_calls == []
+
+    def test_empty_input_is_ignored(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        """Blank lines must loop without triggering generation."""
+        _arm_stream_events([[_make_stream_final()]])
+        result = runner.invoke(
+            app,
+            ["rag", "chat", "--skip-plan"],
+            input="\n   \nreal question\n/exit\n",
+        )
+        assert result.exit_code == 0, result.output
+        orch = patched["orchestrators"][-1]
+        # Only the real question generated.
+        assert len(orch.stream_calls) == 1
+
+    def test_help_command(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        result = runner.invoke(app, ["rag", "chat"], input="/help\n/exit\n")
+        assert result.exit_code == 0, result.output
+        assert "Slash commands" in result.output
+
+    def test_quit_alias(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        result = runner.invoke(app, ["rag", "chat"], input="/quit\n")
+        assert result.exit_code == 0, result.output
+        assert "Bye." in result.output
+
+    def test_eof_at_prompt_exits_cleanly(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        """Ctrl-D (EOF) at the prompt closes the REPL with exit 0."""
+        # Empty input → CliRunner sends EOF immediately.
+        result = runner.invoke(app, ["rag", "chat"], input="")
+        assert result.exit_code == 0, result.output
+
+
+class TestChatBoundaryValidation:
+    def test_show_and_skip_plan_mutually_exclusive(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        result = runner.invoke(app, ["rag", "chat", "--show-plan", "--skip-plan"])
+        assert result.exit_code == 1
+        assert "Invalid flag combination" in result.output
+
+    def test_malformed_since_rejected(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        result = runner.invoke(app, ["rag", "chat", "--since", "2024-13-99"])
+        assert result.exit_code == 2
+        assert "Invalid date format" in result.output
+
+    def test_unknown_mode_rejected_at_boundary(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        result = runner.invoke(app, ["rag", "chat", "--mode", "analyitcal"])
+        assert result.exit_code == 2
+        assert "Invalid --mode" in _stripped(result.output)
+
+
+class TestChatProviderExceptions:
+    """REPL must NOT exit on a transient upstream failure.
+
+    Provider exception envelopes mirror ``rag query`` (label / hint),
+    but the loop continues so the operator can re-ask, /clear, or /exit.
+    """
+
+    def test_understand_provider_auth_error_continues_loop(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        patched["understand_raises"][0] = ProviderAuthError("bad key")
+        result = runner.invoke(app, ["rag", "chat"], input="q1\n/exit\n")
+        # REPL itself exits 0 — the auth failure surfaces inline.
+        assert result.exit_code == 0, result.output
+        assert "Provider unauthorised" in result.output
+        assert "Bye." in result.output
+        orch = patched["orchestrators"][-1]
+        # Auth failure short-circuits before streaming.
+        assert orch.stream_calls == []
+
+    def test_stream_provider_error_continues_loop(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        _arm_stream_raises([ProviderError("boom"), None])
+        _arm_stream_events([[], [_make_stream_final()]])
+        result = runner.invoke(
+            app,
+            ["rag", "chat", "--skip-plan"],
+            input="first-fails\nsecond-works\n/exit\n",
+        )
+        assert result.exit_code == 0, result.output
+        assert "Provider error" in result.output
+        orch = patched["orchestrators"][-1]
+        assert len(orch.stream_calls) == 2
+
+    def test_stream_auth_error(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        _arm_stream_raises([ProviderAuthError("invalid")])
+        result = runner.invoke(app, ["rag", "chat", "--skip-plan"], input="q\n/exit\n")
+        assert result.exit_code == 0, result.output
+        assert "Provider unauthorised" in result.output
+
+    def test_stream_generation_error(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        _arm_stream_raises([GenerationError("malformed json")])
+        result = runner.invoke(app, ["rag", "chat", "--skip-plan"], input="q\n/exit\n")
+        assert result.exit_code == 0, result.output
+        assert "Generation failed" in result.output
+
+
+# ---------------------------------------------------------------------------
+# `_run_chat_stream` — unit tests over the streaming primitive itself
+# ---------------------------------------------------------------------------
+
+
+class _InlineOrchestrator:
+    """Minimal orchestrator that yields a configured event sequence.
+
+    Used for direct unit tests of :func:`cli.rag._run_chat_stream`; the
+    REPL test path uses the recording :class:`_FakeOrchestrator` instead.
+    """
+
+    def __init__(
+        self,
+        events: list[Any] | None = None,
+        *,
+        raises: BaseException | None = None,
+        block_event: Any = None,
+    ) -> None:
+        self._events = events or []
+        self._raises = raises
+        self._block_event = block_event
+
+    def generate_stream(self, plan: QueryPlan, **kwargs: Any) -> Any:
+        if self._raises is not None:
+            raise self._raises
+        yield from self._events
+        if self._block_event is not None:
+            # Block until released — used by the cancellation tests to
+            # keep the producer alive while the consumer is interrupted.
+            self._block_event.wait(timeout=2.0)
+
+
+class TestRunChatStream:
+    def test_happy_path_returns_final(self) -> None:
+        from sec_generative_search.cli.rag import _run_chat_stream
+
+        events = [
+            _make_stream_delta("Hello "),
+            _make_stream_delta("world."),
+            _make_stream_final(_make_result(answer="Hello world.")),
+        ]
+        result, interrupted = _run_chat_stream(
+            _InlineOrchestrator(events),
+            _make_plan(),
+            mode=None,
+            model=None,
+            max_output_tokens=None,
+            history=None,
+            prefer_structured_output=False,
+            provider_name="openai",
+        )
+        assert interrupted is False
+        assert result is not None
+        assert result.answer == "Hello world."
+
+    def test_producer_exception_returns_none(self) -> None:
+        """A provider exception inside ``generate_stream`` becomes a
+        rendered envelope and ``(None, False)``.  The caller (REPL) then
+        skips committing the turn to history."""
+        from sec_generative_search.cli.rag import _run_chat_stream
+
+        result, interrupted = _run_chat_stream(
+            _InlineOrchestrator(raises=ProviderError("upstream 500")),
+            _make_plan(),
+            mode=None,
+            model=None,
+            max_output_tokens=None,
+            history=None,
+            prefer_structured_output=False,
+            provider_name="openai",
+        )
+        assert result is None
+        assert interrupted is False
+
+    def test_keyboard_interrupt_during_stream_returns_interrupted(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A consumer-side KeyboardInterrupt cancels the in-flight stream.
+
+        Simulates Ctrl-C by patching the module's ``_queue.Queue``
+        replacement so ``get`` raises KeyboardInterrupt on the second
+        call — i.e. after the first delta has been consumed but before
+        the final event arrives.  Returns ``(None, True)`` and the
+        producer thread is signalled to stop pushing further events.
+        """
+        import queue as _q
+        import types
+
+        from sec_generative_search.cli import rag as rag_mod
+
+        real_queue_cls = _q.Queue
+
+        class _InterruptingQueue(real_queue_cls):  # type: ignore[misc, valid-type]
+            _call_counter: ClassVar[int] = 0
+
+            def get(self, *args: Any, **kwargs: Any) -> Any:  # type: ignore[override]
+                type(self)._call_counter += 1
+                if type(self)._call_counter == 2:
+                    raise KeyboardInterrupt
+                return super().get(*args, **kwargs)
+
+        _InterruptingQueue._call_counter = 0
+
+        monkeypatch.setattr(
+            rag_mod,
+            "_queue",
+            types.SimpleNamespace(Queue=_InterruptingQueue, Empty=_q.Empty),
+        )
+
+        release = threading.Event()
+        events = [
+            _make_stream_delta("partial "),
+            _make_stream_delta("answer"),
+            _make_stream_final(),
+        ]
+
+        result, interrupted = rag_mod._run_chat_stream(
+            _InlineOrchestrator(events, block_event=release),
+            _make_plan(),
+            mode=None,
+            model=None,
+            max_output_tokens=None,
+            history=None,
+            prefer_structured_output=False,
+            provider_name="openai",
+        )
+        release.set()  # let producer thread exit
+        assert interrupted is True
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# `sec-rag rag chat` — security
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.security
+class TestChatSecurity:
+    def test_question_not_echoed_on_error(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        """Tier-3 question text MUST NOT appear in any error envelope."""
+        sentinel = "PII-CHAT-QUESTION-MUST-NOT-ECHO"
+        _arm_stream_raises([ProviderError("upstream")])
+        result = runner.invoke(
+            app,
+            ["rag", "chat", "--skip-plan"],
+            input=f"{sentinel}\n/exit\n",
+        )
+        assert result.exit_code == 0, result.output
+        # The user typed it at the prompt so the prompt echo MAY contain
+        # it depending on terminal behaviour, but Click's CliRunner
+        # buffers stdout only — there is no terminal echo here, so the
+        # sentinel should not surface at all.
+        assert sentinel not in result.output
+
+    def test_api_key_never_in_output(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        canary = "sk-canary-chat-key-must-not-appear"  # pragma: allowlist secret
+        monkeypatch.setenv("OPENAI_API_KEY", canary)
+        _arm_stream_raises([ProviderError("boom")])
+        result = runner.invoke(app, ["rag", "chat", "--skip-plan"], input="q\n/exit\n")
+        assert canary not in result.output
+
+    def test_edgar_identity_never_in_output(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("EDGAR_IDENTITY_NAME", "Chat User")
+        monkeypatch.setenv("EDGAR_IDENTITY_EMAIL", "chat-canary@example.test")
+        _arm_stream_events([[_make_stream_final()]])
+        result = runner.invoke(app, ["rag", "chat", "--skip-plan"], input="q\n/exit\n")
+        assert result.exit_code == 0
+        assert "Chat User" not in result.output
+        assert "chat-canary@example.test" not in result.output
+
+    def test_hostile_markup_in_delta_renders_verbatim(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        """A delta containing ``[red]EVIL[/red]`` MUST render literally —
+        the consumer flows every delta through :func:`rich.markup.escape`."""
+        evil = "Risk: [red]EVIL[/red]"
+        _arm_stream_events([[_make_stream_delta(evil), _make_stream_final()]])
+        result = runner.invoke(app, ["rag", "chat", "--skip-plan"], input="q\n/exit\n")
+        assert result.exit_code == 0, result.output
+        assert "[red]EVIL[/red]" in result.output
+
+    def test_both_factory_seams_used_for_chat(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        """Same factory-seam discipline as ``rag query`` — direct adapter
+        instantiation MUST NOT happen on the chat surface either."""
+        _arm_stream_events([[_make_stream_final()]])
+        result = runner.invoke(app, ["rag", "chat", "--skip-plan"], input="q\n/exit\n")
+        assert result.exit_code == 0, result.output
+        assert len(patched["embedders"]) == 1
+        assert len(patched["llms"]) == 1

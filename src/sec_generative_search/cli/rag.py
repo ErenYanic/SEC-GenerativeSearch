@@ -1,10 +1,16 @@
 """Synchronous CLI wrappers over :class:`RAGOrchestrator`.
 
-One operator-facing subcommand lives here:
+Two operator-facing subcommands live here:
 
 - ``sec-rag rag query QUESTION`` — run the full understand → retrieve →
   generate pipeline non-streaming and render the answer + citations +
   traceability.
+- ``sec-rag rag chat`` — interactive REPL using
+  :meth:`RAGOrchestrator.generate_stream`.  Conversation history is
+  kept in process memory only (``ConversationTurn`` — never persisted);
+  ``/clear`` drops it, ``/exit`` (or ``/quit``) closes the loop.  One
+  Ctrl-C cancels the in-flight stream and returns to the prompt; a
+  second Ctrl-C (or Ctrl-D / EOF) at the prompt exits 130.
 
 Trust model and load-bearing rules:
 
@@ -59,8 +65,10 @@ operator output — the same hostile-markup defence ``cli.search`` ships.
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Annotated
+import queue as _queue
+import threading
+from datetime import UTC, datetime
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
@@ -82,6 +90,7 @@ from sec_generative_search.core.exceptions import (
 from sec_generative_search.core.logging import audit_log
 from sec_generative_search.core.types import (
     Citation,
+    ConversationTurn,
     EmbedderStamp,
     GenerationResult,
 )
@@ -784,3 +793,556 @@ def query(
     )
 
     _render_result(result, refused=refused)
+
+
+# ---------------------------------------------------------------------------
+# `sec-rag rag chat` — interactive REPL
+# ---------------------------------------------------------------------------
+
+
+# Sentinel terminator pushed onto the stream queue by the producer thread
+# in :func:`_run_chat_stream`.  Avoids confusing a legitimate ``None``
+# delta with the end-of-stream marker.
+_STREAM_SENTINEL = object()
+
+# Poll interval for the consumer's blocking queue read.  Short enough to
+# pick up a SIGINT promptly (CPython only delivers signal handlers on
+# bytecode boundaries — a long ``queue.get(timeout=…)`` would defer
+# Ctrl-C cancellation to the next timeout fire), long enough that the
+# busy loop does not eat measurable CPU.
+_STREAM_POLL_SECONDS = 0.1
+
+
+# Map a streaming-side exception to ``(label, message, hint)``.  Same
+# ladder as the non-streaming ``rag query`` exception map so an operator
+# sees the same envelope shape whether the failure happens during
+# ``generate`` or ``generate_stream``.  Unmapped exceptions surface as
+# a generic ``internal_error`` envelope — never echo the exception text
+# (it routinely carries provider URLs / SQL / paths).
+def _classify_stream_error(
+    exc: BaseException, provider_name: str
+) -> tuple[str, str, str | None]:
+    """Return ``(label, message, hint)`` for the REPL error envelope.
+
+    Mirrors :func:`api.routes.rag._classify_stream_exception` so the CLI
+    and the SSE route emit byte-identical operator-facing shapes for
+    the same upstream failure.
+    """
+    if isinstance(exc, ProviderAuthError):
+        return (
+            "Provider unauthorised",
+            "The upstream provider rejected the supplied API key.",
+            (
+                "Verify or rotate the provider key for "
+                f"{provider_name!r}; do not retry until corrected."
+            ),
+        )
+    if isinstance(exc, (ProviderRateLimitError, ProviderTimeoutError)):
+        return (
+            "Provider unavailable",
+            "The upstream provider is rate-limited or timed out.",
+            "Retry after a short backoff; do not rotate the key.",
+        )
+    if isinstance(exc, ProviderError):
+        return (
+            "Provider error",
+            "The upstream provider returned an error during generation.",
+            "Inspect the audit log; do not rotate the key on a non-auth error.",
+        )
+    if isinstance(exc, GenerationError):
+        return (
+            "Generation failed",
+            "The orchestrator could not assemble a valid answer.",
+            "Retry the question; if the failure persists, switch model or provider.",
+        )
+    if isinstance(exc, SearchError):
+        return (
+            "Retrieval failed",
+            "Retrieval could not service the question.",
+            "Check `sec-rag manage status` and the --since / --until values.",
+        )
+    if isinstance(exc, DatabaseError):
+        return (
+            "Database failure",
+            "The storage layer is unavailable.",
+            "Check DB_CHROMA_PATH is readable and the collection is intact.",
+        )
+    return (
+        "Stream error",
+        "An unexpected error occurred while streaming the answer.",
+        "Retry the question; if the failure persists, contact the operator.",
+    )
+
+
+def _run_chat_stream(
+    orchestrator: Any,
+    plan: QueryPlan,
+    *,
+    mode: AnswerMode | None,
+    model: str | None,
+    max_output_tokens: int | None,
+    history: list[ConversationTurn] | None,
+    prefer_structured_output: bool,
+    provider_name: str,
+) -> tuple[GenerationResult | None, bool]:
+    """Consume ``orchestrator.generate_stream`` interactively.
+
+    Producer / consumer split:
+
+    - The orchestrator's ``generate_stream`` is a *synchronous*
+      generator that blocks on the LLM SDK.  A daemon producer thread
+      iterates it and pushes :class:`StreamEvent` instances (or an
+      exception) onto a :class:`queue.Queue`.
+    - The main thread (consumer) polls the queue with a short timeout
+      so that a Python signal handler running on the main thread
+      (``SIGINT`` → :class:`KeyboardInterrupt`) can interrupt the wait
+      promptly and cancel the in-flight stream.
+
+    Cancellation semantics:
+
+    - On the first Ctrl-C the consumer sets ``cancel_event`` (the
+      producer checks it before pushing the next event), prints a
+      single cancellation notice, and returns ``(None, True)``.  The
+      caller (the REPL loop) then returns to the prompt without
+      committing the cancelled turn to history.
+    - The producer thread is a daemon: if it is mid-LLM-call when the
+      consumer abandons it, the SDK call eventually returns and the
+      thread exits naturally.  We do not try to forcibly terminate
+      Python threads — there is no safe primitive for that in CPython.
+
+    Error semantics:
+
+    - A producer-side exception is forwarded onto the queue.  The
+      consumer reads it, drains the queue to the sentinel, and renders
+      a single operator-facing envelope via
+      :func:`_classify_stream_error`.  Returns ``(None, False)``.
+    - The exception text is never echoed verbatim — the envelope text
+      is hand-tuned per exception class (same discipline as the SSE
+      route's ``_classify_stream_exception``).
+
+    Returns:
+        ``(result, interrupted)`` where ``result`` is the final
+        :class:`GenerationResult` on success, ``None`` on cancel or
+        error; ``interrupted`` is True iff the user hit Ctrl-C during
+        streaming.
+    """
+    stream_queue: _queue.Queue = _queue.Queue()
+    cancel_event = threading.Event()
+
+    def producer() -> None:
+        try:
+            for event in orchestrator.generate_stream(
+                plan,
+                mode=mode,
+                model=model,
+                max_output_tokens=max_output_tokens,
+                history=history,
+                prefer_structured_output=prefer_structured_output,
+            ):
+                if cancel_event.is_set():
+                    # Stop pushing further events; the consumer has
+                    # already returned to the REPL.  The thread itself
+                    # continues to drain the generator naturally so the
+                    # provider connection / token counter can finalise.
+                    break
+                stream_queue.put(event)
+        except BaseException as exc:
+            stream_queue.put(exc)
+        finally:
+            stream_queue.put(_STREAM_SENTINEL)
+
+    threading.Thread(
+        target=producer,
+        name="rag-chat-producer",
+        daemon=True,
+    ).start()
+
+    final: GenerationResult | None = None
+    error: BaseException | None = None
+    streamed_any = False
+
+    try:
+        while True:
+            try:
+                item = stream_queue.get(timeout=_STREAM_POLL_SECONDS)
+            except _queue.Empty:
+                continue
+            if item is _STREAM_SENTINEL:
+                break
+            if isinstance(item, BaseException):
+                error = item
+                # Drain any trailing events so the producer can exit.
+                while True:
+                    nxt = stream_queue.get()
+                    if nxt is _STREAM_SENTINEL:
+                        break
+                break
+            # StreamEvent: delta and/or final.
+            if getattr(item, "delta", None):
+                # Stream deltas as plain text.  ``escape`` neutralises
+                # any literal ``[red]...[/red]`` in the model output so
+                # hostile retrieved text cannot repaint operator
+                # output — same discipline as the rest of the CLI.
+                console.print(escape(item.delta), end="", markup=True, highlight=False)
+                streamed_any = True
+            if getattr(item, "final", None) is not None:
+                final = item.final
+    except KeyboardInterrupt:
+        cancel_event.set()
+        if streamed_any:
+            console.print()  # newline after partial stream
+        console.print(
+            "[yellow]Cancelled. Type your next question, /clear, or /exit.[/yellow]"
+        )
+        return None, True
+
+    if streamed_any:
+        console.print()  # newline after the last delta
+
+    if error is not None:
+        label, message, hint = _classify_stream_error(error, provider_name)
+        _print_error(label, message, hint=hint)
+        return None, False
+
+    return final, False
+
+
+def _render_chat_traceability(result: GenerationResult) -> None:
+    """Render the per-turn traceability footer.
+
+    Mirrors :func:`_render_result`'s footer but skipping the answer
+    panel — the answer was already streamed.  Citations are still
+    rendered here so the operator sees them attached to the streamed
+    answer rather than only in the final-event payload.
+    """
+    _render_citations(result.citations)
+
+    usage = result.token_usage
+    console.print(
+        f"[dim]Provider:[/dim] [cyan]{escape(result.provider)}[/cyan]  "
+        f"[dim]Model:[/dim] [green]{escape(result.model or '—')}[/green]  "
+        f"[dim]Prompt:[/dim] {escape(result.prompt_version)}  "
+        f"[dim]Tokens:[/dim] {usage.input_tokens}+{usage.output_tokens}"
+        f"={usage.total_tokens}  "
+        f"[dim]Latency:[/dim] {result.latency_seconds:.2f}s"
+    )
+
+
+# REPL slash commands.  Kept as a small fixed set; ``rag chat`` is not a
+# scripting surface — operators with complex flows should use
+# ``rag query`` or the HTTP API.
+_REPL_EXIT_COMMANDS = frozenset({"/exit", "/quit"})
+_REPL_CLEAR_COMMAND = "/clear"
+_REPL_HELP_COMMAND = "/help"
+
+
+def _print_chat_banner() -> None:
+    console.print(
+        "[bold]sec-rag rag chat[/bold] — ask questions over ingested SEC filings."
+    )
+    console.print(
+        "  [dim]Commands:[/dim] [cyan]/clear[/cyan] (drop history)  "
+        "[cyan]/help[/cyan]  [cyan]/exit[/cyan]  "
+        "[dim](Ctrl-C cancels in-flight answer; Ctrl-D or second Ctrl-C exits.)[/dim]"
+    )
+
+
+def _print_chat_help() -> None:
+    console.print(
+        "[bold]Slash commands:[/bold] "
+        "[cyan]/clear[/cyan] drop conversation history  |  "
+        "[cyan]/help[/cyan] this message  |  "
+        "[cyan]/exit[/cyan] / [cyan]/quit[/cyan] leave the REPL"
+    )
+
+
+@rag_app.command("chat")
+def chat(
+    show_plan: Annotated[
+        bool,
+        typer.Option(
+            "--show-plan",
+            "-p",
+            help=(
+                "Print the resolved QueryPlan before each turn's stream "
+                "(generation still runs — unlike `rag query --show-plan` "
+                "which exits)."
+            ),
+        ),
+    ] = False,
+    skip_plan: Annotated[
+        bool,
+        typer.Option(
+            "--skip-plan",
+            "-s",
+            help=(
+                "Bypass query-understanding for every turn; the raw "
+                "question is embedded directly.  Session-scope overrides "
+                "(--ticker / --form / --since / --until / --mode) still apply."
+            ),
+        ),
+    ] = False,
+    ticker: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--ticker",
+            "-k",
+            help="Session-wide ticker override.  Repeatable.",
+        ),
+    ] = None,
+    form: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--form",
+            "-f",
+            help="Session-wide form-type override (e.g. 10-K).  Repeatable.",
+        ),
+    ] = None,
+    since: Annotated[
+        str | None,
+        typer.Option("--since", help="Session-wide date range start (YYYY-MM-DD)."),
+    ] = None,
+    until: Annotated[
+        str | None,
+        typer.Option("--until", help="Session-wide date range end (YYYY-MM-DD)."),
+    ] = None,
+    mode: Annotated[
+        str | None,
+        typer.Option(
+            "--mode",
+            "-m",
+            help=(
+                "Session-wide answer mode override "
+                "(concise / analytical / extractive / comparative)."
+            ),
+        ),
+    ] = None,
+    max_output_tokens: Annotated[
+        int | None,
+        typer.Option(
+            "--max-output-tokens",
+            help="Cap on the answer slice for every turn.",
+            min=1,
+            max=8192,
+        ),
+    ] = None,
+) -> None:
+    """Open an interactive RAG chat over ingested SEC filings.
+
+    Each turn streams the answer via
+    :meth:`RAGOrchestrator.generate_stream` and renders citations
+    afterwards.  Conversation history is kept **in process memory only**
+    (``ConversationTurn`` is never persisted — chat history persistence
+    is out of scope by design).
+
+    Examples:
+
+        sec-rag rag chat
+
+        sec-rag rag chat --ticker AAPL --mode analytical
+
+        sec-rag rag chat --skip-plan
+    """
+    if show_plan and skip_plan:
+        _print_error(
+            "Invalid flag combination",
+            "--show-plan and --skip-plan are mutually exclusive.",
+        )
+        raise typer.Exit(code=1)
+
+    _validate_date(since, "--since")
+    _validate_date(until, "--until")
+    effective_mode = _coerce_mode(mode)
+
+    provider_name, model_name = _resolve_provider_and_model()
+
+    # Pre-stack validation mirrors `rag query`: reject unknown
+    # providers / models before we open ChromaDB or the registry so
+    # misconfiguration is one envelope instead of a cascade.
+    try:
+        capability = ProviderRegistry.get_capability(
+            provider_name,
+            ProviderSurface.LLM,
+            model=model_name or None,
+        )
+    except KeyError as exc:
+        _print_error(
+            "Unknown LLM provider",
+            f"{provider_name!r} is not a registered LLM provider.",
+            details=str(exc),
+            hint="Set LLM_PROVIDER to a registered slug (openai / anthropic / gemini / ...).",
+        )
+        raise typer.Exit(code=1) from None
+    except ValueError as exc:
+        _print_error(
+            "Unknown LLM model",
+            f"{model_name!r} is not registered for provider {provider_name!r}.",
+            details=str(exc),
+            hint="Unset LLM_DEFAULT_MODEL to use the provider default.",
+        )
+        raise typer.Exit(code=1) from None
+
+    retrieval, registry = _build_retrieval()
+    llm = _build_llm(registry, provider_name)
+    orchestrator = RAGOrchestrator(retrieval=retrieval, llm=llm)
+
+    # In-memory history.  Never persisted, never logged, cleared on
+    # ``/clear`` and dropped entirely when the process exits.
+    history: list[ConversationTurn] = []
+
+    _print_chat_banner()
+
+    while True:
+        # Read one prompt line.  Ctrl-D (EOF) and Ctrl-C at the prompt
+        # both exit cleanly — the second-Ctrl-C-exits-130 contract is
+        # encoded by Click's outer ``main()`` wrapper which converts
+        # the raised :class:`KeyboardInterrupt` to ``sys.exit(130)``.
+        try:
+            question = console.input("[bold cyan]>[/bold cyan] ")
+        except EOFError:
+            console.print()
+            return
+        except KeyboardInterrupt:
+            # Re-raise so the outer ``main()`` wrapper converts to
+            # POSIX exit 130 (cli/main.py).
+            console.print()
+            raise
+
+        question = question.strip()
+        if not question:
+            continue
+
+        if question in _REPL_EXIT_COMMANDS:
+            console.print("[dim]Bye.[/dim]")
+            return
+        if question == _REPL_CLEAR_COMMAND:
+            cleared = len(history)
+            history.clear()
+            console.print(
+                f"[dim]History cleared ({cleared} turn{'s' if cleared != 1 else ''}).[/dim]"
+            )
+            continue
+        if question == _REPL_HELP_COMMAND:
+            _print_chat_help()
+            continue
+        # Any other ``/...`` token is rejected — typing a literal slash
+        # word as a real question is exceedingly unusual, and silently
+        # passing it through risks confusing operators who fat-fingered
+        # a slash command.
+        if question.startswith("/"):
+            console.print(
+                f"[yellow]Unknown command:[/yellow] {escape(question)}.  "
+                f"Type [cyan]/help[/cyan] for the command list."
+            )
+            continue
+
+        # ---- Plan resolution per turn ------------------------------------
+        if skip_plan:
+            plan = QueryPlan(raw_query=question)
+        else:
+            try:
+                plan = understand_query(
+                    question,
+                    llm=llm,
+                    model=model_name,
+                    structured_output_supported=capability.structured_output,
+                )
+            except ProviderAuthError:
+                _print_error(
+                    "Provider unauthorised",
+                    "The upstream provider rejected the supplied API key.",
+                    hint=(
+                        "Verify or rotate the provider key for "
+                        f"{provider_name!r}; do not retry until corrected."
+                    ),
+                )
+                continue
+            except (ProviderRateLimitError, ProviderTimeoutError):
+                _print_error(
+                    "Provider unavailable",
+                    "The upstream provider is rate-limited or timed out.",
+                    hint="Retry after a short backoff; do not rotate the key.",
+                )
+                continue
+            except ProviderError as exc:
+                _print_error(
+                    "Provider error",
+                    "The upstream provider returned an error during query understanding.",
+                    details=type(exc).__name__,
+                    hint="Inspect the audit log; do not rotate the key on a non-auth error.",
+                )
+                continue
+
+        try:
+            plan = _apply_overrides(
+                plan,
+                ticker=ticker,
+                form=form,
+                since=since,
+                until=until,
+                mode=effective_mode,
+            )
+        except typer.BadParameter as exc:
+            # Per-turn override violation — surface, do not exit the
+            # REPL.  The flag combination cannot change between turns
+            # in this session, so the operator must Ctrl-C out and
+            # re-launch with corrected flags; the diagnostic is the
+            # same one ``rag query`` raises.
+            _print_error("Invalid override", str(exc))
+            continue
+
+        if show_plan:
+            _render_plan(plan)
+
+        # ---- Streaming generation ---------------------------------------
+        result, interrupted = _run_chat_stream(
+            orchestrator,
+            plan,
+            mode=effective_mode,
+            model=model_name or None,
+            max_output_tokens=max_output_tokens,
+            history=history or None,
+            prefer_structured_output=capability.structured_output,
+            provider_name=provider_name,
+        )
+
+        if interrupted or result is None:
+            # Cancelled or upstream error.  Do NOT commit the turn to
+            # conversation history — a half-completed turn would
+            # pollute the next prompt's history block.
+            continue
+
+        _render_chat_traceability(result)
+
+        refused = not result.retrieved_chunks and not result.citations
+
+        # Metadata-only audit line.  Never the question, the plan body,
+        # or the resolved provider key.  Mirrors ``cli_rag_query`` so
+        # downstream log shipping can treat both surfaces identically.
+        audit_log(
+            "cli_rag_chat",
+            endpoint="cli rag chat",
+            detail=(
+                f"provider={provider_name} model={model_name or '<provider default>'} "
+                f"lang={plan.detected_language} tickers={len(plan.tickers)} "
+                f"forms={len(plan.form_types)} "
+                f"mode={(effective_mode or plan.suggested_answer_mode).value} "
+                f"prompt_version={result.prompt_version} "
+                f"chunks={len(result.retrieved_chunks)} "
+                f"citations={len(result.citations)} "
+                f"history_turns={len(history)} refused={refused}"
+            ),
+        )
+
+        # Commit the turn.  ``retrieval_results`` are kept for
+        # traceability on the audit record; they MUST NOT re-enter a
+        # later prompt — :meth:`RAGOrchestrator._render_history` only
+        # renders ``Q:/A:`` pairs, never chunks.
+        history.append(
+            ConversationTurn(
+                query=question,
+                retrieval_results=list(result.retrieved_chunks),
+                generation_result=result,
+                timestamp=datetime.now(UTC),
+            )
+        )
