@@ -51,6 +51,13 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
+from sec_generative_search.cli._json import (
+    OutputFormat,
+    coerce_output_format,
+    error_envelope,
+    is_json,
+    print_json,
+)
 from sec_generative_search.config.settings import get_settings
 from sec_generative_search.core.credentials import (
     chain_resolvers,
@@ -115,12 +122,26 @@ def _print_error(
     *,
     details: str | None = None,
     hint: str | None = None,
+    output: OutputFormat = OutputFormat.TEXT,
+    error_code: str | None = None,
 ) -> None:
     """Render an error with optional details and a single hint line.
 
     Mirrors the same shape as ``cli.rag._print_error`` so operator
     output stays uniform across the adapted CLI surface.
+
+    When ``output == OutputFormat.JSON`` the document is an
+    :func:`error_envelope` instead of the Rich text.  ``error_code``
+    is the machine-readable ``error`` slug (mirrors the API envelope
+    discipline; defaults to a slugified ``label``).  ``provider set``
+    deliberately keeps ``output`` defaulted to TEXT because Phase
+    12.9 scopes the JSON flag to the read paths (``list`` /
+    ``validate``).
     """
+    if is_json(output):
+        slug = error_code or label.lower().replace(" ", "_")
+        print_json(error_envelope(slug, message, hint=hint, details=details))
+        return
     console.print(f"[red]{escape(label)}:[/red] {escape(message)}")
     if details:
         console.print(f"  [dim]{escape(details)}[/dim]")
@@ -276,6 +297,20 @@ def list_providers(
             ),
         ),
     ] = False,
+    output: Annotated[
+        str,
+        typer.Option(
+            "--output",
+            "-o",
+            help=(
+                "Output format: 'text' (default Rich table) or 'json'.  "
+                "JSON shape is an allow-list lift exposing only the "
+                "boolean 'key_resolves' flag — the masked tail rendered "
+                "in text mode is NEVER serialised, so piping JSON into "
+                "a log shipper cannot leak credential bytes."
+            ),
+        ),
+    ] = "text",
 ) -> None:
     """Enumerate registered providers with admin-env and resolution status.
 
@@ -285,6 +320,7 @@ def list_providers(
     (encrypted-user → admin-env), so a green checkmark means
     ``provider validate`` would have something to send.
     """
+    output_format = coerce_output_format(output)
     surface_filter = _coerce_surface(surface) if surface is not None else None
 
     registry = _open_registry_or_none()
@@ -295,6 +331,43 @@ def list_providers(
             surface_filter,
             include_unavailable=include_unavailable,
         )
+
+        if is_json(output_format):
+            providers_payload: list[dict[str, Any]] = []
+            for entry in entries:
+                default_model = getattr(entry.provider_cls, "default_model", "") or None
+                pricing = (
+                    _pricing_label(entry.provider_cls, default_model)
+                    if default_model is not None
+                    else "unknown"
+                )
+                env_var = _ENV_VAR_BY_PROVIDER.get(entry.name)
+                # ``key_resolves`` is a boolean only — never include
+                # the masked tail.  Rich-mode rendering surfaces the
+                # tail for *visual* operator feedback (a glance
+                # confirms which slot matched); piping that tail into
+                # JSON would put it into log files that the operator
+                # likely did not intend to keep credential metadata in.
+                providers_payload.append(
+                    {
+                        "name": entry.name,
+                        "surface": entry.surface.value,
+                        "default_model": default_model,
+                        "pricing_tier": pricing,
+                        "admin_env_var": env_var,
+                        "key_resolves": resolver(entry.name) is not None,
+                        "requires_extras": list(entry.requires_extras),
+                        "supports_arbitrary_models": entry.supports_arbitrary_models,
+                        "supports_upstream_routing": entry.supports_upstream_routing,
+                    }
+                )
+            print_json(
+                {
+                    "providers": providers_payload,
+                    "total": len(providers_payload),
+                }
+            )
+            return
 
         if not entries:
             console.print("[yellow]No providers registered for that surface.[/yellow]")
@@ -386,6 +459,19 @@ def validate(
             ),
         ),
     ] = None,
+    output: Annotated[
+        str,
+        typer.Option(
+            "--output",
+            "-o",
+            help=(
+                "Output format: 'text' (default Rich line) or 'json' "
+                "(allow-list lift of api.schemas.ProviderValidateResponse). "
+                "Failure paths render as {error, message, hint} envelopes; "
+                "the raw key is NEVER part of any envelope."
+            ),
+        ),
+    ] = "text",
 ) -> None:
     """Round-trip a stored credential against the upstream provider.
 
@@ -397,6 +483,7 @@ def validate(
     - ``2`` — transient upstream failure (rate limit, timeout, network).
       The key is *not* a verdict here; do not rotate.
     """
+    output_format = coerce_output_format(output)
     surface_enum = _coerce_surface(surface)
 
     # Validate provider + model exist in the registry up front so the
@@ -409,6 +496,8 @@ def validate(
             f"{provider!r} is not a registered provider on the {surface_enum.value} surface.",
             details=str(exc),
             hint="Run `sec-rag provider list` to see registered names.",
+            output=output_format,
+            error_code="unknown_provider",
         )
         raise typer.Exit(code=1) from None
     except ValueError as exc:
@@ -417,6 +506,8 @@ def validate(
             f"{model!r} is not registered for provider {provider!r}.",
             details=str(exc),
             hint="Omit --model to use the provider default.",
+            output=output_format,
+            error_code="unknown_model",
         )
         raise typer.Exit(code=1) from None
 
@@ -433,6 +524,8 @@ def validate(
                     f"Set {env_var} in the environment, or persist one via "
                     "`sec-rag provider set` (requires the encrypted store)."
                 ),
+                output=output_format,
+                error_code="no_credential",
             )
             raise typer.Exit(code=1)
 
@@ -444,6 +537,8 @@ def validate(
                 "The upstream provider is rate-limited or timed out.",
                 details=type(exc).__name__,
                 hint="Retry after a short backoff; do not rotate the key.",
+                output=output_format,
+                error_code="provider_unavailable",
             )
             raise typer.Exit(code=2) from None
         except ProviderError as exc:
@@ -452,11 +547,29 @@ def validate(
                 "The upstream provider returned an error during validation.",
                 details=type(exc).__name__,
                 hint="Inspect the audit log; do not rotate the key on a non-auth error.",
+                output=output_format,
+                error_code="provider_error",
             )
             raise typer.Exit(code=2) from None
     finally:
         if registry is not None:
             registry.close()
+
+    if is_json(output_format):
+        # Mirror ``api.schemas.ProviderValidateResponse`` —
+        # ``{valid, provider, surface}``.  The masked tail rendered in
+        # text mode is NEVER serialised: this document goes to stdout
+        # which operators routinely pipe into log shippers.
+        print_json(
+            {
+                "valid": ok,
+                "provider": provider,
+                "surface": surface_enum.value,
+            }
+        )
+        if not ok:
+            raise typer.Exit(code=1)
+        return
 
     if ok:
         console.print(

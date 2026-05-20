@@ -28,7 +28,7 @@ Operator trust model:
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
@@ -37,6 +37,13 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from sec_generative_search.cli._json import (
+    OutputFormat,
+    coerce_output_format,
+    error_envelope,
+    is_json,
+    print_json,
+)
 from sec_generative_search.config.settings import get_settings
 from sec_generative_search.core.exceptions import DatabaseError
 from sec_generative_search.core.types import EmbedderStamp
@@ -71,6 +78,8 @@ def _print_error(
     *,
     details: str | None = None,
     hint: str | None = None,
+    output: OutputFormat = OutputFormat.TEXT,
+    error_code: str | None = None,
 ) -> None:
     """Render an error with optional details and a single hint line.
 
@@ -78,7 +87,19 @@ def _print_error(
     every operator-facing string passes through :func:`rich.markup.escape`
     so accession numbers / install hints with literal square brackets
     render verbatim.
+
+    When ``output == OutputFormat.JSON`` the document is an
+    :func:`error_envelope` instead of the Rich text; ``error_code``
+    drives the machine-readable ``error`` slug.  Mutating-command
+    failures (``remove`` / ``clear``) deliberately keep ``output``
+    defaulted to TEXT because those commands do not expose
+    ``--output json`` — the JSON flag is exposed only on the read
+    paths (``status`` / ``list``).
     """
+    if is_json(output):
+        slug = error_code or label.lower().replace(" ", "_")
+        print_json(error_envelope(slug, message, hint=hint, details=details))
+        return
     console.print(f"[red]{escape(label)}:[/red] {escape(message)}")
     if details:
         console.print(f"  [dim]{escape(details)}[/dim]")
@@ -86,12 +107,29 @@ def _print_error(
         console.print(f"  [dim italic]Hint: {escape(hint)}[/dim italic]")
 
 
+def _record_to_dict(record: FilingRecord) -> dict[str, Any]:
+    """Lift a :class:`FilingRecord` onto the JSON wire shape.
+
+    Mirrors :class:`api.schemas.FilingSchema` exactly (allow-list lift)
+    — the auto-increment ``id`` is dropped because it is an internal
+    SQLite detail.  Used by ``manage list --output json``.
+    """
+    return {
+        "ticker": record.ticker,
+        "form_type": record.form_type,
+        "filing_date": record.filing_date,
+        "accession_number": record.accession_number,
+        "chunk_count": record.chunk_count,
+        "ingested_at": record.ingested_at,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Storage construction (shared by the four subcommands)
 # ---------------------------------------------------------------------------
 
 
-def _resolve_stamp() -> EmbedderStamp:
+def _resolve_stamp(*, output: OutputFormat = OutputFormat.TEXT) -> EmbedderStamp:
     """Compose the embedder stamp from settings + registry.
 
     No factory call — :class:`ChromaDBClient` only needs the stamp to
@@ -112,6 +150,8 @@ def _resolve_stamp() -> EmbedderStamp:
                 "Check EMBEDDING_PROVIDER and EMBEDDING_MODEL_NAME against "
                 "the registry — defaults live in providers/registry.py."
             ),
+            output=output,
+            error_code="embedder_configuration_invalid",
         )
         raise typer.Exit(code=1) from None
 
@@ -122,7 +162,9 @@ def _resolve_stamp() -> EmbedderStamp:
     )
 
 
-def _open_registry_only() -> MetadataRegistry:
+def _open_registry_only(
+    *, output: OutputFormat = OutputFormat.TEXT
+) -> MetadataRegistry:
     """Open the metadata registry for read-only queries.
 
     Read paths (``status`` filing-count read, ``list``, ``remove``
@@ -140,11 +182,15 @@ def _open_registry_only() -> MetadataRegistry:
             exc.message,
             details=exc.details,
             hint="Check DB_METADATA_DB_PATH is readable and SQLCipher is set up if encrypted.",
+            output=output,
+            error_code="registry_initialisation_failed",
         )
         raise typer.Exit(code=1) from None
 
 
-def _open_store() -> tuple[ChromaDBClient, MetadataRegistry, FilingStore]:
+def _open_store(
+    *, output: OutputFormat = OutputFormat.TEXT,
+) -> tuple[ChromaDBClient, MetadataRegistry, FilingStore]:
     """Open both backing stores + the dual-store coordinator.
 
     Required by every write path (``remove``, ``clear``) and by
@@ -152,7 +198,7 @@ def _open_store() -> tuple[ChromaDBClient, MetadataRegistry, FilingStore]:
     Failures surface as a single operator-facing envelope — the caller
     never sees a stack trace.
     """
-    stamp = _resolve_stamp()
+    stamp = _resolve_stamp(output=output)
     try:
         chroma = ChromaDBClient(stamp)
         registry = MetadataRegistry()
@@ -165,6 +211,8 @@ def _open_store() -> tuple[ChromaDBClient, MetadataRegistry, FilingStore]:
                 "Check DB_CHROMA_PATH / DB_METADATA_DB_PATH are accessible and "
                 "that the existing collection's embedder stamp matches EMBEDDING_*."
             ),
+            output=output,
+            error_code="storage_initialisation_failed",
         )
         raise typer.Exit(code=1) from None
 
@@ -177,24 +225,68 @@ def _open_store() -> tuple[ChromaDBClient, MetadataRegistry, FilingStore]:
 
 
 @manage_app.command("status")
-def status() -> None:
+def status(
+    output: Annotated[
+        str,
+        typer.Option(
+            "--output",
+            "-o",
+            help=(
+                "Output format: 'text' (default Rich panel) or 'json'.  "
+                "JSON shape is an allow-list lift of the operator-relevant "
+                "fields ({filing_count, max_filings, chunk_count, tickers, "
+                "form_breakdown}); failures render as {error, message, hint} "
+                "envelopes."
+            ),
+        ),
+    ] = "text",
+) -> None:
     """Show filing / chunk counts, ticker list, and form-type breakdown.
 
-    Example:
+    Examples:
 
         sec-rag manage status
+
+        sec-rag manage status --output json | jq '.filing_count'
     """
-    chroma, registry, _ = _open_store()
+    output_format = coerce_output_format(output)
+
+    chroma, registry, _ = _open_store(output=output_format)
     settings = get_settings()
 
     try:
         stats = registry.get_statistics()
         chunk_count = chroma.collection_count()
     except DatabaseError as exc:
-        _print_error("Status query failed", exc.message, details=exc.details)
+        _print_error(
+            "Status query failed",
+            exc.message,
+            details=exc.details,
+            output=output_format,
+            error_code="status_query_failed",
+        )
         raise typer.Exit(code=1) from None
 
     max_filings = settings.database.max_filings
+
+    if is_json(output_format):
+        # Operator-relevant snapshot — does NOT mirror
+        # ``api.schemas.StatusResponse`` because the CLI surface
+        # exposes contents (tickers, form breakdown) instead of
+        # deployment / auth metadata (``is_admin``,
+        # ``deployment_profile``).  Field names are stable and
+        # explicit so a future schema bump on the dataclass does not
+        # silently leak.
+        print_json(
+            {
+                "filing_count": stats.filing_count,
+                "max_filings": max_filings,
+                "chunk_count": chunk_count,
+                "tickers": list(stats.tickers),
+                "form_breakdown": dict(stats.form_breakdown),
+            }
+        )
+        return
 
     table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column("Key", style="bold")
@@ -241,6 +333,17 @@ def list_filings(
         str | None,
         typer.Option("--form", "-f", help="Filter by form type."),
     ] = None,
+    output: Annotated[
+        str,
+        typer.Option(
+            "--output",
+            "-o",
+            help=(
+                "Output format: 'text' (default Rich table) or 'json' "
+                "(single-document allow-list lift of api.schemas.FilingListResponse)."
+            ),
+        ),
+    ] = "text",
 ) -> None:
     """List ingested filings, optionally filtered by ticker / form.
 
@@ -255,8 +358,12 @@ def list_filings(
         sec-rag manage list -k AAPL
 
         sec-rag manage list -f 10-K
+
+        sec-rag manage list --output json | jq '.filings[].accession_number'
     """
-    registry = _open_registry_only()
+    output_format = coerce_output_format(output)
+
+    registry = _open_registry_only(output=output_format)
 
     try:
         filings = registry.list_filings(
@@ -264,8 +371,26 @@ def list_filings(
             form_type=form.upper() if form else None,
         )
     except DatabaseError as exc:
-        _print_error("List failed", exc.message, details=exc.details)
+        _print_error(
+            "List failed",
+            exc.message,
+            details=exc.details,
+            output=output_format,
+            error_code="list_failed",
+        )
         raise typer.Exit(code=1) from None
+
+    if is_json(output_format):
+        # Mirror ``api.schemas.FilingListResponse``: ``{filings, total}``.
+        # An empty list is a valid result — the JSON shape is uniform
+        # so a downstream parser does not need a "no filings" sentinel.
+        print_json(
+            {
+                "filings": [_record_to_dict(f) for f in filings],
+                "total": len(filings),
+            }
+        )
+        return
 
     if not filings:
         console.print("[yellow]No filings found.[/yellow]")

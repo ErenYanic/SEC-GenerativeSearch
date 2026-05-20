@@ -88,6 +88,13 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
+from sec_generative_search.cli._json import (
+    OutputFormat,
+    coerce_output_format,
+    error_envelope,
+    is_json,
+    print_json,
+)
 from sec_generative_search.config.settings import get_settings
 from sec_generative_search.core.exceptions import (
     ConfigurationError,
@@ -154,8 +161,22 @@ def _print_error(
     *,
     details: str | None = None,
     hint: str | None = None,
+    output: OutputFormat = OutputFormat.TEXT,
+    error_code: str | None = None,
 ) -> None:
-    """Render an error with optional details and a single hint line."""
+    """Render an error with optional details and a single hint line.
+
+    When ``output == OutputFormat.JSON`` the document is an
+    :func:`error_envelope` instead of the Rich text.  ``error_code``
+    drives the machine-readable ``error`` slug (mirrors the API
+    envelope discipline).  ``rag chat`` deliberately keeps ``output``
+    defaulted to TEXT — the REPL surface is interactive and does not
+    expose the JSON flag.
+    """
+    if is_json(output):
+        slug = error_code or label.lower().replace(" ", "_")
+        print_json(error_envelope(slug, message, hint=hint, details=details))
+        return
     console.print(f"[red]{escape(label)}:[/red] {escape(message)}")
     if details:
         console.print(f"  [dim]{escape(details)}[/dim]")
@@ -266,7 +287,7 @@ def _build_api_key_resolver(registry: MetadataRegistry):  # type: ignore[no-unty
 # ---------------------------------------------------------------------------
 
 
-def _resolve_stamp() -> EmbedderStamp:
+def _resolve_stamp(*, output: OutputFormat = OutputFormat.TEXT) -> EmbedderStamp:
     """Compose the embedder stamp from settings + registry.
 
     Mirrors :mod:`cli.manage`'s ``_resolve_stamp`` so the failure
@@ -285,6 +306,8 @@ def _resolve_stamp() -> EmbedderStamp:
                 "Check EMBEDDING_PROVIDER and EMBEDDING_MODEL_NAME against "
                 "the registry — defaults live in providers/registry.py."
             ),
+            output=output,
+            error_code="embedder_configuration_invalid",
         )
         raise typer.Exit(code=1) from None
     return EmbedderStamp(
@@ -294,7 +317,9 @@ def _resolve_stamp() -> EmbedderStamp:
     )
 
 
-def _build_retrieval() -> tuple[RetrievalService, MetadataRegistry]:
+def _build_retrieval(
+    *, output: OutputFormat = OutputFormat.TEXT,
+) -> tuple[RetrievalService, MetadataRegistry]:
     """Build the retrieval primitive + open the registry handle.
 
     The registry handle is returned so the caller can compose the
@@ -311,6 +336,8 @@ def _build_retrieval() -> tuple[RetrievalService, MetadataRegistry]:
             "Embedder construction failed",
             exc.message,
             hint="Set the expected API-key env var for the embedding provider.",
+            output=output,
+            error_code="embedder_construction_failed",
         )
         raise typer.Exit(code=1) from None
     except KeyError as exc:
@@ -322,10 +349,12 @@ def _build_retrieval() -> tuple[RetrievalService, MetadataRegistry]:
                 "Install the matching extra, e.g. "
                 "`uv pip install -e '.[local-embeddings]'` for the local provider."
             ),
+            output=output,
+            error_code="embedder_unavailable",
         )
         raise typer.Exit(code=1) from None
 
-    stamp = _resolve_stamp()
+    stamp = _resolve_stamp(output=output)
 
     try:
         chroma = ChromaDBClient(stamp)
@@ -339,13 +368,20 @@ def _build_retrieval() -> tuple[RetrievalService, MetadataRegistry]:
                 "Check DB_CHROMA_PATH / DB_METADATA_DB_PATH are accessible and "
                 "that the existing collection's embedder stamp matches EMBEDDING_*."
             ),
+            output=output,
+            error_code="storage_initialisation_failed",
         )
         raise typer.Exit(code=1) from None
 
     return RetrievalService(embedder=embedder, chroma_client=chroma), registry
 
 
-def _build_llm(registry: MetadataRegistry, provider_name: str):  # type: ignore[no-untyped-def]
+def _build_llm(  # type: ignore[no-untyped-def]
+    registry: MetadataRegistry,
+    provider_name: str,
+    *,
+    output: OutputFormat = OutputFormat.TEXT,
+):
     """Build the LLM via the operator-scope resolver chain.
 
     Failures map onto the same operator-facing envelopes the API uses
@@ -365,6 +401,8 @@ def _build_llm(registry: MetadataRegistry, provider_name: str):  # type: ignore[
                 "(e.g. OPENAI_API_KEY / ANTHROPIC_API_KEY) or register it via "
                 "'sec-rag provider set' once that command lands."
             ),
+            output=output,
+            error_code="provider_key_required",
         )
         raise typer.Exit(code=1) from None
     except KeyError as exc:
@@ -373,6 +411,8 @@ def _build_llm(registry: MetadataRegistry, provider_name: str):  # type: ignore[
             f"Provider {provider_name!r} requires additional packages.",
             details=str(exc),
             hint="Install the provider's optional extras and try again.",
+            output=output,
+            error_code="provider_unavailable",
         )
         raise typer.Exit(code=1) from None
 
@@ -417,6 +457,84 @@ def _apply_overrides(
     if mode is not None:
         plan.suggested_answer_mode = mode
     return plan
+
+
+def _plan_to_dict(plan: QueryPlan) -> dict[str, Any]:
+    """Lift a :class:`QueryPlan` onto the JSON wire shape.
+
+    Mirrors :class:`api.schemas.QueryPlanSchema` exactly (allow-list
+    lift, never a ``**asdict()`` splat).  ``date_range`` is a 2-tuple
+    on the dataclass but lifted as a fixed-length list on the wire
+    because JSON has no tuple type; ``None`` stays ``None``.
+    ``suggested_answer_mode`` is the enum's lower-case value (same as
+    the API surface).
+    """
+    return {
+        "raw_query": plan.raw_query,
+        "detected_language": plan.detected_language,
+        "query_en": plan.query_en,
+        "tickers": list(plan.tickers),
+        "form_types": list(plan.form_types),
+        "date_range": (
+            [plan.date_range[0], plan.date_range[1]]
+            if plan.date_range is not None
+            else None
+        ),
+        "intent": plan.intent,
+        "suggested_answer_mode": plan.suggested_answer_mode.value,
+    }
+
+
+def _citation_to_dict(citation: Citation) -> dict[str, Any]:
+    """Lift one :class:`Citation` onto the JSON wire shape.
+
+    Mirrors :class:`api.schemas.CitationSchema` exactly:
+    :attr:`Citation.filing_id` is flattened into the four scalars the
+    wire surface carries (``ticker`` / ``form_type`` / ``filing_date``
+    / ``accession_number``), and the date is serialised as ISO.
+    """
+    fid = citation.filing_id
+    return {
+        "chunk_id": citation.chunk_id,
+        "ticker": fid.ticker,
+        "form_type": fid.form_type,
+        "filing_date": fid.filing_date.isoformat(),
+        "accession_number": fid.accession_number,
+        "section_path": citation.section_path,
+        "text_span": citation.text_span,
+        "similarity": citation.similarity,
+        "display_index": citation.display_index,
+    }
+
+
+def _result_to_dict(
+    result: GenerationResult,
+    *,
+    refused: bool,
+) -> dict[str, Any]:
+    """Lift a :class:`GenerationResult` onto the JSON wire shape.
+
+    Mirrors :class:`api.schemas.RagQueryResponse` exactly.
+    ``retrieved_chunks`` is intentionally NOT echoed back (same
+    discipline as the API surface — the citations are the audit trail;
+    operators wanting the full candidate set use ``sec-rag search``).
+    """
+    usage = result.token_usage
+    return {
+        "answer": result.answer,
+        "citations": [_citation_to_dict(c) for c in result.citations],
+        "provider": result.provider,
+        "model": result.model,
+        "prompt_version": result.prompt_version,
+        "token_usage": {
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "total_tokens": usage.total_tokens,
+        },
+        "latency_seconds": result.latency_seconds,
+        "streamed": result.streamed,
+        "refused": refused,
+    }
 
 
 def _render_plan(plan: QueryPlan) -> None:
@@ -557,6 +675,7 @@ def _resolve_routing_hints(
     *,
     openrouter_provider: list[str] | None,
     openrouter_fallbacks: bool | None,
+    output: OutputFormat = OutputFormat.TEXT,
 ) -> OpenRouterRoutingHints | None:
     """Build :class:`OpenRouterRoutingHints` from CLI flags, with a strict guard.
 
@@ -603,6 +722,8 @@ def _resolve_routing_hints(
                 "Re-run with --provider openrouter (the only provider that "
                 "consumes these flags), or drop the --openrouter-* flags."
             ),
+            output=output,
+            error_code="invalid_flag_combination",
         )
         raise typer.Exit(code=1)
 
@@ -751,6 +872,20 @@ def query(
             ),
         ),
     ] = None,
+    output: Annotated[
+        str,
+        typer.Option(
+            "--output",
+            "-o",
+            help=(
+                "Output format: 'text' (default Rich panels) or 'json'.  "
+                "JSON mode emits an allow-list lift of "
+                "api.schemas.RagQueryResponse (or RagPlanResponse with "
+                "--show-plan); failures render as {error, message, hint} "
+                "envelopes.  The raw question is NEVER part of any envelope."
+            ),
+        ),
+    ] = "text",
 ) -> None:
     """Run the full RAG pipeline non-streaming and render the answer.
 
@@ -768,16 +903,27 @@ def query(
         sec-rag rag query "Risk factors" \\
             --provider openrouter --model anthropic/claude-sonnet-4-6 \\
             --openrouter-provider anthropic --no-openrouter-fallbacks
+
+        sec-rag rag query "What is revenue?" --output json | jq '.answer'
     """
+    output_format = coerce_output_format(output)
+
     if show_plan and skip_plan:
         _print_error(
             "Invalid flag combination",
             "--show-plan and --skip-plan are mutually exclusive.",
+            output=output_format,
+            error_code="invalid_flag_combination",
         )
         raise typer.Exit(code=1)
 
     if not question or not question.strip():
-        _print_error("Invalid question", "Question must not be empty.")
+        _print_error(
+            "Invalid question",
+            "Question must not be empty.",
+            output=output_format,
+            error_code="invalid_question",
+        )
         raise typer.Exit(code=1)
 
     _validate_date(since, "--since")
@@ -799,6 +945,8 @@ def query(
             f"{provider_name!r} is not a registered LLM provider.",
             details=str(exc),
             hint="Set LLM_PROVIDER to a registered slug (openai / anthropic / gemini / ...).",
+            output=output_format,
+            error_code="unknown_provider",
         )
         raise typer.Exit(code=1) from None
     except ValueError as exc:
@@ -807,6 +955,8 @@ def query(
             f"{model_name!r} is not registered for provider {provider_name!r}.",
             details=str(exc),
             hint="Unset LLM_DEFAULT_MODEL to use the provider default.",
+            output=output_format,
+            error_code="unknown_model",
         )
         raise typer.Exit(code=1) from None
 
@@ -818,10 +968,11 @@ def query(
         provider_name,
         openrouter_provider=openrouter_provider,
         openrouter_fallbacks=openrouter_fallbacks,
+        output=output_format,
     )
 
-    retrieval, registry = _build_retrieval()
-    llm = _build_llm(registry, provider_name)
+    retrieval, registry = _build_retrieval(output=output_format)
+    llm = _build_llm(registry, provider_name, output=output_format)
 
     # --- Plan resolution ------------------------------------------------------
     if skip_plan:
@@ -842,6 +993,8 @@ def query(
                     "Verify or rotate the provider key for "
                     f"{provider_name!r}; do not retry until corrected."
                 ),
+                output=output_format,
+                error_code="provider_unauthorized",
             )
             raise typer.Exit(code=1) from None
         except (ProviderRateLimitError, ProviderTimeoutError):
@@ -849,6 +1002,8 @@ def query(
                 "Provider unavailable",
                 "The upstream provider is rate-limited or timed out.",
                 hint="Retry after a short backoff; do not rotate the key.",
+                output=output_format,
+                error_code="provider_unavailable",
             )
             raise typer.Exit(code=1) from None
         except ProviderError as exc:
@@ -857,6 +1012,8 @@ def query(
                 "The upstream provider returned an error during query understanding.",
                 details=type(exc).__name__,
                 hint="Inspect the audit log; do not rotate the key on a non-auth error.",
+                output=output_format,
+                error_code="provider_error",
             )
             raise typer.Exit(code=1) from None
 
@@ -870,6 +1027,19 @@ def query(
     )
 
     if show_plan:
+        if is_json(output_format):
+            # Mirror ``api.schemas.RagPlanResponse``: ``{plan, provider,
+            # model}``.  ``model`` is the resolved slug (empty string
+            # falls back to the provider default) so the JSON consumer
+            # can pin to the exact run later.
+            print_json(
+                {
+                    "plan": _plan_to_dict(plan),
+                    "provider": provider_name,
+                    "model": model_name or "",
+                }
+            )
+            return
         _render_plan(plan)
         return
 
@@ -892,6 +1062,8 @@ def query(
                 "Verify or rotate the provider key for "
                 f"{provider_name!r}; do not retry until corrected."
             ),
+            output=output_format,
+            error_code="provider_unauthorized",
         )
         raise typer.Exit(code=1) from None
     except (ProviderRateLimitError, ProviderTimeoutError):
@@ -899,6 +1071,8 @@ def query(
             "Provider unavailable",
             "The upstream provider is rate-limited or timed out.",
             hint="Retry after a short backoff; do not rotate the key.",
+            output=output_format,
+            error_code="provider_unavailable",
         )
         raise typer.Exit(code=1) from None
     except ProviderError as exc:
@@ -907,6 +1081,8 @@ def query(
             "The upstream provider returned an error during generation.",
             details=type(exc).__name__,
             hint="Inspect the audit log; do not rotate the key on a non-auth error.",
+            output=output_format,
+            error_code="provider_error",
         )
         raise typer.Exit(code=1) from None
     except GenerationError as exc:
@@ -915,6 +1091,8 @@ def query(
             "The orchestrator could not assemble a valid answer.",
             details=exc.message,
             hint="Retry the request; if it persists, switch model or provider.",
+            output=output_format,
+            error_code="generation_failed",
         )
         raise typer.Exit(code=1) from None
     except SearchError as exc:
@@ -926,6 +1104,8 @@ def query(
                 "Check that filings have been ingested (`sec-rag manage status`) "
                 "and that --since / --until are valid YYYY-MM-DD values."
             ),
+            output=output_format,
+            error_code="retrieval_failed",
         )
         raise typer.Exit(code=1) from None
     except DatabaseError as exc:
@@ -934,6 +1114,8 @@ def query(
             exc.message,
             details=exc.details,
             hint="Check DB_CHROMA_PATH is readable and the collection is intact.",
+            output=output_format,
+            error_code="database_error",
         )
         raise typer.Exit(code=1) from None
 
@@ -958,6 +1140,15 @@ def query(
             f"or_hints={_format_routing_hints_audit(routing_hints)}"
         ),
     )
+
+    if is_json(output_format):
+        # Mirror ``api.schemas.RagQueryResponse`` exactly.  The audit
+        # log above carries the same metadata footprint as the API
+        # surface (provider / model / counts only); the JSON document
+        # adds the answer + citations because the wire response on
+        # ``/api/rag/query`` does the same.
+        print_json(_result_to_dict(result, refused=refused))
+        return
 
     _render_result(result, refused=refused)
 

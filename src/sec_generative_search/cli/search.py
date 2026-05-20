@@ -40,7 +40,7 @@ calls :func:`logger.info` / :func:`audit_log` directly with the query.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
@@ -48,6 +48,13 @@ from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
+from sec_generative_search.cli._json import (
+    OutputFormat,
+    coerce_output_format,
+    error_envelope,
+    is_json,
+    print_json,
+)
 from sec_generative_search.config.settings import get_settings
 from sec_generative_search.core.exceptions import (
     ConfigurationError,
@@ -84,6 +91,8 @@ def _print_error(
     *,
     details: str | None = None,
     hint: str | None = None,
+    output: OutputFormat = OutputFormat.TEXT,
+    error_code: str | None = None,
 ) -> None:
     """Render an error with optional details and a single hint line.
 
@@ -93,7 +102,18 @@ def _print_error(
     accession numbers / install hints with literal square brackets
     render verbatim instead of being silently stripped by Rich's markup
     parser.
+
+    When ``output == OutputFormat.JSON`` an :func:`error_envelope`
+    document is emitted instead of the Rich text; ``error_code``
+    supplies the machine-readable ``error`` slug (mirrors the API
+    envelope's discipline).  The raw query is NEVER part of any
+    envelope — the caller is responsible for keeping it out of
+    ``message`` / ``details`` / ``hint``.
     """
+    if is_json(output):
+        slug = error_code or label.lower().replace(" ", "_")
+        print_json(error_envelope(slug, message, hint=hint, details=details))
+        return
     console.print(f"[red]{escape(label)}:[/red] {escape(message)}")
     if details:
         console.print(f"  [dim]{escape(details)}[/dim]")
@@ -141,7 +161,34 @@ def _validate_date(value: str | None, param_name: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def _build_service() -> RetrievalService:
+def _hit_to_dict(result: RetrievalResult) -> dict[str, Any]:
+    """Lift one :class:`RetrievalResult` onto the JSON wire shape.
+
+    Field selection mirrors :class:`api.schemas.SearchHit` exactly
+    (allow-list lift, never a ``**asdict()`` splat) so a future field
+    addition on :class:`RetrievalResult` does not silently leak onto
+    the operator surface.  ``content_type`` is the enum's lower-case
+    value to match the API; ``section_boundaries`` is materialised as
+    a list (the dataclass field is a sequence).
+    """
+    return {
+        "chunk_id": result.chunk_id,
+        "content": result.content,
+        "path": result.path,
+        "content_type": result.content_type.value,
+        "ticker": result.ticker,
+        "form_type": result.form_type,
+        "filing_date": result.filing_date,
+        "accession_number": result.accession_number,
+        "similarity": result.similarity,
+        "rerank_score": result.rerank_score,
+        "token_count": result.token_count,
+        "truncated": result.truncated,
+        "section_boundaries": list(result.section_boundaries),
+    }
+
+
+def _build_service(*, output: OutputFormat = OutputFormat.TEXT) -> RetrievalService:
     """Construct a stamp-sealed :class:`RetrievalService`.
 
     Failures surface as single operator-facing envelopes — the caller
@@ -170,6 +217,8 @@ def _build_service() -> RetrievalService:
                 "Check EMBEDDING_PROVIDER and EMBEDDING_MODEL_NAME against "
                 "the registry — defaults live in providers/registry.py."
             ),
+            output=output,
+            error_code="embedder_configuration_invalid",
         )
         raise typer.Exit(code=1) from None
 
@@ -180,6 +229,8 @@ def _build_service() -> RetrievalService:
             "Embedder construction failed",
             exc.message,
             hint="Set the expected API-key env var for this provider.",
+            output=output,
+            error_code="embedder_construction_failed",
         )
         raise typer.Exit(code=1) from None
     except KeyError as exc:
@@ -191,6 +242,8 @@ def _build_service() -> RetrievalService:
                 "Install the matching extra, e.g. "
                 "`uv pip install -e '.[local-embeddings]'` for the local provider."
             ),
+            output=output,
+            error_code="embedder_unavailable",
         )
         raise typer.Exit(code=1) from None
 
@@ -211,6 +264,8 @@ def _build_service() -> RetrievalService:
                 "Check DB_CHROMA_PATH is readable and that the existing "
                 "collection's embedder stamp matches EMBEDDING_*."
             ),
+            output=output,
+            error_code="storage_initialisation_failed",
         )
         raise typer.Exit(code=1) from None
 
@@ -312,6 +367,19 @@ def search(
             help="Filter results to filings on or before this date (YYYY-MM-DD).",
         ),
     ] = None,
+    output: Annotated[
+        str,
+        typer.Option(
+            "--output",
+            "-o",
+            help=(
+                "Output format: 'text' (default Rich table) or 'json' "
+                "(single-document allow-list lift of api.schemas.SearchResponse). "
+                "JSON mode suppresses status spinners and renders failures as "
+                "{error, message, hint} envelopes."
+            ),
+        ),
+    ] = "text",
 ) -> None:
     """Search ingested SEC filings with a natural-language query.
 
@@ -328,7 +396,11 @@ def search(
         sec-rag search "debt covenants" -a 0000320193-23-000106
 
         sec-rag search "revenue" --start-date 2023-01-01 --end-date 2023-12-31
+
+        sec-rag search "supply chain risk" --output json | jq '.hits[0]'
     """
+    output_format = coerce_output_format(output)
+
     # Reject empty / whitespace-only queries before constructing any
     # storage — the service would raise SearchError anyway, but failing
     # here saves an embedder build for a known-bad invocation.
@@ -336,6 +408,8 @@ def search(
         _print_error(
             "Invalid query",
             "Query must not be empty.",
+            output=output_format,
+            error_code="invalid_query",
         )
         raise typer.Exit(code=1)
 
@@ -349,54 +423,82 @@ def search(
     form_filter = [f.upper() for f in form] if form else None
     accession_filter = list(accession) if accession else None
 
-    service = _build_service()
+    service = _build_service(output=output_format)
 
-    with console.status("Searching..."):
-        try:
-            results = service.retrieve(
-                query,
-                top_k=top,
-                ticker=ticker_filter,
-                form_type=form_filter,
-                accession_number=accession_filter,
-                start_date=start_date,
-                end_date=end_date,
-            )
-        except SearchError as exc:
-            _print_error(
-                "Search failed",
-                exc.message,
-                details=exc.details,
-                hint=(
-                    "Ensure filings have been ingested with "
-                    "'sec-rag ingest add' and that --start-date / --end-date "
-                    "are valid YYYY-MM-DD values."
-                ),
-            )
-            raise typer.Exit(code=1) from None
-        except ProviderError as exc:
-            # Embedding-side failure — the corpus and storage layer are
-            # fine, the embedder upstream is not.  Mirror the
-            # ``/api/search`` mapping (502 there) with a single
-            # operator-facing line here.
-            _print_error(
-                "Embedding provider failure",
-                "The embedding provider failed while processing the query.",
-                details=exc.message,
-                hint=(
-                    "Retry after a short backoff; if the failure persists, "
-                    "check the embedder API-key env var."
-                ),
-            )
-            raise typer.Exit(code=1) from None
-        except DatabaseError as exc:
-            _print_error(
-                "Database failure",
-                exc.message,
-                details=exc.details,
-                hint="Check DB_CHROMA_PATH is readable and the collection is intact.",
-            )
-            raise typer.Exit(code=1) from None
+    # The Rich status spinner emits its own ANSI redraw frames; in
+    # JSON mode we suppress it so a tee'd ``stdout`` does not pick up
+    # animation bytes before the JSON document.
+    def _run_retrieve() -> list[RetrievalResult]:
+        return service.retrieve(
+            query,
+            top_k=top,
+            ticker=ticker_filter,
+            form_type=form_filter,
+            accession_number=accession_filter,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    try:
+        if is_json(output_format):
+            results = _run_retrieve()
+        else:
+            with console.status("Searching..."):
+                results = _run_retrieve()
+    except SearchError as exc:
+        _print_error(
+            "Search failed",
+            exc.message,
+            details=exc.details,
+            hint=(
+                "Ensure filings have been ingested with "
+                "'sec-rag ingest add' and that --start-date / --end-date "
+                "are valid YYYY-MM-DD values."
+            ),
+            output=output_format,
+            error_code="search_failed",
+        )
+        raise typer.Exit(code=1) from None
+    except ProviderError as exc:
+        # Embedding-side failure — the corpus and storage layer are
+        # fine, the embedder upstream is not.  Mirror the
+        # ``/api/search`` mapping (502 there) with a single
+        # operator-facing line here.
+        _print_error(
+            "Embedding provider failure",
+            "The embedding provider failed while processing the query.",
+            details=exc.message,
+            hint=(
+                "Retry after a short backoff; if the failure persists, "
+                "check the embedder API-key env var."
+            ),
+            output=output_format,
+            error_code="provider_error",
+        )
+        raise typer.Exit(code=1) from None
+    except DatabaseError as exc:
+        _print_error(
+            "Database failure",
+            exc.message,
+            details=exc.details,
+            hint="Check DB_CHROMA_PATH is readable and the collection is intact.",
+            output=output_format,
+            error_code="database_error",
+        )
+        raise typer.Exit(code=1) from None
+
+    if is_json(output_format):
+        # Mirror ``api.schemas.SearchResponse``: ``{hits, total}``.  The
+        # raw query is deliberately NOT echoed (same discipline as the
+        # API route) — operators piping JSON into a log shipper should
+        # not find the query inlined into a per-result document.
+        print_json(
+            {
+                "hits": [_hit_to_dict(r) for r in results],
+                "total": len(results),
+            }
+        )
+        return
 
     if not results:
         console.print("[yellow]No results found.[/yellow]")
