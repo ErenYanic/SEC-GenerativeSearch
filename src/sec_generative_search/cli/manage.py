@@ -162,9 +162,7 @@ def _resolve_stamp(*, output: OutputFormat = OutputFormat.TEXT) -> EmbedderStamp
     )
 
 
-def _open_registry_only(
-    *, output: OutputFormat = OutputFormat.TEXT
-) -> MetadataRegistry:
+def _open_registry_only(*, output: OutputFormat = OutputFormat.TEXT) -> MetadataRegistry:
     """Open the metadata registry for read-only queries.
 
     Read paths (``status`` filing-count read, ``list``, ``remove``
@@ -189,7 +187,8 @@ def _open_registry_only(
 
 
 def _open_store(
-    *, output: OutputFormat = OutputFormat.TEXT,
+    *,
+    output: OutputFormat = OutputFormat.TEXT,
 ) -> tuple[ChromaDBClient, MetadataRegistry, FilingStore]:
     """Open both backing stores + the dual-store coordinator.
 
@@ -307,9 +306,7 @@ def status(
             "Tickers",
             Text(f"{len(stats.tickers)} ({ticker_list})", style="cyan"),
         )
-        breakdown = "  |  ".join(
-            f"{form}: {count}" for form, count in stats.form_breakdown.items()
-        )
+        breakdown = "  |  ".join(f"{form}: {count}" for form, count in stats.form_breakdown.items())
         table.add_row("Forms", Text(breakdown))
     else:
         table.add_row("Tickers", Text("—", style="dim"))
@@ -449,15 +446,11 @@ def remove(
     ] = None,
     ticker: Annotated[
         str | None,
-        typer.Option(
-            "--ticker", "-k", help="Remove all filings for this ticker."
-        ),
+        typer.Option("--ticker", "-k", help="Remove all filings for this ticker."),
     ] = None,
     form: Annotated[
         str | None,
-        typer.Option(
-            "--form", "-f", help="Remove all filings of this form type."
-        ),
+        typer.Option("--form", "-f", help="Remove all filings of this form type."),
     ] = None,
     yes: Annotated[
         bool,
@@ -572,9 +565,7 @@ def remove(
             )
             if part
         )
-        console.print(
-            f"[yellow]No filings found matching {escape(filter_desc)}.[/yellow]"
-        )
+        console.print(f"[yellow]No filings found matching {escape(filter_desc)}.[/yellow]")
         return
 
     total_chunks = sum(f.chunk_count for f in filings)
@@ -599,17 +590,13 @@ def remove(
     console.print()
 
     if not yes:
-        confirmed = typer.confirm(
-            f"{len(filings)} filing(s) will be deleted. Are you sure?"
-        )
+        confirmed = typer.confirm(f"{len(filings)} filing(s) will be deleted. Are you sure?")
         if not confirmed:
             console.print("[dim]Cancelled.[/dim]")
             raise typer.Exit(code=0)
 
     try:
-        rows_removed = store.delete_filings_batch(
-            [f.accession_number for f in filings]
-        )
+        rows_removed = store.delete_filings_batch([f.accession_number for f in filings])
     except DatabaseError as exc:
         _print_error(
             "Removal failed",
@@ -620,8 +607,7 @@ def remove(
         raise typer.Exit(code=1) from None
 
     console.print(
-        f"\n[green]Done:[/green] {rows_removed} filing(s) removed, "
-        f"{total_chunks} chunks deleted"
+        f"\n[green]Done:[/green] {rows_removed} filing(s) removed, {total_chunks} chunks deleted"
     )
 
 
@@ -682,9 +668,7 @@ def clear(
     )
 
     if not yes:
-        confirmed = typer.confirm(
-            f"ALL {len(filings)} filing(s) will be deleted. Are you sure?"
-        )
+        confirmed = typer.confirm(f"ALL {len(filings)} filing(s) will be deleted. Are you sure?")
         if not confirmed:
             console.print("[dim]Cancelled.[/dim]")
             raise typer.Exit(code=0)

@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import json
 import sys
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 import typer
@@ -45,7 +45,7 @@ __all__ = [
 ]
 
 
-class OutputFormat(str, Enum):
+class OutputFormat(StrEnum):
     """Operator-selected output format.
 
     ``text`` keeps the existing Rich-rendered output unchanged.
@@ -71,9 +71,7 @@ def coerce_output_format(value: str) -> OutputFormat:
         return OutputFormat(normalised)
     except ValueError as exc:
         valid = ", ".join(f.value for f in OutputFormat)
-        raise typer.BadParameter(
-            f"Invalid --output: {value!r}. Expected one of: {valid}."
-        ) from exc
+        raise typer.BadParameter(f"Invalid --output: {value!r}. Expected one of: {valid}.") from exc
 
 
 def is_json(output: OutputFormat) -> bool:

@@ -105,11 +105,7 @@ def evict(
     # negatives at load, the registry rejects non-positives at the
     # primitive — so a non-positive value here is exclusively a
     # zero-from-disabled-settings case.
-    cutoff = (
-        max_age_days
-        if max_age_days is not None
-        else settings.database.retention_max_age_days
-    )
+    cutoff = max_age_days if max_age_days is not None else settings.database.retention_max_age_days
 
     if cutoff <= 0:
         _print_error(
@@ -199,8 +195,7 @@ def evict(
 
     if report.filings_evicted == 0:
         console.print(
-            "[dim]Nothing to evict — no filings older than "
-            f"{report.max_age_days} day(s).[/dim]"
+            f"[dim]Nothing to evict — no filings older than {report.max_age_days} day(s).[/dim]"
         )
     else:
         console.print(

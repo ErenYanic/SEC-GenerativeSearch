@@ -388,9 +388,7 @@ def list_providers(
         table.add_column("Notes", style="dim")
 
         for entry in entries:
-            default_model = (
-                getattr(entry.provider_cls, "default_model", "") or "—"
-            )
+            default_model = getattr(entry.provider_cls, "default_model", "") or "—"
             pricing = (
                 _pricing_label(entry.provider_cls, default_model)
                 if default_model != "—"
@@ -407,9 +405,7 @@ def list_providers(
                 key_cell = "[red]·[/red]"
             notes_bits: list[str] = []
             if entry.requires_extras:
-                notes_bits.append(
-                    "needs " + "+".join(entry.requires_extras)
-                )
+                notes_bits.append("needs " + "+".join(entry.requires_extras))
             if entry.supports_arbitrary_models:
                 notes_bits.append("arbitrary models")
             if entry.supports_upstream_routing:
@@ -607,8 +603,7 @@ def _refuse_set_unless_encrypted_ready() -> MetadataRegistry:
     if not settings.database.persist_provider_credentials:
         _print_error(
             "Encrypted credential storage disabled",
-            "`provider set` refuses to write a credential without "
-            "encrypted-at-rest storage.",
+            "`provider set` refuses to write a credential without encrypted-at-rest storage.",
             hint=_HARD_FAIL_SET_HINT,
         )
         raise typer.Exit(code=1)
@@ -792,7 +787,8 @@ def set_key(
             except ProviderError as exc:
                 console.print(
                     "[yellow]![/yellow] Credential stored but post-write "
-                    f"validation returned a non-auth provider error: {escape(type(exc).__name__)}.  "
+                    "validation returned a non-auth provider error: "
+                    f"{escape(type(exc).__name__)}.  "
                     "Inspect the audit log; do not rotate the key on a non-auth error."
                 )
                 return

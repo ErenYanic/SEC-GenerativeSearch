@@ -111,7 +111,6 @@ line-length = 100
 # standard as the rest of the project.
 extend-exclude = [
     "src/sec_generative_search/api/routes/filings.py",
-    "src/sec_generative_search/cli",
 ]
 
 [tool.ruff.lint]

@@ -147,7 +147,7 @@ def reindex(
             "Unknown embedding provider",
             f"{provider!r} is not a registered embedding provider.",
             details=str(exc),
-            hint="Run 'sec-rag provider list --surface embedding' once the provider command set is available.",
+            hint="Run 'sec-rag provider list --surface embedding' to see registered providers.",
         )
         raise typer.Exit(code=1) from None
 

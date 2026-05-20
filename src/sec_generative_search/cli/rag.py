@@ -194,7 +194,7 @@ def _validate_date(value: str | None, param_name: str) -> str | None:
     if value is None:
         return None
     try:
-        datetime.strptime(value, "%Y-%m-%d")  # noqa: DTZ007 — naive ISO date is intentional
+        datetime.strptime(value, "%Y-%m-%d")
     except ValueError:
         raise typer.BadParameter(
             f"Invalid date format for {param_name}: {value!r}. Expected YYYY-MM-DD."
@@ -219,9 +219,7 @@ def _coerce_mode(value: str | None) -> AnswerMode | None:
         return AnswerMode(normalised)
     except ValueError as exc:
         valid = ", ".join(m.value for m in AnswerMode)
-        raise typer.BadParameter(
-            f"Invalid --mode: {value!r}. Expected one of: {valid}."
-        ) from exc
+        raise typer.BadParameter(f"Invalid --mode: {value!r}. Expected one of: {valid}.") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +316,8 @@ def _resolve_stamp(*, output: OutputFormat = OutputFormat.TEXT) -> EmbedderStamp
 
 
 def _build_retrieval(
-    *, output: OutputFormat = OutputFormat.TEXT,
+    *,
+    output: OutputFormat = OutputFormat.TEXT,
 ) -> tuple[RetrievalService, MetadataRegistry]:
     """Build the retrieval primitive + open the registry handle.
 
@@ -476,9 +475,7 @@ def _plan_to_dict(plan: QueryPlan) -> dict[str, Any]:
         "tickers": list(plan.tickers),
         "form_types": list(plan.form_types),
         "date_range": (
-            [plan.date_range[0], plan.date_range[1]]
-            if plan.date_range is not None
-            else None
+            [plan.date_range[0], plan.date_range[1]] if plan.date_range is not None else None
         ),
         "intent": plan.intent,
         "suggested_answer_mode": plan.suggested_answer_mode.value,
@@ -701,9 +698,7 @@ def _resolve_routing_hints(
         return None
 
     try:
-        honours = ProviderRegistry.supports_upstream_routing(
-            provider_name, ProviderSurface.LLM
-        )
+        honours = ProviderRegistry.supports_upstream_routing(provider_name, ProviderSurface.LLM)
     except KeyError:
         # Unknown provider — the caller's capability probe will already
         # have raised an envelope, but be defensive here in case this
@@ -1177,9 +1172,7 @@ _STREAM_POLL_SECONDS = 0.1
 # ``generate`` or ``generate_stream``.  Unmapped exceptions surface as
 # a generic ``internal_error`` envelope — never echo the exception text
 # (it routinely carries provider URLs / SQL / paths).
-def _classify_stream_error(
-    exc: BaseException, provider_name: str
-) -> tuple[str, str, str | None]:
+def _classify_stream_error(exc: BaseException, provider_name: str) -> tuple[str, str, str | None]:
     """Return ``(label, message, hint)`` for the REPL error envelope.
 
     Mirrors :func:`api.routes.rag._classify_stream_exception` so the CLI
@@ -1351,9 +1344,7 @@ def _run_chat_stream(
         cancel_event.set()
         if streamed_any:
             console.print()  # newline after partial stream
-        console.print(
-            "[yellow]Cancelled. Type your next question, /clear, or /exit.[/yellow]"
-        )
+        console.print("[yellow]Cancelled. Type your next question, /clear, or /exit.[/yellow]")
         return None, True
 
     if streamed_any:
@@ -1397,9 +1388,7 @@ _REPL_HELP_COMMAND = "/help"
 
 
 def _print_chat_banner() -> None:
-    console.print(
-        "[bold]sec-rag rag chat[/bold] — ask questions over ingested SEC filings."
-    )
+    console.print("[bold]sec-rag rag chat[/bold] — ask questions over ingested SEC filings.")
     console.print(
         "  [dim]Commands:[/dim] [cyan]/clear[/cyan] (drop history)  "
         "[cyan]/help[/cyan]  [cyan]/exit[/cyan]  "

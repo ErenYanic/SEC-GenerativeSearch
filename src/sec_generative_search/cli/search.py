@@ -148,7 +148,7 @@ def _validate_date(value: str | None, param_name: str) -> str | None:
     if value is None:
         return None
     try:
-        datetime.strptime(value, "%Y-%m-%d")  # noqa: DTZ007 — naive ISO date is intentional
+        datetime.strptime(value, "%Y-%m-%d")
     except ValueError:
         raise typer.BadParameter(
             f"Invalid date format for {param_name}: {value!r}. Expected YYYY-MM-DD."
@@ -287,8 +287,7 @@ def _render_results(results: list[RetrievalResult], query: str) -> None:
     and surfacing a permanently-empty column would mislead operators.
     """
     console.print(
-        f"\n[bold]Found {len(results)} result(s)[/bold] for: "
-        f"[italic]{escape(query)}[/italic]\n"
+        f"\n[bold]Found {len(results)} result(s)[/bold] for: [italic]{escape(query)}[/italic]\n"
     )
 
     table = Table(show_lines=True, expand=True, border_style="dim")
@@ -335,15 +334,11 @@ def search(
     ] = None,
     ticker: Annotated[
         list[str] | None,
-        typer.Option(
-            "--ticker", "-k", help="Filter by ticker symbol(s). Repeat for multiple."
-        ),
+        typer.Option("--ticker", "-k", help="Filter by ticker symbol(s). Repeat for multiple."),
     ] = None,
     form: Annotated[
         list[str] | None,
-        typer.Option(
-            "--form", "-f", help="Filter by form type(s). Repeat for multiple."
-        ),
+        typer.Option("--form", "-f", help="Filter by form type(s). Repeat for multiple."),
     ] = None,
     accession: Annotated[
         list[str] | None,

@@ -130,7 +130,7 @@ def _validate_date(value: str | None, param_name: str) -> str | None:
     if value is None:
         return None
     try:
-        datetime.strptime(value, "%Y-%m-%d")  # noqa: DTZ007 — naive ISO date is intentional
+        datetime.strptime(value, "%Y-%m-%d")
     except ValueError:
         raise typer.BadParameter(
             f"Invalid date format for {param_name}: {value!r}. Expected YYYY-MM-DD."
@@ -364,9 +364,7 @@ def _ingest_one_form(
     failed = 0
 
     # Single SQL batch in place of N is_duplicate() calls.
-    existing = registry.get_existing_accessions(
-        [fid.accession_number for fid, _ in filings]
-    )
+    existing = registry.get_existing_accessions([fid.accession_number for fid, _ in filings])
 
     for filing_idx, (filing_id, html_content) in enumerate(filings):
         filing_num = f" [{filing_idx + 1}/{len(filings)}]" if multi else ""
