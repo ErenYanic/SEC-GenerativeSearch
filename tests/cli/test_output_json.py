@@ -36,6 +36,7 @@ Security goals enforced by parametrised tests:
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
 from typing import Any, ClassVar
 
@@ -85,6 +86,20 @@ from sec_generative_search.database import FilingRecord
 from sec_generative_search.database.metadata import DatabaseStatistics
 from sec_generative_search.rag.modes import AnswerMode
 from sec_generative_search.rag.query_understanding import QueryPlan
+
+# Click renders :class:`typer.BadParameter` inside a Rich-styled panel
+# that injects ANSI colour codes between words and soft-wraps the
+# message to the terminal width.  In a narrow CI terminal a literal
+# substring like ``"Invalid --output"`` is broken by both colour codes
+# and newlines, so a raw ``in`` check fails even when the message is
+# intact.  Same pattern as ``tests/cli/test_rag.py::_stripped``.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _stripped(output: str) -> str:
+    """Strip ANSI codes and collapse whitespace for substring assertions."""
+    return re.sub(r"\s+", " ", _ANSI_RE.sub("", output))
+
 
 # ---------------------------------------------------------------------------
 # JSON helper smoke tests
@@ -409,7 +424,10 @@ class TestSearchJson:
     ) -> None:
         result = runner.invoke(search_app, ["search", "q", "--output", "yaml"])
         assert result.exit_code == 2
-        assert "Invalid --output" in result.output
+        # Click wraps the BadParameter message in a Rich panel; strip
+        # ANSI / collapse whitespace before the substring check so a
+        # narrow CI terminal does not flake.
+        assert "Invalid --output" in _stripped(result.output)
 
 
 @pytest.mark.security
