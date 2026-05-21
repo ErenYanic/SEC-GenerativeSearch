@@ -14,7 +14,9 @@ import {
   staticSecurityHeaders,
 } from "@/lib/security-headers";
 
-const PROD_NONCE = "ZGV0ZXJtaW5pc3RpYy1ub25jZS1mb3ItdGVzdA";
+// base64 of "deterministic-nonce-for-test" — fixed value lets us assert the
+// CSP directives string contains the nonce we passed in.
+const PROD_NONCE = "ZGV0ZXJtaW5pc3RpYy1ub25jZS1mb3ItdGVzdA"; // pragma: allowlist secret
 
 describe("Content-Security-Policy — production", () => {
   const csp = buildContentSecurityPolicy(PROD_NONCE, false);

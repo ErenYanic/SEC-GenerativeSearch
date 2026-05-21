@@ -197,12 +197,15 @@ jobs:
           node-version: "22"
 
       - name: Enable Corepack and activate pinned pnpm
-        # Corepack reads ``packageManager`` from ``frontend/package.json``
-        # and bootstraps that exact pnpm version. No global install ever
-        # races with the project's lock file.
+        # Corepack on actions/setup-node 4.x ships a version where
+        # ``corepack prepare --activate`` without a positional arg fails
+        # to auto-detect the ``packageManager`` field, even when the
+        # current directory matches ``working-directory``. Pass the pinned
+        # spec explicitly. Keep this version in lockstep with
+        # ``packageManager`` in ``frontend/package.json``.
         run: |
           corepack enable
-          corepack prepare --activate
+          corepack prepare pnpm@11.2.2 --activate
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
