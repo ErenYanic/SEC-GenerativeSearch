@@ -31,6 +31,18 @@ data/
 !tests/fixtures/
 !tests/fixtures/**
 
+# Track the frontend project manifest + every .json under frontend/ EXCEPT
+# the build artefacts (node_modules, .next, coverage, etc.) which are still
+# blocked by their own folder ignore rules below. The blanket `*.json` rule
+# above is for the Python project's data tree; the Node project needs its
+# manifests committed for CI / Corepack / pnpm to bootstrap at all.
+!frontend/
+!frontend/**/*.json
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/coverage/
+
 # Operating system files
 .DS_Store
 .DS_Store?
