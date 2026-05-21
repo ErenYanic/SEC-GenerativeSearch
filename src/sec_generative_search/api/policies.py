@@ -112,6 +112,15 @@ ROUTE_POLICIES: tuple[tuple[str, str | None, RoutePolicy], ...] = (
         "POST",
         RoutePolicy(rate_category="validate", max_body_bytes=16 * _KIB),
     ),
+    # Provider catalogue: read-tier GET with no body. Tight cap defends
+    # against declared-Content-Length probes against an authenticated
+    # route. MUST come after ``/api/providers/validate`` (which pins the
+    # POST verb) so the longer path keeps priority on its own method.
+    (
+        "/api/providers",
+        "GET",
+        RoutePolicy(rate_category="general", max_body_bytes=1 * _KIB),
+    ),
     # Retrieval-only search.  Query is ≤ 1024 chars at the schema
     # layer; list filters are ≤ 50 entries.  32 KiB clears that with
     # margin for client whitespace / quoting.

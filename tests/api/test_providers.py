@@ -225,3 +225,190 @@ class TestValidateRouteRateLimit:
         assert 429 in statuses
         # Must include at least some 200s before the limiter kicked in.
         assert 200 in statuses
+
+
+# ---------------------------------------------------------------------------
+# GET /api/providers — read-tier catalogue
+# ---------------------------------------------------------------------------
+
+
+class TestListProvidersShape:
+    """The list route is the registry's wire projection.
+
+    Asserts the curated tuple makes it onto the wire untransformed and
+    the allow-list lift drops every internal field on
+    :class:`ProviderEntry`.
+    """
+
+    def test_returns_200_with_entries(self, api_client: TestClient) -> None:
+        response = api_client.get("/api/providers/")
+        assert response.status_code == 200
+        body = response.json()
+        assert isinstance(body, dict)
+        assert set(body.keys()) == {"providers", "total"}
+        assert body["total"] == len(body["providers"])
+        # Registry ships at least one LLM provider (openai).
+        assert body["total"] >= 1
+
+    def test_entry_fields_are_exactly_three(self, api_client: TestClient) -> None:
+        response = api_client.get("/api/providers/")
+        assert response.status_code == 200
+        providers = response.json()["providers"]
+        assert providers, "registry must surface at least one provider"
+        for entry in providers:
+            # The explicit allow-list lift in ProviderInfoSchema means
+            # the wire is exactly these three fields — no more, no less.
+            # If a future ProviderEntry attribute leaks through, this
+            # assertion fails and forces a security review.
+            assert set(entry.keys()) == {
+                "name",
+                "surface",
+                "supports_upstream_routing",
+            }
+
+    def test_known_providers_present(self, api_client: TestClient) -> None:
+        response = api_client.get("/api/providers/")
+        body = response.json()
+        names = {(p["name"], p["surface"]) for p in body["providers"]}
+        # Spot-check a few entries that ship unconditionally — every
+        # listed (name, surface) pair is part of the registry's curated
+        # tuple and does not require an optional extra.
+        assert ("openai", "llm") in names
+        assert ("anthropic", "llm") in names
+        assert ("openrouter", "llm") in names
+        assert ("openai", "embedding") in names
+
+    def test_openrouter_advertises_upstream_routing(self, api_client: TestClient) -> None:
+        response = api_client.get("/api/providers/")
+        providers = response.json()["providers"]
+        by_key = {(p["name"], p["surface"]): p for p in providers}
+        # OpenRouter is the only provider that supports upstream-routing
+        # hints in the current registry. The UI uses this flag to decide
+        # whether to render the upstream-provider picker.
+        assert by_key[("openrouter", "llm")]["supports_upstream_routing"] is True
+        # Every other provider must report False — rendering the picker
+        # elsewhere would be a misleading UX.
+        for entry in providers:
+            if (entry["name"], entry["surface"]) == ("openrouter", "llm"):
+                continue
+            assert entry["supports_upstream_routing"] is False, entry
+
+
+class TestListProvidersOrdering:
+    def test_curated_order_preserved(self, api_client: TestClient) -> None:
+        # The web UI is allowed to render the tuple verbatim; the
+        # backend's curated order is the presentation contract.
+        from sec_generative_search.providers.registry import ProviderRegistry
+
+        expected = [(entry.name, entry.surface.value) for entry in ProviderRegistry.all_entries()]
+        actual = [
+            (entry["name"], entry["surface"])
+            for entry in api_client.get("/api/providers/").json()["providers"]
+        ]
+        assert actual == expected
+
+
+@pytest.mark.security
+class TestListProvidersNoSecrets:
+    """The list route MUST NOT leak credential-shaped strings.
+
+    The allow-list schema already prevents an :class:`ApiKey`-shaped
+    field from landing on the wire, but a future field rename could
+    accidentally surface ``api_key`` or a masked tail. Belt-and-braces.
+    """
+
+    _FORBIDDEN_SUBSTRINGS = (
+        "api_key",
+        "api-key",
+        "secret",
+        "bearer",
+        "authorization",
+        "token",
+        # Masked-tail shape from ``mask_secret`` (`***xxxx`) — also
+        # banned even though the schema cannot carry it.
+        "***",
+    )
+
+    def test_response_body_carries_no_credential_marker(self, api_client: TestClient) -> None:
+        response = api_client.get("/api/providers/")
+        assert response.status_code == 200
+        text = response.text.lower()
+        for needle in self._FORBIDDEN_SUBSTRINGS:
+            assert needle not in text, f"forbidden substring {needle!r} leaked into list response"
+
+    def test_response_carries_no_model_catalogue(self, api_client: TestClient) -> None:
+        # ``MODEL_CATALOGUE`` is an internal class attribute on every
+        # LLM provider. v1 deliberately does NOT surface it — listing
+        # models on the catalogue route would couple the UI to backend
+        # slug renames. (A dedicated ``GET /api/providers/{name}/models``
+        # is the right shape if/when the UI needs it.)
+        response = api_client.get("/api/providers/")
+        providers = response.json()["providers"]
+        for entry in providers:
+            assert "models" not in entry
+            assert "model_catalogue" not in entry
+            assert "default_model" not in entry
+
+
+@pytest.mark.security
+class TestListProvidersAuthGate:
+    def test_api_key_required_when_configured(self, api_client_factory) -> None:
+        client = api_client_factory(API_KEY="rotated-key")  # pragma: allowlist secret
+        # Missing X-API-Key header → 401, even though the route is a
+        # read-only catalogue (the catalogue's existence is a deployment
+        # fingerprint and is gated when auth is on).
+        response = client.get("/api/providers/")
+        assert response.status_code == 401
+        assert response.json()["error"] == "unauthorised"
+
+    def test_admin_key_not_required(self, api_client_factory) -> None:
+        # Read-tier: an X-API-Key alone (no X-Admin-Key) MUST succeed.
+        client = api_client_factory(
+            API_KEY="read-key",  # pragma: allowlist secret
+            API_ADMIN_KEY="admin-key",  # pragma: allowlist secret
+        )
+        response = client.get(
+            "/api/providers/",
+            headers={"X-API-Key": "read-key"},  # pragma: allowlist secret
+        )
+        assert response.status_code == 200
+
+
+@pytest.mark.security
+class TestListProvidersDoesNotInstantiate:
+    """The list route is O(1) and credential-free.
+
+    A regression here (e.g. switching to ``validate_key`` to "probe
+    availability") would call into provider SDKs and expose the route to
+    upstream network failures + key requirements. Guard by patching the
+    constructors of every shipped adapter to raise — the route must
+    still complete.
+    """
+
+    def test_handler_never_constructs_a_provider(
+        self, api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from sec_generative_search.providers import registry as registry_module
+
+        def _boom(*_args, **_kwargs):
+            raise AssertionError("provider was instantiated by the list route")
+
+        # ``_construct`` is the single seam ProviderRegistry uses to
+        # instantiate a provider (only called from ``validate_key``).
+        # The list route must never reach it.
+        monkeypatch.setattr(
+            registry_module.ProviderRegistry,
+            "_construct",
+            classmethod(_boom),
+        )
+        response = api_client.get("/api/providers/")
+        assert response.status_code == 200
+
+
+class TestListProvidersBodyCap:
+    def test_post_to_get_only_route_is_rejected(self, api_client: TestClient) -> None:
+        # FastAPI returns 405 Method Not Allowed for verbs the router
+        # does not bind. Defensive: a future POST handler at the same
+        # path would need its own ROUTE_POLICIES entry.
+        response = api_client.post("/api/providers/", json={})
+        assert response.status_code in (405, 422)

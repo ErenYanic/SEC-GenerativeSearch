@@ -36,6 +36,8 @@ __all__ = [
     "IngestRequest",
     "IngestResultSchema",
     "IngestTaskResponse",
+    "ProviderInfoSchema",
+    "ProviderListResponse",
     "ProviderValidateRequest",
     "ProviderValidateResponse",
     "QueryPlanSchema",
@@ -152,6 +154,49 @@ class EdgarIdentityClearResponse(_BaseModel):
     """Result of a successful ``DELETE /api/session/edgar``."""
 
     cleared: bool
+
+
+class ProviderInfoSchema(_BaseModel):
+    """One registered provider as exposed to the API.
+
+    Deliberately narrow: only the three fields the web Provider Settings
+    page needs to render the live catalogue without drift from the
+    backend ``ProviderRegistry``.  No API keys, no masked tails, no
+    ``requires_extras`` hint, no model catalogue — those are either
+    out-of-scope secrets or catalogue details that do not belong on the
+    wire. Widening this schema is a security-sensitive change and must
+    be reviewed deliberately.
+
+    ``surface`` is the lower-case :class:`ProviderSurface` value
+    (``"llm"`` / ``"embedding"`` / ``"reranker"``); the route never lifts
+    the enum object onto the wire so a future StrEnum value rename is
+    caught as a schema mismatch rather than silently surfacing a Python
+    ``repr``.
+    """
+
+    name: str
+    surface: str
+    supports_upstream_routing: bool
+
+
+class ProviderListResponse(_BaseModel):
+    """Result of ``GET /api/providers/``.
+
+    Lifts the curated :class:`ProviderRegistry` tuple onto the wire.
+    ``providers`` preserves the registry's curated order (popular vendors
+    first within each surface) so the UI can render it verbatim. Only
+    entries whose optional extras are importable in the running
+    interpreter are surfaced — the web UI cannot meaningfully render an
+    "install hint" today, and exposing un-installed entries would invite
+    callers to attempt validations that would 400 at the very next step.
+
+    ``total`` is the count of returned rows, not a registry cardinality —
+    the same convention as :class:`FilingListResponse` and
+    :class:`SearchResponse`.
+    """
+
+    providers: list[ProviderInfoSchema]
+    total: int
 
 
 class ProviderValidateRequest(_BaseModel):
