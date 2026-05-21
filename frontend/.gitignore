@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+.pnp/
+.pnp.*
+
+# Next.js
+.next/
+out/
+
+# Build / test artefacts
+coverage/
+tsconfig.tsbuildinfo
+*.log
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Environment — never commit any local env file. The project's
+# repo-wide `.gitignore` already covers `.env*`; this file is a
+# defence-in-depth restatement for contributors who only look here.
+.env
+.env.local
+.env.development
+.env.production

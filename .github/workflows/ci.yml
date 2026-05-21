@@ -168,8 +168,59 @@ jobs:
         #     --exclude-files 'uv\.lock' \
         #     --exclude-files '\.venv/' \
         #     --exclude-files 'node_modules/' \
+        #     --exclude-files 'frontend/pnpm-lock\.yaml' \
         #     > .secrets.baseline
         run: |
           git ls-files -- \
             ':!uv.lock' ':!.venv/**' ':!node_modules/**' \
+            ':!frontend/pnpm-lock.yaml' \
             | xargs detect-secrets-hook --baseline .secrets.baseline
+
+  frontend:
+    # Frontend CI gate. Runs lint (XSS-hygiene rules), tsc, the Vitest
+    # security regression suite, the production build, and ``pnpm audit``
+    # against high / critical CVEs. A failure on any of these blocks the
+    # PR. The job lives in the same workflow as the backend gates so a
+    # single CI report reflects the whole tree.
+    name: Frontend (Next.js)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: "22"
+
+      - name: Enable Corepack and activate pinned pnpm
+        # Corepack reads ``packageManager`` from ``frontend/package.json``
+        # and bootstraps that exact pnpm version. No global install ever
+        # races with the project's lock file.
+        run: |
+          corepack enable
+          corepack prepare --activate
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Type-check
+        run: pnpm typecheck
+
+      - name: Run Vitest security regression suite
+        run: pnpm test
+
+      - name: Production build (asserts no CSP carve-outs leak)
+        run: pnpm build
+
+      - name: Audit dependencies (high / critical CVEs)
+        # ``--prod`` scopes the audit to runtime dependencies so a
+        # build-only devDependency CVE does not block a PR; runtime
+        # CVEs reach the browser and are non-negotiable.
+        run: pnpm audit:ci
