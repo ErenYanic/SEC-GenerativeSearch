@@ -35,7 +35,7 @@ class ZaiProvider(OpenAICompatibleLLMProvider):
 
     provider_name = "zai"
     default_base_url = "https://api.z.ai/api/paas/v4"
-    default_model = "glm-4.7"
+    default_model = "glm-5"
 
     # Catalogue captures the slugs Z.ai currently serves on the general
     # PaaS endpoint. ``glm-5.1`` is the post-training upgrade to

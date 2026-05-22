@@ -46,16 +46,52 @@ class QwenProvider(OpenAICompatibleLLMProvider):
                 pricing_tier=PricingTier.PREMIUM,
             ),
         ),
+        "qwen3.7-max": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                context_window_tokens=1_000_000,
+                max_output_tokens=65_536,
+                pricing_tier=PricingTier.HIGH,
+            ),
+        ),
+        "qwen3.6-max-preview": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                context_window_tokens=262_144,
+                max_output_tokens=65_536,
+                pricing_tier=PricingTier.PREMIUM,
+            ),
+        ),
         "qwen3.6-plus": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
                 streaming=True,
                 tool_use=True,
                 structured_output=True,
-                prompt_caching=False,
+                prompt_caching=True,
                 context_window_tokens=1_000_000,
                 max_output_tokens=65_536,
                 pricing_tier=PricingTier.HIGH,
+            ),
+        ),
+        "qwen3.6-flash": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                context_window_tokens=1_000_000,
+                max_output_tokens=65_536,
+                pricing_tier=PricingTier.STANDARD,
             ),
         ),
         "qwen3.5-plus": ModelInfo(
