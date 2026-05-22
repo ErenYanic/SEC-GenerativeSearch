@@ -1,19 +1,9 @@
-import type { JSX } from "react";
+import { redirect } from "next/navigation";
 
-import { WelcomeGate } from "@/components/welcome-gate";
-
-export default function Page(): JSX.Element {
-  return (
-    <WelcomeGate>
-      <main className="mx-auto max-w-3xl px-6 py-16">
-        <h1 className="text-3xl font-semibold tracking-tight">
-          SEC-GenerativeSearch
-        </h1>
-        <p className="mt-4 text-slate-600">
-          Operator console. The main app surfaces render here under the same
-          authentication gate.
-        </p>
-      </main>
-    </WelcomeGate>
-  );
+// The landing surface is the Dashboard — wrapped in `WelcomeGate` via the
+// `(app)` route group's layout. Redirecting from `/` keeps the auth gate
+// in one location and avoids rendering the operator console twice (once
+// here and once under the route group).
+export default function Page(): never {
+  redirect("/dashboard");
 }

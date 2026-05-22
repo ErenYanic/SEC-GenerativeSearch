@@ -110,21 +110,6 @@ export function WelcomeGate({ children }: WelcomeGateProps): JSX.Element {
     [adminKey, apiKey, submitting],
   );
 
-  const handleLogout = useCallback(async () => {
-    try {
-      await fetch("/api/admin/session", {
-        method: "DELETE",
-        credentials: "same-origin",
-        cache: "no-store",
-      });
-    } catch {
-      // Ignore — the cookie is HttpOnly so we cannot clear it client-side
-      // anyway. The server clears its session-map entry; on the next
-      // load the GET probe will return authenticated=false.
-    }
-    setStatus("unauthenticated");
-  }, []);
-
   if (status === "loading") {
     return (
       <div className="flex min-h-screen items-center justify-center">
@@ -136,22 +121,7 @@ export function WelcomeGate({ children }: WelcomeGateProps): JSX.Element {
   }
 
   if (status === "authenticated") {
-    return (
-      <>
-        <div className="flex justify-end px-6 pt-4">
-          <button
-            type="button"
-            onClick={() => {
-              void handleLogout();
-            }}
-            className="rounded border border-slate-300 px-3 py-1 text-sm text-slate-700 hover:bg-slate-100"
-          >
-            Sign out
-          </button>
-        </div>
-        {children}
-      </>
-    );
+    return <>{children}</>;
   }
 
   return (

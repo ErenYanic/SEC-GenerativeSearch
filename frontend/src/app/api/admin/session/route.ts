@@ -101,6 +101,34 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   }
 
+  // Mint a backend `session_id` cookie alongside the admin session.
+  //
+  // The backend session is the only scope under which per-session
+  // EDGAR identity (POST /api/session/edgar) can be registered. We mint
+  // it here so the browser ends up with both cookies in a single
+  // round-trip; failure to mint is non-fatal — operators without EDGAR
+  // identity needs (Scenario A) still get a usable admin session.
+  const backendSessionCookies: string[] = [];
+  try {
+    const mintResp = await fetch(buildBackendUrl("/api/session"), {
+      method: "POST",
+      headers: {
+        "X-API-Key": apiKey,
+        Accept: "application/json",
+      },
+      cache: "no-store",
+    });
+    if (mintResp.ok) {
+      for (const cookie of mintResp.headers.getSetCookie()) {
+        backendSessionCookies.push(cookie);
+      }
+    }
+  } catch {
+    // Backend session minting failed; admin session still proceeds. The
+    // EDGAR registration UI will surface this as a missing-session
+    // error on first attempt and the operator can sign out / back in.
+  }
+
   const sessionId = createSession(apiKey, adminKey);
 
   const response = NextResponse.json({ ok: true }, { status: 200 });
@@ -108,20 +136,49 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     "Set-Cookie",
     `${ADMIN_SESSION_COOKIE}=${sessionId}; ${adminSessionCookieAttributes()}`,
   );
+  for (const cookie of backendSessionCookies) {
+    response.headers.append("Set-Cookie", cookie);
+  }
   // Defence-in-depth — these endpoints must never be cached.
   response.headers.set("Cache-Control", "no-store");
   return response;
 }
 
-export function DELETE(request: NextRequest): NextResponse {
+export async function DELETE(request: NextRequest): Promise<NextResponse> {
   const sessionId = request.cookies.get(ADMIN_SESSION_COOKIE)?.value;
+  const keys = lookupSession(sessionId);
   revokeSession(sessionId);
 
+  // Tell the backend to drop the session in lockstep with the admin
+  // session. Best-effort: if the backend is unreachable, the browser's
+  // session_id cookie still expires below and the backend store's
+  // sliding TTL will evict the entry eventually.
+  const backendSessionCookie = request.cookies.get("session_id");
+  if (keys !== null && backendSessionCookie !== undefined) {
+    try {
+      await fetch(buildBackendUrl("/api/session/logout"), {
+        method: "POST",
+        headers: {
+          "X-API-Key": keys.apiKey,
+          Cookie: `session_id=${backendSessionCookie.value}`,
+          Accept: "application/json",
+        },
+        cache: "no-store",
+      });
+    } catch {
+      // Best-effort; cookie still expires below.
+    }
+  }
+
   const response = NextResponse.json({ ok: true }, { status: 200 });
-  // Empty value + Max-Age=0 expires the cookie immediately.
+  // Empty value + Max-Age=0 expires both cookies immediately.
   response.headers.append(
     "Set-Cookie",
     `${ADMIN_SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`,
+  );
+  response.headers.append(
+    "Set-Cookie",
+    "session_id=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0",
   );
   response.headers.set("Cache-Control", "no-store");
   return response;

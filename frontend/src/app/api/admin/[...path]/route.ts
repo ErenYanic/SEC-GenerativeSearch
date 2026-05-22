@@ -16,6 +16,10 @@ export const runtime = "nodejs";
 // Allow-list of backend path prefixes the proxy will forward to. New admin
 // routes must be added here explicitly — accidental over-exposure of a
 // destructive surface is the failure mode this list defends against.
+//
+// Session-tier routes (`session`, `session/edgar`, `session/logout`) are
+// reached through the same proxy because session minting and EDGAR
+// registration still need the server-held `X-API-Key`.
 const ALLOWED_PATH_PREFIXES = [
   "filings/",
   "filings",
@@ -23,6 +27,8 @@ const ALLOWED_PATH_PREFIXES = [
   "status/",
   "status",
   "resources/",
+  "session/",
+  "session",
 ] as const;
 
 // Headers that must NEVER be carried verbatim from the browser into the
@@ -187,17 +193,31 @@ async function handle(
 
   const responseHeaders = new Headers();
   upstream.headers.forEach((value, key) => {
-    if (!STRIPPED_RESPONSE_HEADERS.has(key.toLowerCase())) {
+    const lower = key.toLowerCase();
+    if (lower === "set-cookie") {
+      // Set-Cookie is handled below via getSetCookie() so multi-cookie
+      // responses (e.g. session_id mint) reach the browser intact.
+      return;
+    }
+    if (!STRIPPED_RESPONSE_HEADERS.has(lower)) {
       responseHeaders.set(key, value);
     }
   });
   responseHeaders.set("Cache-Control", "no-store");
 
-  return new NextResponse(upstream.body, {
+  const proxied = new NextResponse(upstream.body, {
     status: upstream.status,
     statusText: upstream.statusText,
     headers: responseHeaders,
   });
+  // Append every Set-Cookie individually AFTER construction. The Response
+  // constructor in some runtimes (notably the Fetch spec's `fill`
+  // algorithm when given a Headers init) drops multi-valued Set-Cookie
+  // headers, so we set them on the live Headers object instead.
+  for (const cookie of upstream.headers.getSetCookie()) {
+    proxied.headers.append("Set-Cookie", cookie);
+  }
+  return proxied;
 }
 
 export const GET = handle;

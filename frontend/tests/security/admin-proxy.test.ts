@@ -113,7 +113,9 @@ describe("path allow-list", () => {
     const fetchMock = vi.fn();
     globalThis.fetch = fetchMock as unknown as typeof fetch;
     const id = createSession("api-k", "admin-k"); // pragma: allowlist secret
-    const res = await callHandler("GET", ["session"], {
+    // `debug` is a deliberately fictitious backend prefix — it MUST NOT
+    // appear in `ALLOWED_PATH_PREFIXES` for this test to remain useful.
+    const res = await callHandler("GET", ["debug"], {
       cookies: { [ADMIN_SESSION_COOKIE]: id },
     });
     expect(res.status).toBe(403);
@@ -129,6 +131,22 @@ describe("path allow-list", () => {
     });
     expect(res.status).toBe(400);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("allow-lists session-tier routes (mint, logout, edgar)", async () => {
+    const fetchMock = vi.fn(
+      async () => new Response("{}", { status: 200 }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const id = createSession("api-k", "admin-k"); // pragma: allowlist secret
+
+    for (const path of [["session"], ["session", "logout"], ["session", "edgar"]]) {
+      const res = await callHandler("POST", path, {
+        cookies: { [ADMIN_SESSION_COOKIE]: id },
+      });
+      expect(res.status).toBe(200);
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });
 
@@ -221,5 +239,35 @@ describe("header injection", () => {
     const text = await res.text();
     expect(text).not.toContain("very-secret-api");
     expect(text).not.toContain("very-secret-admin");
+  });
+
+  it("forwards Set-Cookie from the backend without collapsing multi-value cookies", async () => {
+    // The backend session_id cookie must reach the browser intact —
+    // `Headers.forEach` collapses multi-Set-Cookie into a comma-joined
+    // value, so we route through `getSetCookie()` in the proxy.
+    const upstream = new Response("{}", {
+      status: 201,
+      headers: { "content-type": "application/json" },
+    });
+    upstream.headers.append(
+      "Set-Cookie",
+      "session_id=abc123; HttpOnly; Secure; SameSite=Strict; Path=/",
+    );
+    upstream.headers.append(
+      "Set-Cookie",
+      "other_flag=on; Path=/",
+    );
+    const fetchMock = vi.fn(async () => upstream);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const id = createSession("api-k", "admin-k"); // pragma: allowlist secret
+    const res = await callHandler("POST", ["session"], {
+      cookies: { [ADMIN_SESSION_COOKIE]: id },
+    });
+    const cookies = res.headers.getSetCookie();
+    expect(cookies).toHaveLength(2);
+    expect(cookies[0]).toContain("session_id=abc123");
+    expect(cookies[0]).toContain("HttpOnly");
+    expect(cookies[1]).toContain("other_flag=on");
   });
 });
