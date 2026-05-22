@@ -122,7 +122,7 @@ _LLM_VENDORS: list[tuple[type, str, str, str]] = [
         ZaiProvider,
         "zai",
         "https://api.z.ai/api/paas/v4",
-        "glm-4.7",
+        "glm-5",
     ),
     (
         GrokProvider,
