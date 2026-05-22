@@ -1,0 +1,225 @@
+// Server-side admin proxy.
+//
+// The proxy is the single seam where the admin key is injected into a
+// backend request. Asserts:
+//  - unauthenticated callers get 401 with no upstream call
+//  - authenticated callers get X-API-Key + X-Admin-Key injected
+//  - client-set X-API-Key / X-Admin-Key headers are stripped, not merged
+//  - path-traversal segments are rejected
+//  - non-allow-listed backend paths are 403'd before reaching the network
+//  - backend session_id cookie is forwarded; admin_session cookie is not
+
+import { NextRequest } from "next/server";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import {
+  ADMIN_SESSION_COOKIE,
+  _resetForTests,
+  createSession,
+} from "@/lib/admin-session";
+
+// Import the route handlers AFTER mocking modules they depend on.
+import * as proxyRoute from "@/app/api/admin/[...path]/route";
+
+// vi.spyOn does not work cleanly against global fetch without restoreAll.
+const originalFetch = globalThis.fetch;
+
+function makeRequest(
+  url: string,
+  init: RequestInit & { cookies?: Record<string, string> } = {},
+): NextRequest {
+  // `Cookie` is a forbidden header in browser environments (happy-dom
+  // strips it from Headers init). Set via NextRequest.cookies.set() after
+  // construction, which writes the canonical cookie store directly.
+  const req = new NextRequest(url, {
+    method: init.method ?? "GET",
+    headers: new Headers(init.headers),
+    body: init.body ?? null,
+  });
+  if (init.cookies !== undefined) {
+    for (const [name, value] of Object.entries(init.cookies)) {
+      req.cookies.set(name, value);
+    }
+  }
+  return req;
+}
+
+type ProxyHandler = (
+  req: NextRequest,
+  ctx: { params: Promise<{ path: string[] }> },
+) => Promise<Response>;
+
+const PROXY_HANDLERS: Record<"GET" | "POST" | "DELETE", ProxyHandler> = {
+  GET: proxyRoute.GET as unknown as ProxyHandler,
+  POST: proxyRoute.POST as unknown as ProxyHandler,
+  DELETE: proxyRoute.DELETE as unknown as ProxyHandler,
+};
+
+async function callHandler(
+  method: "GET" | "POST" | "DELETE",
+  pathSegments: string[],
+  init: RequestInit & { cookies?: Record<string, string>; search?: string } = {},
+): Promise<Response> {
+  const segs = pathSegments.map((s) => encodeURIComponent(s)).join("/");
+  const url = `https://app.test/api/admin/${segs}${init.search ?? ""}`;
+  const req = makeRequest(url, { ...init, method });
+  return PROXY_HANDLERS[method](req, {
+    params: Promise.resolve({ path: pathSegments }),
+  });
+}
+
+beforeEach(() => {
+  _resetForTests();
+});
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+  vi.restoreAllMocks();
+  _resetForTests();
+});
+
+describe("proxy auth gate", () => {
+  it("returns 401 when no admin_session cookie is present", async () => {
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const res = await callHandler("GET", ["filings", ""]);
+    expect(res.status).toBe(401);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("returns 401 for a forged cookie that does not match any session", async () => {
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const res = await callHandler("GET", ["filings"], {
+      cookies: { [ADMIN_SESSION_COOKIE]: "A".repeat(43) },
+    });
+    expect(res.status).toBe(401);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("returns 401 for a malformed cookie shape", async () => {
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const res = await callHandler("GET", ["filings"], {
+      cookies: { [ADMIN_SESSION_COOKIE]: "not-base64!" },
+    });
+    expect(res.status).toBe(401);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("path allow-list", () => {
+  it("rejects backend paths that are not in the allow-list", async () => {
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const id = createSession("api-k", "admin-k"); // pragma: allowlist secret
+    const res = await callHandler("GET", ["session"], {
+      cookies: { [ADMIN_SESSION_COOKIE]: id },
+    });
+    expect(res.status).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects path-traversal segments", async () => {
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const id = createSession("api-k", "admin-k"); // pragma: allowlist secret
+    const res = await callHandler("GET", ["filings", "..", "secret"], {
+      cookies: { [ADMIN_SESSION_COOKIE]: id },
+    });
+    expect(res.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("header injection", () => {
+  function mockBackend(): ReturnType<typeof vi.fn> {
+    const fetchMock = vi.fn(async () => {
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    return fetchMock;
+  }
+
+  it("injects X-API-Key and X-Admin-Key on the forwarded request", async () => {
+    const fetchMock = mockBackend();
+    const id = createSession("real-api", "real-admin"); // pragma: allowlist secret
+    await callHandler("GET", ["filings"], {
+      cookies: { [ADMIN_SESSION_COOKIE]: id },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const firstCall = fetchMock.mock.calls[0];
+    expect(firstCall).toBeDefined();
+    const [, init] = firstCall as unknown as [string, RequestInit];
+    const headers = new Headers(init.headers as HeadersInit);
+    expect(headers.get("x-api-key")).toBe("real-api");
+    expect(headers.get("x-admin-key")).toBe("real-admin");
+  });
+
+  it("strips any client-set X-API-Key / X-Admin-Key", async () => {
+    const fetchMock = mockBackend();
+    const id = createSession("server-api", "server-admin"); // pragma: allowlist secret
+    await callHandler("GET", ["filings"], {
+      cookies: { [ADMIN_SESSION_COOKIE]: id },
+      headers: {
+        "X-API-Key": "spoofed-api",
+        "X-Admin-Key": "spoofed-admin",
+      },
+    });
+    const firstCall = fetchMock.mock.calls[0];
+    expect(firstCall).toBeDefined();
+    const [, init] = firstCall as unknown as [string, RequestInit];
+    const headers = new Headers(init.headers as HeadersInit);
+    // The spoofed values must be gone — only the server-side keys remain.
+    expect(headers.get("x-api-key")).toBe("server-api");
+    expect(headers.get("x-admin-key")).toBe("server-admin");
+  });
+
+  it("forwards backend session_id cookie but never the admin_session cookie", async () => {
+    const fetchMock = mockBackend();
+    const id = createSession("api-k", "admin-k"); // pragma: allowlist secret
+    await callHandler("GET", ["filings"], {
+      cookies: {
+        [ADMIN_SESSION_COOKIE]: id,
+        session_id: "backend-cookie-xyz",
+      },
+    });
+    const firstCall = fetchMock.mock.calls[0];
+    expect(firstCall).toBeDefined();
+    const [, init] = firstCall as unknown as [string, RequestInit];
+    const headers = new Headers(init.headers as HeadersInit);
+    const cookie = headers.get("cookie") ?? "";
+    expect(cookie).toContain("session_id=backend-cookie-xyz");
+    expect(cookie).not.toContain(ADMIN_SESSION_COOKIE);
+  });
+
+  it("preserves the trailing slash on the backend path", async () => {
+    const fetchMock = mockBackend();
+    const id = createSession("api-k", "admin-k"); // pragma: allowlist secret
+    // Next's catch-all router yields `["filings"]` here; the trailing slash
+    // is read off `nextUrl.pathname`. Force the slash via `search` is not
+    // possible — set it directly on the request URL.
+    await callHandler("GET", ["filings"], {
+      cookies: { [ADMIN_SESSION_COOKIE]: id },
+      search: "/",
+    });
+    const firstCall = fetchMock.mock.calls[0];
+    expect(firstCall).toBeDefined();
+    const [url] = firstCall as unknown as [string, RequestInit];
+    expect(url).toMatch(/\/api\/filings\//);
+  });
+
+  it("never echoes either key into the response body", async () => {
+    mockBackend();
+    const id = createSession("very-secret-api", "very-secret-admin"); // pragma: allowlist secret
+    const res = await callHandler("GET", ["filings"], {
+      cookies: { [ADMIN_SESSION_COOKIE]: id },
+    });
+    const text = await res.text();
+    expect(text).not.toContain("very-secret-api");
+    expect(text).not.toContain("very-secret-admin");
+  });
+});
