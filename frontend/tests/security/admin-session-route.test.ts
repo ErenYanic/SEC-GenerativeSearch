@@ -92,8 +92,8 @@ describe("POST /api/admin/session", () => {
     globalThis.fetch = vi.fn(async () => new Response("", { status: 200 })) as unknown as typeof fetch;
     const res = await sessionRoute.POST(
       jsonRequest({
-        api_key: "secret-api-12345",
-        admin_key: "secret-admin-67890",
+        api_key: "secret-api-12345",  // pragma: allowlist secret
+        admin_key: "secret-admin-67890",  // pragma: allowlist secret
       }),
     );
     const text = await res.text();

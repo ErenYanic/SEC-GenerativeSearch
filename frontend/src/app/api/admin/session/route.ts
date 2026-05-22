@@ -46,8 +46,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   }
 
-  const apiKey = typeof body.api_key === "string" ? body.api_key.trim() : "";
-  const adminKey = typeof body.admin_key === "string" ? body.admin_key.trim() : "";
+  const apiKey = typeof body.api_key === "string" ? body.api_key.trim() : "";   // pragma: allowlist secret
+  const adminKey = typeof body.admin_key === "string" ? body.admin_key.trim() : "";   // pragma: allowlist secret
 
   if (apiKey === "" || adminKey === "") {
     return NextResponse.json(
