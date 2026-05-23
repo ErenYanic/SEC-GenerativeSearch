@@ -57,6 +57,7 @@ import asyncio
 import json
 import threading
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, Request
@@ -70,6 +71,7 @@ from sec_generative_search.api.dependencies import (
 from sec_generative_search.api.errors import envelope, http_error
 from sec_generative_search.api.schemas import (
     CitationSchema,
+    ConversationTurnSchema,
     QueryPlanSchema,
     RagPlanRequest,
     RagPlanResponse,
@@ -87,7 +89,12 @@ from sec_generative_search.core.exceptions import (
     ProviderTimeoutError,
 )
 from sec_generative_search.core.logging import audit_log, get_logger
-from sec_generative_search.core.types import Citation, GenerationResult
+from sec_generative_search.core.types import (
+    Citation,
+    ConversationTurn,
+    GenerationResult,
+    TokenUsage,
+)
 from sec_generative_search.providers.factory import build_llm_provider
 from sec_generative_search.providers.registry import (
     ProviderRegistry,
@@ -365,6 +372,56 @@ def _plan_from_schema(schema: QueryPlanSchema) -> QueryPlan:
     )
 
 
+def _history_from_schema(
+    turns: list[ConversationTurnSchema],
+) -> list[ConversationTurn] | None:
+    """Lift wire-tier chat history into the orchestrator's dataclass shape.
+
+    Only ``query`` and ``answer`` survive into a synthesised
+    :class:`ConversationTurn`.  The dataclass carries ``retrieval_results``
+    and a full :class:`GenerationResult`, but
+    :meth:`RAGOrchestrator._render_history` only ever reads
+    :attr:`ConversationTurn.query` and
+    :attr:`ConversationTurn.generation_result.answer` to render ``Q:/A:``
+    pairs — so we splice in a minimal ``GenerationResult`` shell carrying
+    just the answer string and leave retrieval results empty. Prior
+    turns' ``retrieval_results`` must never re-enter a future prompt; every
+    follow-up turn re-retrieves.
+
+    ``provider`` / ``model`` / ``prompt_version`` on the synthesised
+    result are deliberately ``""`` — the route does not trust the browser
+    to supply meaningful trace metadata for prior turns, and the
+    orchestrator does not read those fields off history entries.  The
+    timestamp uses the request-handling wall clock; it is opaque to the
+    orchestrator and never reaches the prompt.
+
+    Returns ``None`` for an empty list so the orchestrator's existing
+    ``history is None`` short-circuit applies.
+    """
+    if not turns:
+        return None
+    now = datetime.now(UTC)
+    return [
+        ConversationTurn(
+            query=turn.query,
+            retrieval_results=[],
+            generation_result=GenerationResult(
+                answer=turn.answer,
+                provider="",
+                model="",
+                prompt_version="",
+                citations=[],
+                retrieved_chunks=[],
+                token_usage=TokenUsage(),
+                latency_seconds=0.0,
+                streamed=False,
+            ),
+            timestamp=now,
+        )
+        for turn in turns
+    ]
+
+
 def _citation_to_schema(citation: Citation) -> CitationSchema:
     """Lift one :class:`Citation` onto the wire schema.
 
@@ -542,12 +599,15 @@ async def generate_answer(
         else None
     )
 
+    history = _history_from_schema(body.history)
+
     try:
         result = orchestrator.generate(
             plan,
             mode=effective_mode,
             model=model or None,
             max_output_tokens=body.max_output_tokens,
+            history=history,
             prefer_structured_output=capability.structured_output,
         )
     except ProviderAuthError as exc:
@@ -610,7 +670,7 @@ async def generate_answer(
             f"forms={len(plan.form_types)} mode={audit_mode} "
             f"prompt_version={result.prompt_version} "
             f"chunks={len(result.retrieved_chunks)} citations={len(result.citations)} "
-            f"refused={refused}"
+            f"history_turns={len(body.history)} refused={refused}"
         ),
     )
 
@@ -732,6 +792,7 @@ def _run_orchestrator_in_thread(
     mode: AnswerMode | None,
     model: str | None,
     max_output_tokens: int | None,
+    history: list[ConversationTurn] | None,
     prefer_structured_output: bool,
     queue: asyncio.Queue,
     loop: asyncio.AbstractEventLoop,
@@ -764,6 +825,7 @@ def _run_orchestrator_in_thread(
                 mode=mode,
                 model=model,
                 max_output_tokens=max_output_tokens,
+                history=history,
                 prefer_structured_output=prefer_structured_output,
             ):
                 loop.call_soon_threadsafe(queue.put_nowait, event)
@@ -874,6 +936,8 @@ async def stream_answer(
     # Counts of chunks / citations / refused are unknown at this point;
     # the producer thread emits a follow-up ``rag_stream_completed`` line
     # carrying those once the orchestrator finishes.
+    history = _history_from_schema(body.history)
+
     audit_log(
         "rag_stream",
         client_ip=_client_ip(request),
@@ -881,7 +945,8 @@ async def stream_answer(
         detail=(
             f"provider={provider_name} model={model or '<provider default>'} "
             f"lang={plan.detected_language} tickers={len(plan.tickers)} "
-            f"forms={len(plan.form_types)} mode={audit_mode}"
+            f"forms={len(plan.form_types)} mode={audit_mode} "
+            f"history_turns={len(body.history)}"
         ),
     )
 
@@ -897,6 +962,7 @@ async def stream_answer(
             mode=effective_mode,
             model=model or None,
             max_output_tokens=body.max_output_tokens,
+            history=history,
             prefer_structured_output=capability.structured_output,
             queue=queue,
             loop=loop,
@@ -969,6 +1035,7 @@ async def stream_answer(
                 detail=(
                     f"provider={provider_name} model={model or '<provider default>'} "
                     f"deltas={chunks_streamed} citations={citations_emitted} "
+                    f"history_turns={len(body.history)} "
                     f"refused={refused} status={completion_status}"
                 ),
             )

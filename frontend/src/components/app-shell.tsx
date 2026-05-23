@@ -23,6 +23,7 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/filings", label: "Filings" },
   { href: "/ingest", label: "Ingest" },
   { href: "/rag", label: "Ask" },
+  { href: "/chat", label: "Chat" },
   { href: "/providers", label: "Providers" },
 ];
 

@@ -15,6 +15,7 @@
 import type {
   AnswerMode,
   CitationSchema,
+  ConversationTurnSchema,
   EdgarIdentityRegisterResponse,
   FilingListResponse,
   IngestTaskResponse,
@@ -342,6 +343,13 @@ export interface RagStreamRequestBody {
   model?: string;
   mode?: AnswerMode;
   max_output_tokens?: number;
+  /**
+   * Prior `Q:/A:` turns from the browser-tab chat surface.
+   * The orchestrator renders these as a history block before retrieval
+   * and generation; retrieved chunks and citations from prior turns are
+   * intentionally not on the wire.
+   */
+  history?: ConversationTurnSchema[];
 }
 
 /**

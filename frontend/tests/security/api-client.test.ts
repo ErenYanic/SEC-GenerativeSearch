@@ -540,6 +540,52 @@ describe("streamRagAnswer", () => {
     expect(beats).toBe(2);
   });
 
+  it("forwards chat history verbatim in the JSON body (never on the URL)", async () => {
+    const upstream = new Response(
+      readableStreamFromChunks([
+        sseFrame("final", {
+          answer: "ok",
+          provider: "openai",
+          model: "gpt-test",
+          prompt_version: "v1",
+          token_usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+          latency_seconds: 0,
+          streamed: true,
+          refused: false,
+        }),
+      ]),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+    const fetchMock = vi.fn(async () => upstream);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await streamRagAnswer(
+      {
+        plan: SAMPLE_PLAN,
+        history: [
+          { query: "previous question", answer: "previous answer" },
+        ],
+      },
+      {},
+    );
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(url).toBe("/api/admin/rag/stream");
+    // History MUST NOT land on the URL.
+    expect(url).not.toContain("previous");
+    // Body is JSON; parse and pin the wire shape.
+    const body = JSON.parse(init.body as string) as {
+      plan: unknown;
+      history: Array<{ query: string; answer: string }>;
+    };
+    expect(body.history).toEqual([
+      { query: "previous question", answer: "previous answer" },
+    ]);
+  });
+
   it("handles partial frame buffering across chunk boundaries", async () => {
     // Split the same frame across two read() calls to exercise the
     // line-buffering seam.

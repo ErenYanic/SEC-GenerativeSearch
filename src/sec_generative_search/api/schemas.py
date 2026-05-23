@@ -22,6 +22,7 @@ __all__ = [
     "BulkDeleteResponse",
     "CitationSchema",
     "ClearAllResponse",
+    "ConversationTurnSchema",
     "DeleteByIdsRequest",
     "DeleteByIdsResponse",
     "DeleteResponse",
@@ -685,6 +686,43 @@ class CitationSchema(_BaseModel):
     )
 
 
+class ConversationTurnSchema(_BaseModel):
+    """Wire shape of a single prior chat turn supplied by the browser.
+
+    The browser-tab chat surface keeps conversation history client-side and
+    replays it on every follow-up turn so the orchestrator can build the
+    ``Q:/A:`` history block. The schema deliberately carries **only** the
+    user query and the model answer — never the prior turn's retrieved
+    chunks or citations. Prior turn's ``retrieval_results`` must never
+    re-enter a future prompt; every follow-up turn re-retrieves.
+
+    Both strings are user-derived (the query is Tier-3 user input; the
+    answer is upstream-LLM output that surfaced to the user) so length
+    bounds defend memory ahead of the orchestrator's own budgeting
+    step.  ``query`` shares the 1024-char cap of :class:`RagPlanRequest`;
+    ``answer`` is bounded at 32 KiB which comfortably exceeds the
+    largest budget-allowed answer slice (8192 tokens) while still
+    refusing pathological payloads at the boundary.
+    """
+
+    query: str = Field(
+        min_length=1,
+        max_length=1024,
+        description=(
+            "The prior turn's user query. Tier-3 user data — never echoed in any non-redacted log line."
+        ),
+    )
+    answer: str = Field(
+        min_length=1,
+        max_length=4096,
+        description=(
+            "The prior turn's assistant answer (plain text).  Bounded at "
+            "4096 chars to keep a 10-turn history comfortably under the "
+            "64 KiB body cap on ``/api/rag/{query,stream}``."
+        ),
+    )
+
+
 class RagQueryRequest(_BaseModel):
     """Body for ``POST /api/rag/query``.
 
@@ -705,6 +743,13 @@ class RagQueryRequest(_BaseModel):
       the plan.
     - ``max_output_tokens`` caps the answer slice.  Defaults to
       ``settings.llm.max_output_tokens``.
+    - ``history`` carries prior ``Q:/A:`` turns from the browser-tab
+      chat surface so the orchestrator's history block renders
+      continuity.  Conversation history is **never persisted server-
+      side** (the SPA holds it in tab memory; chat-history persistence is
+      out of scope by design), and the orchestrator strips retrieved
+      chunks / citations from prior turns — only the rendered ``Q:``
+      and ``A:`` strings survive into the follow-up prompt.
 
     """
 
@@ -741,6 +786,18 @@ class RagQueryRequest(_BaseModel):
             "Optional cap on the answer slice.  Defaults to "
             "``settings.llm.max_output_tokens``.  Bounded at 8192 to "
             "keep a single request from burning a giant generation budget."
+        ),
+    )
+    history: list[ConversationTurnSchema] = Field(
+        default_factory=list,
+        max_length=10,
+        description=(
+            "Optional prior ``Q:/A:`` turns for chat-mode continuity.  "
+            "Bounded at 10 turns to mirror the ``RAG_CHAT_HISTORY_TURNS`` "
+            "default cap the orchestrator would honour anyway, and to "
+            "keep the request body under ``/api/rag/{query,stream}``'s "
+            "64 KiB cap.  The orchestrator drops prior-turn retrieval "
+            "/ citations — only the rendered Q/A pairs reach the prompt."
         ),
     )
 

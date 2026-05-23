@@ -144,6 +144,19 @@ export interface CitationSchema {
   display_index: number;
 }
 
+/**
+ * One prior chat turn carried back to the backend in the chat-mode
+ * request body. Mirrors `ConversationTurnSchema` in
+ * `src/sec_generative_search/api/schemas.py`. Only the user query and
+ * model answer survive — retrieved chunks and citations from prior
+ * turns are intentionally not on the wire (load-bearing privacy
+ * invariant, enforced at the API route lift).
+ */
+export interface ConversationTurnSchema {
+  query: string;
+  answer: string;
+}
+
 export interface RagStreamFinalPayload {
   answer: string;
   provider: string;

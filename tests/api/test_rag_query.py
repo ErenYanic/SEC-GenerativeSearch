@@ -118,6 +118,7 @@ class _StubOrchestrator:
         mode: AnswerMode | None = None,
         model: str | None = None,
         max_output_tokens: int | None = None,
+        history: Any = None,
         prefer_structured_output: bool = False,
         **kwargs: Any,
     ) -> GenerationResult:
@@ -131,6 +132,7 @@ class _StubOrchestrator:
                 "mode": mode,
                 "model": model,
                 "max_output_tokens": max_output_tokens,
+                "history": history,
                 "prefer_structured_output": prefer_structured_output,
                 "llm_provider_name": getattr(self.llm, "provider_name", None),
             }
@@ -739,3 +741,154 @@ class TestRagQueryRateLimitClassification:
             statuses.append(r.status_code)
         assert statuses.count(200) == 3
         assert 429 in statuses
+
+
+# ---------------------------------------------------------------------------
+# Conversation history
+# ---------------------------------------------------------------------------
+
+
+class TestRagQueryHistory:
+    """The chat surface replays prior turns through ``body.history``.
+
+    These tests pin the shape — history forwarded into
+    :meth:`RAGOrchestrator.generate` as :class:`ConversationTurn` instances,
+    bounded by :class:`ConversationTurnSchema` length caps — and the privacy
+    guarantee that retrieved chunks and citations from prior turns never
+    re-enter the prompt (the route's lift drops them).
+    """
+
+    def test_history_forwarded_as_conversation_turns(
+        self,
+        rag_query_app_factory,
+    ) -> None:
+        app, _build, orch = rag_query_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+
+        body = {
+            "plan": _sample_plan_payload(),
+            "history": [
+                {"query": "what is revenue?", "answer": "Revenue is total sales."},
+                {"query": "and net income?", "answer": "Net income subtracts costs."},
+            ],
+        }
+        response = client.post(
+            "/api/rag/query",
+            json=body,
+            headers={"X-Provider-Key-openai": "sk-1234"},  # pragma: allowlist secret
+        )
+        assert response.status_code == 200
+        passed = orch.calls[0]["history"]
+        assert passed is not None
+        assert len(passed) == 2
+        # Only the query + answer are surfaced into the synthesised
+        # ConversationTurn; retrieval_results is empty by route contract.
+        assert passed[0].query == "what is revenue?"
+        assert passed[0].generation_result.answer == "Revenue is total sales."
+        assert passed[0].retrieval_results == []
+        assert passed[0].generation_result.citations == []
+        assert passed[0].generation_result.retrieved_chunks == []
+
+    def test_history_omitted_becomes_none(self, rag_query_app_factory) -> None:
+        app, _build, orch = rag_query_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+
+        response = client.post(
+            "/api/rag/query",
+            json={"plan": _sample_plan_payload()},
+            headers={"X-Provider-Key-openai": "sk-1234"},  # pragma: allowlist secret
+        )
+        assert response.status_code == 200
+        # Empty list lifts to ``None`` so the orchestrator's existing
+        # short-circuit applies (no history block rendered, no token spent).
+        assert orch.calls[0]["history"] is None
+
+    def test_history_oversize_rejected(self, rag_query_app_factory) -> None:
+        app, _build, _orch = rag_query_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        body = {
+            "plan": _sample_plan_payload(),
+            "history": [{"query": f"q{i}", "answer": f"a{i}"} for i in range(11)],
+        }
+        response = client.post("/api/rag/query", json=body)
+        assert response.status_code == 422
+
+    def test_history_turn_answer_oversize_rejected(
+        self,
+        rag_query_app_factory,
+    ) -> None:
+        app, _build, _orch = rag_query_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        body = {
+            "plan": _sample_plan_payload(),
+            "history": [{"query": "q", "answer": "a" * 5000}],
+        }
+        response = client.post("/api/rag/query", json=body)
+        assert response.status_code == 422
+
+    def test_history_empty_strings_rejected(self, rag_query_app_factory) -> None:
+        app, _build, _orch = rag_query_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        body = {
+            "plan": _sample_plan_payload(),
+            "history": [{"query": "", "answer": "ok"}],
+        }
+        response = client.post("/api/rag/query", json=body)
+        assert response.status_code == 422
+
+
+@pytest.mark.security
+class TestRagQueryHistoryPrivacyContract:
+    def test_audit_log_carries_history_count_not_text(
+        self,
+        rag_query_app_factory,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        app, _build, _orch = rag_query_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+
+        package_logger = logging.getLogger(LOGGER_NAME)
+        prior_propagate = package_logger.propagate
+        package_logger.propagate = True
+        secret_q = "PRIVATE-PRIOR-QUESTION-SENTINEL-XYZ"
+        secret_a = "PRIVATE-PRIOR-ANSWER-SENTINEL-XYZ"
+        try:
+            with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+                client.post(
+                    "/api/rag/query",
+                    json={
+                        "plan": _sample_plan_payload(),
+                        "history": [{"query": secret_q, "answer": secret_a}],
+                    },
+                    headers={"X-Provider-Key-openai": "sk-1234"},  # pragma: allowlist secret
+                )
+        finally:
+            package_logger.propagate = prior_propagate
+
+        audit = [r.getMessage() for r in caplog.records if "SECURITY_AUDIT:" in r.getMessage()]
+        assert any("rag_query" in line for line in audit)
+        assert any("history_turns=1" in line for line in audit)
+        assert all(secret_q not in line for line in audit)
+        assert all(secret_a not in line for line in audit)
+
+    def test_error_envelope_does_not_echo_history(
+        self,
+        rag_query_app_factory,
+    ) -> None:
+        app, _build, _orch = rag_query_app_factory(
+            generate_raise=ProviderError("transport blew up"),
+        )
+        client = TestClient(app, base_url="https://testserver")
+        secret_q = "HISTORY-NEVER-ECHO-Q-SENTINEL"
+        secret_a = "HISTORY-NEVER-ECHO-A-SENTINEL"
+        response = client.post(
+            "/api/rag/query",
+            json={
+                "plan": _sample_plan_payload(),
+                "history": [{"query": secret_q, "answer": secret_a}],
+            },
+            headers={"X-Provider-Key-openai": "sk-1234"},  # pragma: allowlist secret
+        )
+        assert response.status_code == 502
+        assert secret_q not in response.text
+        assert secret_a not in response.text

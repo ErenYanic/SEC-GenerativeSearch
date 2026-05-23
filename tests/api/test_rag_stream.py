@@ -115,6 +115,7 @@ class _StubOrchestrator:
         mode: AnswerMode | None = None,
         model: str | None = None,
         max_output_tokens: int | None = None,
+        history: Any = None,
         prefer_structured_output: bool = False,
         **kwargs: Any,
     ) -> Iterator[StreamEvent]:
@@ -126,6 +127,7 @@ class _StubOrchestrator:
                 "mode": mode,
                 "model": model,
                 "max_output_tokens": max_output_tokens,
+                "history": history,
                 "prefer_structured_output": prefer_structured_output,
                 "llm_provider_name": getattr(self.llm, "provider_name", None),
             }
@@ -741,3 +743,129 @@ class TestRagStreamRateLimitClassification:
         from sec_generative_search.api.middleware import _classify_path
 
         assert _classify_path("/api/rag/stream", "POST") == "rag"
+
+
+# ---------------------------------------------------------------------------
+# Conversation history
+# ---------------------------------------------------------------------------
+
+
+class TestRagStreamHistory:
+    """The chat surface replays prior turns through ``body.history``.
+
+    These tests pin the shape — history forwarded into
+    :meth:`RAGOrchestrator.generate_stream` as :class:`ConversationTurn`
+    instances and the load-bearing privacy invariant: retrieved chunks /
+    citations from prior turns are stripped at the route boundary so a
+    follow-up never re-injects the prior turn's chunk text into the
+    prompt.
+    """
+
+    def test_history_forwarded_as_conversation_turns(
+        self,
+        rag_stream_app_factory,
+    ) -> None:
+        events = [
+            StreamEvent(delta="ok"),
+            StreamEvent(final=_default_final_result(citations=[])),
+        ]
+        app, _build, orch = rag_stream_app_factory(events=events)
+        client = TestClient(app, base_url="https://testserver")
+
+        with client.stream(
+            "POST",
+            "/api/rag/stream",
+            json={
+                "plan": _sample_plan_payload(),
+                "history": [
+                    {"query": "what is revenue?", "answer": "Revenue is total sales."},
+                ],
+            },
+            headers={"X-Provider-Key-openai": "sk-1234"},  # pragma: allowlist secret
+        ) as response:
+            # Drain so the producer completes before we inspect calls.
+            for _ in response.iter_bytes():
+                pass
+
+        passed = orch.calls[0]["history"]
+        assert passed is not None
+        assert len(passed) == 1
+        assert passed[0].query == "what is revenue?"
+        assert passed[0].generation_result.answer == "Revenue is total sales."
+        # Retrieval / citations stripped at the route boundary.
+        assert passed[0].retrieval_results == []
+        assert passed[0].generation_result.citations == []
+        assert passed[0].generation_result.retrieved_chunks == []
+
+    def test_history_omitted_becomes_none(self, rag_stream_app_factory) -> None:
+        events = [StreamEvent(final=_default_final_result(citations=[]))]
+        app, _build, orch = rag_stream_app_factory(events=events)
+        client = TestClient(app, base_url="https://testserver")
+
+        with client.stream(
+            "POST",
+            "/api/rag/stream",
+            json={"plan": _sample_plan_payload()},
+            headers={"X-Provider-Key-openai": "sk-1234"},  # pragma: allowlist secret
+        ) as response:
+            for _ in response.iter_bytes():
+                pass
+
+        assert orch.calls[0]["history"] is None
+
+    def test_history_oversize_rejected_pre_stream(
+        self,
+        rag_stream_app_factory,
+    ) -> None:
+        app, _build, _orch = rag_stream_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        body = {
+            "plan": _sample_plan_payload(),
+            "history": [{"query": f"q{i}", "answer": f"a{i}"} for i in range(11)],
+        }
+        response = client.post("/api/rag/stream", json=body)
+        # Pre-stream schema rejection → 422 HTTP, NOT an SSE error event.
+        assert response.status_code == 422
+
+
+@pytest.mark.security
+class TestRagStreamHistoryPrivacyContract:
+    def test_audit_lines_carry_history_count_not_text(
+        self,
+        rag_stream_app_factory,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        events = [StreamEvent(final=_default_final_result(citations=[]))]
+        app, _build, _orch = rag_stream_app_factory(events=events)
+        client = TestClient(app, base_url="https://testserver")
+
+        package_logger = logging.getLogger(LOGGER_NAME)
+        prior_propagate = package_logger.propagate
+        package_logger.propagate = True
+        secret_q = "STREAM-PRIOR-QUESTION-SENTINEL-ABC"
+        secret_a = "STREAM-PRIOR-ANSWER-SENTINEL-ABC"
+        try:
+            with (
+                caplog.at_level(logging.WARNING, logger=LOGGER_NAME),
+                client.stream(
+                    "POST",
+                    "/api/rag/stream",
+                    json={
+                        "plan": _sample_plan_payload(),
+                        "history": [{"query": secret_q, "answer": secret_a}],
+                    },
+                    headers={"X-Provider-Key-openai": "sk-1234"},  # pragma: allowlist secret
+                ) as response,
+            ):
+                for _ in response.iter_bytes():
+                    pass
+        finally:
+            package_logger.propagate = prior_propagate
+
+        audit = [r.getMessage() for r in caplog.records if "SECURITY_AUDIT:" in r.getMessage()]
+        # Both rag_stream (open) and rag_stream_completed (close) carry
+        # the history_turns count; the text never reaches any line.
+        assert any("rag_stream" in line and "history_turns=1" in line for line in audit)
+        assert any("rag_stream_completed" in line and "history_turns=1" in line for line in audit)
+        assert all(secret_q not in line for line in audit)
+        assert all(secret_a not in line for line in audit)
