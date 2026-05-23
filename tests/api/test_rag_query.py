@@ -850,8 +850,8 @@ class TestRagQueryHistoryPrivacyContract:
         package_logger = logging.getLogger(LOGGER_NAME)
         prior_propagate = package_logger.propagate
         package_logger.propagate = True
-        secret_q = "PRIVATE-PRIOR-QUESTION-SENTINEL-XYZ"    # pragma: allowlist secret
-        secret_a = "PRIVATE-PRIOR-ANSWER-SENTINEL-XYZ"      # pragma: allowlist secret
+        secret_q = "PRIVATE-PRIOR-QUESTION-SENTINEL-XYZ"  # pragma: allowlist secret
+        secret_a = "PRIVATE-PRIOR-ANSWER-SENTINEL-XYZ"  # pragma: allowlist secret
         try:
             with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
                 client.post(
@@ -879,8 +879,8 @@ class TestRagQueryHistoryPrivacyContract:
             generate_raise=ProviderError("transport blew up"),
         )
         client = TestClient(app, base_url="https://testserver")
-        secret_q = "HISTORY-NEVER-ECHO-Q-SENTINEL"      # pragma: allowlist secret
-        secret_a = "HISTORY-NEVER-ECHO-A-SENTINEL"      # pragma: allowlist secret
+        secret_q = "HISTORY-NEVER-ECHO-Q-SENTINEL"  # pragma: allowlist secret
+        secret_a = "HISTORY-NEVER-ECHO-A-SENTINEL"  # pragma: allowlist secret
         response = client.post(
             "/api/rag/query",
             json={
