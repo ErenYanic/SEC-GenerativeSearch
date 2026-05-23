@@ -148,6 +148,24 @@ describe("path allow-list", () => {
     }
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
+
+  it("allow-lists providers/ (catalogue) and providers/validate", async () => {
+    const fetchMock = vi.fn(
+      async () => new Response("{}", { status: 200 }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const id = createSession("api-k", "admin-k"); // pragma: allowlist secret
+
+    const getRes = await callHandler("GET", ["providers"], {
+      cookies: { [ADMIN_SESSION_COOKIE]: id },
+    });
+    expect(getRes.status).toBe(200);
+    const postRes = await callHandler("POST", ["providers", "validate"], {
+      cookies: { [ADMIN_SESSION_COOKIE]: id },
+    });
+    expect(postRes.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("header injection", () => {
@@ -228,6 +246,26 @@ describe("header injection", () => {
     expect(firstCall).toBeDefined();
     const [url] = firstCall as unknown as [string, RequestInit];
     expect(url).toMatch(/\/api\/filings\//);
+  });
+
+  it("forwards X-Provider-Key-* headers verbatim", async () => {
+    const fetchMock = mockBackend();
+    const id = createSession("api-k", "admin-k"); // pragma: allowlist secret
+    await callHandler("POST", ["providers", "validate"], {
+      cookies: { [ADMIN_SESSION_COOKIE]: id },
+      headers: {
+        "X-Provider-Key-openai": "sk-FORWARD-ME",
+      },
+    });
+    const firstCall = fetchMock.mock.calls[0];
+    expect(firstCall).toBeDefined();
+    const [, init] = firstCall as unknown as [string, RequestInit];
+    const headers = new Headers(init.headers as HeadersInit);
+    // The per-provider header IS forwarded — only operator auth headers
+    // are stripped + replaced.
+    expect(headers.get("x-provider-key-openai")).toBe("sk-FORWARD-ME");
+    // Sanity: the server-held keys still go up too.
+    expect(headers.get("x-api-key")).toBe("api-k");
   });
 
   it("never echoes either key into the response body", async () => {

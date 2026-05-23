@@ -37,4 +37,16 @@ describe("ESLint XSS-hygiene rules", () => {
   it("blocks javascript: URLs anywhere via no-script-url", () => {
     expect(eslintSource).toContain(`"no-script-url": "error"`);
   });
+
+  it("bans localStorage via no-restricted-globals", () => {
+    expect(eslintSource).toContain(`"no-restricted-globals"`);
+    expect(eslintSource).toMatch(/name:\s*"localStorage"/);
+  });
+
+  it("bans window.localStorage via no-restricted-properties", () => {
+    expect(eslintSource).toContain(`"no-restricted-properties"`);
+    expect(eslintSource).toMatch(
+      /object:\s*"window"[\s\S]+?property:\s*"localStorage"/,
+    );
+  });
 });

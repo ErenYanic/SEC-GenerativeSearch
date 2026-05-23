@@ -11,6 +11,8 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useCallback, useState, type JSX, type ReactNode } from "react";
 
+import { clearProviderKeys } from "@/lib/provider-keys";
+
 interface NavItem {
   href: string;
   label: string;
@@ -20,6 +22,7 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/dashboard", label: "Dashboard" },
   { href: "/filings", label: "Filings" },
   { href: "/ingest", label: "Ingest" },
+  { href: "/providers", label: "Providers" },
 ];
 
 interface AppShellProps {
@@ -35,6 +38,15 @@ export function AppShell({ children }: AppShellProps): JSX.Element {
       return;
     }
     setSigningOut(true);
+    // Drop every per-provider key in this tab before tearing down the
+    // server session. `sessionStorage` would clear on tab close anyway,
+    // but explicit clearing closes the window during the redirect.
+    try {
+      clearProviderKeys();
+    } catch {
+      // Storage may be unavailable in a degraded browser; sign-out
+      // continues regardless.
+    }
     try {
       await fetch("/api/admin/session", {
         method: "DELETE",

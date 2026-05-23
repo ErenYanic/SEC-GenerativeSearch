@@ -16,10 +16,13 @@ import type {
   EdgarIdentityRegisterResponse,
   FilingListResponse,
   IngestTaskResponse,
+  ProviderListResponse,
+  ProviderValidateResponse,
   StatusResponse,
   TaskListResponse,
   TaskStatusResponse,
 } from "@/lib/api-types";
+import { providerKeyHeaders } from "@/lib/provider-keys";
 
 /** Error raised on any non-2xx response from the admin proxy. */
 export class ApiError extends Error {
@@ -57,20 +60,36 @@ function buildProxyUrl(path: string): string {
   return PROXY_PREFIX + rel;
 }
 
+interface ApiFetchOptions extends RequestInit {
+  /**
+   * Attach `X-Provider-Key-{provider}` headers from the browser-side
+   * `sessionStorage` store. Default `false` — most endpoints are
+   * server-side admin proxy routes that do not need a downstream
+   * provider call. Set to `true` for the RAG / search / validation
+   * paths that actually invoke an upstream provider so the backend
+   * resolver picks the per-request tier first.
+   */
+  attachProviderKeys?: boolean;
+}
+
 async function apiFetch<T>(
   path: string,
-  init: RequestInit = {},
+  init: ApiFetchOptions = {},
 ): Promise<T> {
+  const { attachProviderKeys, ...rest } = init;
+  const providerHeaders =
+    attachProviderKeys === true ? providerKeyHeaders() : {};
   const res = await fetch(buildProxyUrl(path), {
     credentials: "same-origin",
     cache: "no-store",
-    ...init,
+    ...rest,
     headers: {
       Accept: "application/json",
-      ...(init.body !== undefined && init.body !== null
+      ...(rest.body !== undefined && rest.body !== null
         ? { "Content-Type": "application/json" }
         : {}),
-      ...(init.headers ?? {}),
+      ...providerHeaders,
+      ...(rest.headers ?? {}),
     },
   });
   if (res.status === 204) {
@@ -229,4 +248,59 @@ export function cancelIngestTask(
   return apiFetch(`ingest/tasks/${encodeURIComponent(taskId)}`, {
     method: "DELETE",
   });
+}
+
+// ---------------------------------------------------------------------------
+// Providers — catalogue + key validation
+// ---------------------------------------------------------------------------
+
+export function listProviders(): Promise<ProviderListResponse> {
+  return apiFetch<ProviderListResponse>("providers/");
+}
+
+export interface ProviderValidateRequestBody {
+  provider: string;
+  api_key: string;
+  surface?: "llm" | "embedding" | "reranker";
+  model?: string;
+}
+
+/**
+ * Round-trip a candidate provider key against the upstream provider via
+ * `POST /api/providers/validate`. Returns the verdict as
+ * `ProviderValidateResponse.valid` — `false` is reserved for an
+ * explicit auth rejection; transient failures propagate as `ApiError`
+ * 502 / 503 so callers do not interpret a network blip as "wrong key".
+ *
+ * The key is sent in the JSON body, never on a URL or query string.
+ * It is also attached as `X-Provider-Key-{provider}` so the backend's
+ * audit-log entry pins lineage to the per-request header tier — this
+ * is the documented happy path when a tenant validates their own key.
+ */
+export function validateProvider(
+  body: ProviderValidateRequestBody,
+): Promise<ProviderValidateResponse> {
+  return apiFetch<ProviderValidateResponse>("providers/validate", {
+    method: "POST",
+    body: JSON.stringify(body),
+    attachProviderKeys: true,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Provider-key propagation — used by RAG / search flows
+// ---------------------------------------------------------------------------
+
+/**
+ * Helper for downstream callers that need to attach the browser-tier
+ * provider keys to a single request. Wraps `apiFetch` with
+ * `attachProviderKeys: true`. Exposed so future RAG / search modules
+ * can plug into the same propagation pipeline without re-implementing
+ * the header build.
+ */
+export function apiFetchWithProviderKeys<T>(
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
+  return apiFetch<T>(path, { ...init, attachProviderKeys: true });
 }

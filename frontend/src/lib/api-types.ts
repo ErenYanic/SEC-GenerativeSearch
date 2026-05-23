@@ -77,3 +77,25 @@ export interface TaskListResponse {
   tasks: TaskStatusResponse[];
   total: number;
 }
+
+// ---------------------------------------------------------------------------
+// Providers — catalogue + key validation
+// ---------------------------------------------------------------------------
+
+export interface ProviderInfo {
+  name: string;
+  surface: string;
+  supports_upstream_routing: boolean;
+}
+
+export interface ProviderListResponse {
+  providers: ProviderInfo[];
+  total: number;
+}
+
+export interface ProviderValidateResponse {
+  valid: boolean;
+  provider: string;
+  surface: string;
+}
+

@@ -26,6 +26,34 @@ const config = [
       "no-implied-eval": "error",
       "no-new-func": "error",
       "no-script-url": "error",
+      // Keep provider keys in `sessionStorage` so they disappear when the
+      // tab closes; `localStorage` would persist across browser restarts
+      // and across tabs, widening the exfiltration window if an injected
+      // script ever reached this surface. Update the storage-discipline
+      // regression test in lockstep with any change here.
+      "no-restricted-globals": [
+        "error",
+        {
+          name: "localStorage",
+          message:
+            "Use sessionStorage (via src/lib/provider-keys.ts) — provider keys must not persist across tabs / restarts.",
+        },
+      ],
+      "no-restricted-properties": [
+        "error",
+        {
+          object: "window",
+          property: "localStorage",
+          message:
+            "Use sessionStorage (via src/lib/provider-keys.ts) — provider keys must not persist across tabs / restarts.",
+        },
+        {
+          object: "globalThis",
+          property: "localStorage",
+          message:
+            "Use sessionStorage (via src/lib/provider-keys.ts) — provider keys must not persist across tabs / restarts.",
+        },
+      ],
     },
   },
   {
@@ -35,6 +63,10 @@ const config = [
     files: ["tests/**/*.{ts,tsx}"],
     rules: {
       "react/no-danger": "off",
+      // Tests may reference `localStorage` to assert it is NOT being
+      // written; the runtime ban stays in effect for production source.
+      "no-restricted-globals": "off",
+      "no-restricted-properties": "off",
     },
   },
   {

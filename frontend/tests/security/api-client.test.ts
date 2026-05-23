@@ -10,13 +10,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   ApiError,
+  apiFetchWithProviderKeys,
   clearEdgarIdentity,
   deleteFiling,
   getStatus,
   listFilings,
+  listProviders,
   registerEdgarIdentity,
   submitIngestAdd,
+  validateProvider,
 } from "@/lib/api";
+import {
+  clearProviderKeys,
+  setProviderKey,
+} from "@/lib/provider-keys";
 
 const originalFetch = globalThis.fetch;
 
@@ -43,11 +50,13 @@ function recordingFetch(response: Response): {
 
 beforeEach(() => {
   globalThis.fetch = vi.fn();
+  window.sessionStorage.clear();
 });
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
   vi.restoreAllMocks();
+  clearProviderKeys();
 });
 
 describe("api client routing", () => {
@@ -205,5 +214,94 @@ describe("api client error contract", () => {
     });
     expect(calls[0]?.url).toBe("/api/admin/ingest/add");
     expect(calls[0]?.init.method).toBe("POST");
+  });
+});
+
+describe("provider catalogue + validation", () => {
+  it("listProviders calls GET /api/admin/providers/", async () => {
+    const { calls } = recordingFetch(
+      new Response(
+        JSON.stringify({ providers: [], total: 0 }),
+        { status: 200 },
+      ),
+    );
+    await listProviders();
+    expect(calls[0]?.url).toBe("/api/admin/providers/");
+    expect(calls[0]?.init.method ?? "GET").toBe("GET");
+  });
+
+  it("validateProvider posts the body and attaches X-Provider-Key-* headers from the store", async () => {
+    setProviderKey("openai", "sk-LONGENOUGHKEY"); // pragma: allowlist secret
+    const { calls } = recordingFetch(
+      new Response(
+        JSON.stringify({ valid: true, provider: "openai", surface: "llm" }),
+        { status: 200 },
+      ),
+    );
+    const verdict = await validateProvider({
+      provider: "openai",
+      api_key: "sk-CANDIDATE", // pragma: allowlist secret
+      surface: "llm",
+    });
+    expect(verdict.valid).toBe(true);
+    const init = calls[0]?.init;
+    expect(calls[0]?.url).toBe("/api/admin/providers/validate");
+    expect(init?.method).toBe("POST");
+    const headers = new Headers(init?.headers as HeadersInit);
+    expect(headers.get("X-Provider-Key-openai")).toBe("sk-LONGENOUGHKEY");
+    // Body carries the candidate, not the stored key — the route uses
+    // the body as the canonical signal, headers only carry the audit
+    // lineage. Tenants can validate a freshly-typed key.
+    expect(init?.body).toContain("sk-CANDIDATE");
+  });
+
+  it("apiFetchWithProviderKeys attaches browser provider keys", async () => {
+    setProviderKey("anthropic", "sk-ant-PROPAGATETHIS"); // pragma: allowlist secret
+    const { calls } = recordingFetch(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    );
+    await apiFetchWithProviderKeys("rag/plan", {
+      method: "POST",
+      body: JSON.stringify({ query: "anything" }),
+    });
+    const headers = new Headers(calls[0]?.init.headers as HeadersInit);
+    expect(headers.get("X-Provider-Key-anthropic")).toBe(
+      "sk-ant-PROPAGATETHIS",
+    );
+  });
+
+  it("default apiFetch path (e.g. getStatus) does NOT attach provider keys", async () => {
+    setProviderKey("openai", "sk-SHOULDNOTLEAK"); // pragma: allowlist secret
+    const { calls } = recordingFetch(
+      new Response(JSON.stringify({}), { status: 200 }),
+    );
+    await getStatus();
+    const headers = new Headers(calls[0]?.init.headers as HeadersInit);
+    expect(headers.get("X-Provider-Key-openai")).toBeNull();
+  });
+
+  it("validateProvider surfaces a 502 ProviderError as ApiError without echoing the key", async () => {
+    globalThis.fetch = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          error: "provider_error",
+          message: "The upstream provider returned an error.",
+        }),
+        { status: 502 },
+      );
+    }) as unknown as typeof fetch;
+    let raised: unknown;
+    try {
+      await validateProvider({
+        provider: "openai",
+        api_key: "sk-SHOULDNOTAPPEAR", // pragma: allowlist secret
+      });
+    } catch (exc) {
+      raised = exc;
+    }
+    expect(raised).toBeInstanceOf(ApiError);
+    const err = raised as ApiError;
+    expect(err.status).toBe(502);
+    expect(err.message).not.toContain("sk-SHOULDNOTAPPEAR");
   });
 });

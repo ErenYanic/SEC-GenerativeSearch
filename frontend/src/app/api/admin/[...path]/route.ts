@@ -29,6 +29,8 @@ const ALLOWED_PATH_PREFIXES = [
   "resources/",
   "session/",
   "session",
+  "providers/",
+  "providers",
 ] as const;
 
 // Headers that must NEVER be carried verbatim from the browser into the
