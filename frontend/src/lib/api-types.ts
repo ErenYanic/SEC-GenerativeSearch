@@ -99,3 +99,59 @@ export interface ProviderValidateResponse {
   surface: string;
 }
 
+// ---------------------------------------------------------------------------
+// RAG — plan / query / stream
+// ---------------------------------------------------------------------------
+
+export type AnswerMode =
+  | "concise"
+  | "analytical"
+  | "extractive"
+  | "comparative";
+
+export interface QueryPlanSchema {
+  raw_query: string;
+  detected_language: string;
+  query_en: string;
+  tickers: string[];
+  form_types: string[];
+  date_range: [string, string] | null;
+  intent: string;
+  suggested_answer_mode: AnswerMode;
+}
+
+export interface RagPlanResponse {
+  plan: QueryPlanSchema;
+  provider: string;
+  model: string;
+}
+
+export interface TokenUsageSchema {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+}
+
+export interface CitationSchema {
+  chunk_id: string;
+  ticker: string;
+  form_type: string;
+  filing_date: string;
+  accession_number: string;
+  section_path: string;
+  text_span: string;
+  similarity: number;
+  display_index: number;
+}
+
+export interface RagStreamFinalPayload {
+  answer: string;
+  provider: string;
+  model: string;
+  prompt_version: string;
+  token_usage: TokenUsageSchema;
+  latency_seconds: number;
+  streamed: boolean;
+  refused: boolean;
+}
+

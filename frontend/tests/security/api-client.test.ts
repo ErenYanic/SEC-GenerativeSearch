@@ -16,10 +16,13 @@ import {
   getStatus,
   listFilings,
   listProviders,
+  planRagQuery,
   registerEdgarIdentity,
+  streamRagAnswer,
   submitIngestAdd,
   validateProvider,
 } from "@/lib/api";
+import type { QueryPlanSchema } from "@/lib/api-types";
 import {
   clearProviderKeys,
   setProviderKey,
@@ -303,5 +306,257 @@ describe("provider catalogue + validation", () => {
     const err = raised as ApiError;
     expect(err.status).toBe(502);
     expect(err.message).not.toContain("sk-SHOULDNOTAPPEAR");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RAG plan + stream
+// ---------------------------------------------------------------------------
+
+const SAMPLE_PLAN: QueryPlanSchema = {
+  raw_query: "test query",
+  detected_language: "en",
+  query_en: "test query",
+  tickers: ["AAPL"],
+  form_types: ["10-K"],
+  date_range: null,
+  intent: "lookup",
+  suggested_answer_mode: "concise",
+};
+
+function sseFrame(event: string, data: unknown): string {
+  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+function readableStreamFromChunks(chunks: string[]): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  let i = 0;
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (i >= chunks.length) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(encoder.encode(chunks[i] as string));
+      i += 1;
+    },
+  });
+}
+
+describe("planRagQuery", () => {
+  it("POSTs the query in the body, never on the URL, and attaches provider keys", async () => {
+    setProviderKey("openai", "sk-PLANLINEAGE"); // pragma: allowlist secret
+    const { calls } = recordingFetch(
+      new Response(
+        JSON.stringify({
+          plan: SAMPLE_PLAN,
+          provider: "openai",
+          model: "gpt-test",
+        }),
+        { status: 200 },
+      ),
+    );
+    const res = await planRagQuery({ query: "How did AAPL describe AI risk?" });
+    expect(res.plan.tickers).toEqual(["AAPL"]);
+    const init = calls[0]?.init;
+    expect(calls[0]?.url).toBe("/api/admin/rag/plan");
+    expect(init?.method).toBe("POST");
+    // The raw query MUST appear in the body — never on the URL.
+    expect(calls[0]?.url).not.toContain("How did AAPL");
+    expect(init?.body).toContain("How did AAPL");
+    const headers = new Headers(init?.headers as HeadersInit);
+    expect(headers.get("X-Provider-Key-openai")).toBe("sk-PLANLINEAGE");
+  });
+
+  it("raises ApiError on 400 provider_key_required without echoing the query", async () => {
+    globalThis.fetch = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          error: "provider_key_required",
+          message: "No API key resolved for provider 'openai'.",
+          hint: "Register the key on the Providers page.",
+        }),
+        { status: 400 },
+      );
+    }) as unknown as typeof fetch;
+    let raised: unknown;
+    try {
+      await planRagQuery({ query: "SECRET-QUERY-VALUE" });
+    } catch (exc) {
+      raised = exc;
+    }
+    expect(raised).toBeInstanceOf(ApiError);
+    const err = raised as ApiError;
+    expect(err.code).toBe("provider_key_required");
+    expect(err.message).not.toContain("SECRET-QUERY-VALUE");
+  });
+});
+
+describe("streamRagAnswer", () => {
+  it("parses delta / citation / final events and never puts the query on the URL", async () => {
+    const upstream = new Response(
+      readableStreamFromChunks([
+        sseFrame("delta", { text: "Hello " }),
+        sseFrame("delta", { text: "world." }),
+        sseFrame("citation", {
+          chunk_id: "c1",
+          ticker: "AAPL",
+          form_type: "10-K",
+          filing_date: "2024-09-30",
+          accession_number: "0000320193-23-000077",
+          section_path: "Risk Factors",
+          text_span: "AI risk text.",
+          similarity: 0.9,
+          display_index: 1,
+        }),
+        sseFrame("final", {
+          answer: "Hello world.",
+          provider: "openai",
+          model: "gpt-test",
+          prompt_version: "v1",
+          token_usage: {
+            input_tokens: 1,
+            output_tokens: 2,
+            total_tokens: 3,
+          },
+          latency_seconds: 0.1,
+          streamed: true,
+          refused: false,
+        }),
+      ]),
+      {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      },
+    );
+    const fetchMock = vi.fn(async () => upstream);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const deltas: string[] = [];
+    let citationCount = 0;
+    let finalSeen = false;
+    await streamRagAnswer(
+      {
+        plan: SAMPLE_PLAN,
+        mode: "concise",
+      },
+      {
+        onDelta: (t) => deltas.push(t),
+        onCitation: () => {
+          citationCount += 1;
+        },
+        onFinal: () => {
+          finalSeen = true;
+        },
+      },
+    );
+    expect(deltas.join("")).toBe("Hello world.");
+    expect(citationCount).toBe(1);
+    expect(finalSeen).toBe(true);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(url).toBe("/api/admin/rag/stream");
+    expect(url).not.toContain(SAMPLE_PLAN.raw_query);
+    expect(init.method).toBe("POST");
+    const headers = new Headers(init.headers as HeadersInit);
+    expect(headers.get("Accept")).toBe("text/event-stream");
+  });
+
+  it("raises ApiError on a pre-stream 4xx and never opens the reader", async () => {
+    globalThis.fetch = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          error: "unknown_provider",
+          message: "Unknown provider 'nope'.",
+        }),
+        { status: 400 },
+      );
+    }) as unknown as typeof fetch;
+    let raised: unknown;
+    try {
+      await streamRagAnswer({ plan: SAMPLE_PLAN }, {});
+    } catch (exc) {
+      raised = exc;
+    }
+    expect(raised).toBeInstanceOf(ApiError);
+    const err = raised as ApiError;
+    expect(err.status).toBe(400);
+    expect(err.code).toBe("unknown_provider");
+  });
+
+  it("dispatches in-stream error events to onError (maybe-retry) without rejecting", async () => {
+    const upstream = new Response(
+      readableStreamFromChunks([
+        sseFrame("delta", { text: "partial " }),
+        sseFrame("error", {
+          error: "provider_unavailable",
+          message: "Upstream rate-limited.",
+          hint: "Retry after a short backoff.",
+        }),
+      ]),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+    globalThis.fetch = vi.fn(
+      async () => upstream,
+    ) as unknown as typeof fetch;
+
+    let captured: { error: string; message: string; hint?: string } | null = null;
+    await expect(
+      streamRagAnswer(
+        { plan: SAMPLE_PLAN },
+        {
+          onError: (e) => {
+            captured = e;
+          },
+        },
+      ),
+    ).resolves.toBeUndefined();
+    expect(captured).not.toBeNull();
+    expect(captured!.error).toBe("provider_unavailable");
+  });
+
+  it("delivers heartbeat events to onHeartbeat", async () => {
+    const upstream = new Response(
+      readableStreamFromChunks([
+        sseFrame("heartbeat", {}),
+        sseFrame("heartbeat", {}),
+      ]),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+    globalThis.fetch = vi.fn(
+      async () => upstream,
+    ) as unknown as typeof fetch;
+    let beats = 0;
+    await streamRagAnswer(
+      { plan: SAMPLE_PLAN },
+      {
+        onHeartbeat: () => {
+          beats += 1;
+        },
+      },
+    );
+    expect(beats).toBe(2);
+  });
+
+  it("handles partial frame buffering across chunk boundaries", async () => {
+    // Split the same frame across two read() calls to exercise the
+    // line-buffering seam.
+    const full = sseFrame("delta", { text: "split" });
+    const half = Math.floor(full.length / 2);
+    const upstream = new Response(
+      readableStreamFromChunks([full.slice(0, half), full.slice(half)]),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+    globalThis.fetch = vi.fn(
+      async () => upstream,
+    ) as unknown as typeof fetch;
+    const deltas: string[] = [];
+    await streamRagAnswer(
+      { plan: SAMPLE_PLAN },
+      { onDelta: (t) => deltas.push(t) },
+    );
+    expect(deltas.join("")).toBe("split");
   });
 });

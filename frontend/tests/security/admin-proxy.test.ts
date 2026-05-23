@@ -149,6 +149,33 @@ describe("path allow-list", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
+  it("allow-lists rag/ (plan + stream)", async () => {
+    const fetchMock = vi.fn(
+      async () => new Response("{}", { status: 200 }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const id = createSession("api-k", "admin-k"); // pragma: allowlist secret
+
+    for (const path of [["rag", "plan"], ["rag", "stream"]]) {
+      const res = await callHandler("POST", path, {
+        cookies: { [ADMIN_SESSION_COOKIE]: id },
+      });
+      expect(res.status).toBe(200);
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects rag/ subpaths that contain a path-traversal segment", async () => {
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const id = createSession("api-k", "admin-k"); // pragma: allowlist secret
+    const res = await callHandler("POST", ["rag", "..", "filings"], {
+      cookies: { [ADMIN_SESSION_COOKIE]: id },
+    });
+    expect(res.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("allow-lists providers/ (catalogue) and providers/validate", async () => {
     const fetchMock = vi.fn(
       async () => new Response("{}", { status: 200 }),

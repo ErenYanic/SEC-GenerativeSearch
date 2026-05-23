@@ -13,11 +13,16 @@
 // notice; the offending value is intentionally not propagated.
 
 import type {
+  AnswerMode,
+  CitationSchema,
   EdgarIdentityRegisterResponse,
   FilingListResponse,
   IngestTaskResponse,
   ProviderListResponse,
   ProviderValidateResponse,
+  QueryPlanSchema,
+  RagPlanResponse,
+  RagStreamFinalPayload,
   StatusResponse,
   TaskListResponse,
   TaskStatusResponse,
@@ -303,4 +308,251 @@ export function apiFetchWithProviderKeys<T>(
   init: RequestInit = {},
 ): Promise<T> {
   return apiFetch<T>(path, { ...init, attachProviderKeys: true });
+}
+
+// ---------------------------------------------------------------------------
+// RAG — plan + streaming generation
+// ---------------------------------------------------------------------------
+
+export interface RagPlanRequestBody {
+  query: string;
+  provider?: string;
+  model?: string;
+}
+
+/**
+ * Run query-understanding for the editable chip UI. The raw query
+ * travels in the body — never the URL — so it does not land in proxy
+ * access logs. `X-Provider-Key-*` headers attach so the backend's
+ * resolver chain hits the per-request tier first.
+ */
+export function planRagQuery(
+  body: RagPlanRequestBody,
+): Promise<RagPlanResponse> {
+  return apiFetch<RagPlanResponse>("rag/plan", {
+    method: "POST",
+    body: JSON.stringify(body),
+    attachProviderKeys: true,
+  });
+}
+
+export interface RagStreamRequestBody {
+  plan: QueryPlanSchema;
+  provider?: string;
+  model?: string;
+  mode?: AnswerMode;
+  max_output_tokens?: number;
+}
+
+/**
+ * Callback set for `streamRagAnswer`. Every callback fires on the
+ * browser's main thread inside an async iterator — keep their bodies
+ * non-blocking.
+ *
+ * - `onDelta` carries one streamed text fragment per call. Callers
+ *   append these to render the incrementally-built answer.
+ * - `onCitation` fires for each source chunk the model leaned on; the
+ *   citation panel renders these as they arrive between the last delta
+ *   and the final event.
+ * - `onFinal` fires once with the fully-assembled answer and
+ *   traceability (provider, model, token usage, refused-flag).
+ * - `onError` fires when the SSE stream itself emits an `error` event
+ *   after the response is already open — maybe-retry semantics.
+ * - `onHeartbeat` is optional; the page can use it to gate a
+ *   "still working" spinner.
+ */
+export interface RagStreamHandlers {
+  onDelta?: (text: string) => void;
+  onCitation?: (citation: CitationSchema) => void;
+  onFinal?: (payload: RagStreamFinalPayload) => void;
+  onError?: (error: { error: string; message: string; hint?: string }) => void;
+  onHeartbeat?: () => void;
+}
+
+interface StreamEventFrame {
+  event: string;
+  data: string;
+}
+
+function parseSseFrames(buffer: string): {
+  frames: StreamEventFrame[];
+  remainder: string;
+} {
+  // SSE frames are delimited by a blank line. The backend always emits
+  // `event:` then `data:` then a blank line — but we still parse
+  // defensively so a stray comment line cannot derail the loop.
+  const frames: StreamEventFrame[] = [];
+  let cursor = 0;
+  while (true) {
+    const boundary = buffer.indexOf("\n\n", cursor);
+    if (boundary === -1) {
+      break;
+    }
+    const block = buffer.slice(cursor, boundary);
+    cursor = boundary + 2;
+    let eventName = "message";
+    const dataLines: string[] = [];
+    for (const line of block.split("\n")) {
+      if (line.startsWith(":")) {
+        // SSE comment — ignore.
+        continue;
+      }
+      if (line.startsWith("event:")) {
+        eventName = line.slice("event:".length).trim();
+      } else if (line.startsWith("data:")) {
+        dataLines.push(line.slice("data:".length).trim());
+      }
+    }
+    frames.push({ event: eventName, data: dataLines.join("\n") });
+  }
+  return { frames, remainder: buffer.slice(cursor) };
+}
+
+/**
+ * Open the RAG SSE stream and dispatch each event to the supplied
+ * handlers. Returns when the server closes the stream or the supplied
+ * `AbortSignal` fires.
+ *
+ * Error contract
+ * --------------
+ * - Pre-stream HTTP errors (unknown provider / 400 / 401 / 5xx) surface
+ *   as `ApiError` so the caller can treat them as do-not-retry. The
+ *   error envelope shape mirrors `apiFetch`.
+ * - In-stream `error` events fire `onError` and the promise resolves
+ *   normally — callers treat these as maybe-retry.
+ * - `AbortError` from the supplied signal propagates as a rejection
+ *   with `name === "AbortError"` so the caller can distinguish "user
+ *   cancelled" from "backend failed".
+ *
+ * EventSource is NOT used because (a) it only supports GET and our
+ * route is POST (query in body, never URL — backend contract), and
+ * (b) EventSource cannot attach custom headers, so the
+ * `X-Provider-Key-*` audit-log lineage would be lost.
+ */
+export async function streamRagAnswer(
+  body: RagStreamRequestBody,
+  handlers: RagStreamHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  const providerHeaders = providerKeyHeaders();
+  const res = await fetch(buildProxyUrl("rag/stream"), {
+    method: "POST",
+    credentials: "same-origin",
+    cache: "no-store",
+    signal,
+    headers: {
+      Accept: "text/event-stream",
+      "Content-Type": "application/json",
+      ...providerHeaders,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    // Pre-stream error — read the JSON envelope and raise as ApiError.
+    const text = await res.text();
+    let env: ErrorEnvelope = {};
+    if (text !== "") {
+      try {
+        const parsed = JSON.parse(text) as unknown;
+        if (parsed !== null && typeof parsed === "object") {
+          env = parsed as ErrorEnvelope;
+        }
+      } catch {
+        // Body was not JSON — fall through to status-only envelope.
+      }
+    }
+    throw new ApiError(
+      res.status,
+      typeof env.error === "string" ? env.error : "request_failed",
+      typeof env.message === "string"
+        ? env.message
+        : `Request failed with status ${res.status}`,
+      typeof env.hint === "string" ? env.hint : undefined,
+    );
+  }
+
+  if (res.body === null) {
+    // No body — backend signalled an empty stream (degenerate case).
+    return;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const { frames, remainder } = parseSseFrames(buffer);
+      buffer = remainder;
+      for (const frame of frames) {
+        dispatchFrame(frame, handlers);
+      }
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // Reader may already be released if the response was cancelled.
+    }
+  }
+}
+
+function dispatchFrame(
+  frame: StreamEventFrame,
+  handlers: RagStreamHandlers,
+): void {
+  if (frame.event === "heartbeat") {
+    handlers.onHeartbeat?.();
+    return;
+  }
+  let payload: unknown = null;
+  if (frame.data !== "") {
+    try {
+      payload = JSON.parse(frame.data);
+    } catch {
+      // Malformed frame — silently drop. The backend's contract is to
+      // emit one JSON object per data line; a parse failure here is a
+      // backend bug we do not want to escalate at the call site.
+      return;
+    }
+  }
+  if (payload === null || typeof payload !== "object") {
+    return;
+  }
+  const record = payload as Record<string, unknown>;
+  switch (frame.event) {
+    case "delta": {
+      const text = record.text;
+      if (typeof text === "string" && handlers.onDelta !== undefined) {
+        handlers.onDelta(text);
+      }
+      return;
+    }
+    case "citation": {
+      handlers.onCitation?.(record as unknown as CitationSchema);
+      return;
+    }
+    case "final": {
+      handlers.onFinal?.(record as unknown as RagStreamFinalPayload);
+      return;
+    }
+    case "error": {
+      const errorCode = typeof record.error === "string" ? record.error : "stream_error";
+      const message =
+        typeof record.message === "string"
+          ? record.message
+          : "The stream ended with an error.";
+      const hint = typeof record.hint === "string" ? record.hint : undefined;
+      handlers.onError?.({ error: errorCode, message, hint });
+      return;
+    }
+    default:
+      // Unknown event — ignore (forward-compatible with future events).
+      return;
+  }
 }

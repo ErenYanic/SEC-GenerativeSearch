@@ -31,6 +31,7 @@ const ALLOWED_PATH_PREFIXES = [
   "session",
   "providers/",
   "providers",
+  "rag/",
 ] as const;
 
 // Headers that must NEVER be carried verbatim from the browser into the
