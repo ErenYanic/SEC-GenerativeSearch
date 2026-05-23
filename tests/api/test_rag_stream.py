@@ -842,8 +842,8 @@ class TestRagStreamHistoryPrivacyContract:
         package_logger = logging.getLogger(LOGGER_NAME)
         prior_propagate = package_logger.propagate
         package_logger.propagate = True
-        secret_q = "STREAM-PRIOR-QUESTION-SENTINEL-ABC"
-        secret_a = "STREAM-PRIOR-ANSWER-SENTINEL-ABC"
+        secret_q = "STREAM-PRIOR-QUESTION-SENTINEL-ABC"     # pragma: allowlist secret
+        secret_a = "STREAM-PRIOR-ANSWER-SENTINEL-ABC"       # pragma: allowlist secret
         try:
             with (
                 caplog.at_level(logging.WARNING, logger=LOGGER_NAME),

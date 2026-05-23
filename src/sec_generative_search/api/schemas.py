@@ -709,7 +709,8 @@ class ConversationTurnSchema(_BaseModel):
         min_length=1,
         max_length=1024,
         description=(
-            "The prior turn's user query. Tier-3 user data — never echoed in any non-redacted log line."
+            "The prior turn's user query. Tier-3 user data — never echoed in"
+            " any non-redacted log line."
         ),
     )
     answer: str = Field(
