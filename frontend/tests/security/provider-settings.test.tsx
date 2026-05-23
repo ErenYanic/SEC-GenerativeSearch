@@ -157,7 +157,7 @@ describe("ProviderSettingsPage", () => {
     const init = validateCall![1];
     expect(JSON.parse(init.body as string)).toMatchObject({
       provider: "openai",
-      api_key: "sk-VALIDATEME12345",
+      api_key: "sk-VALIDATEME12345",  // pragma: allowlist secret
       surface: "llm",
     });
   });
