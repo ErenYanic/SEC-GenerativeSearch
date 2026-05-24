@@ -598,7 +598,12 @@ function AnswerCard({
           more filings, or relax the date range.
         </p>
       ) : (
-        <AnswerBody answer={answer} citations={indexById} />
+        // aria-live=polite + aria-atomic=false: screen readers track new
+        // tokens as they stream in without re-announcing the whole answer
+        // on every delta. Same shape as the chat surface's pending bubble.
+        <div aria-live="polite" aria-atomic="false">
+          <AnswerBody answer={answer} citations={indexById} />
+        </div>
       )}
 
       {state.kind === "error" ? (

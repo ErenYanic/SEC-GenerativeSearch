@@ -20,6 +20,7 @@ import {
   type JSX,
 } from "react";
 
+import { Skeleton } from "@/components/skeleton";
 import { ApiError, deleteFiling, listFilings } from "@/lib/api";
 import type { FilingListResponse, FilingSchema } from "@/lib/api-types";
 
@@ -198,9 +199,9 @@ export default function FilingsPage(): JSX.Element {
             : "Filings"}
         </h2>
         {state.kind === "loading" ? (
-          <p className="px-4 py-6 text-sm text-slate-500" role="status">
-            Loading filings…
-          </p>
+          <div className="px-4 py-6">
+            <Skeleton rows={5} label="Loading filings…" />
+          </div>
         ) : null}
         {state.kind === "error" ? (
           <p

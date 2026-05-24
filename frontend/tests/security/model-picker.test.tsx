@@ -179,6 +179,38 @@ describe("ModelPicker — slug shape validation (UX hint, not security gate)", (
   });
 });
 
+describe("ModelPicker — fallbacks tri-state", () => {
+  it("emits allow_fallbacks=true when the user picks 'Yes'", async () => {
+    const { onChange } = renderPicker({
+      value: { provider: "openrouter", model: "" },
+    });
+    const user = userEvent.setup();
+    await user.selectOptions(
+      screen.getByLabelText(/allow fallbacks/i),
+      "true",
+    );
+    const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1] as [
+      ModelPickerValue,
+    ];
+    expect(lastCall[0].routing_hints?.allow_fallbacks).toBe(true);
+  });
+
+  it("emits allow_fallbacks=false when the user picks 'No'", async () => {
+    const { onChange } = renderPicker({
+      value: { provider: "openrouter", model: "" },
+    });
+    const user = userEvent.setup();
+    await user.selectOptions(
+      screen.getByLabelText(/allow fallbacks/i),
+      "false",
+    );
+    const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1] as [
+      ModelPickerValue,
+    ];
+    expect(lastCall[0].routing_hints?.allow_fallbacks).toBe(false);
+  });
+});
+
 describe("ModelPicker — provider-switch sanitiser", () => {
   it("clears pending hints when switching to a non-routing provider", () => {
     // First render with openrouter + hints present.

@@ -15,6 +15,7 @@
 import { useEffect, useState, type JSX } from "react";
 
 import { EdgarIdentityCard } from "@/components/edgar-identity-card";
+import { Skeleton } from "@/components/skeleton";
 import { ApiError, getStatus } from "@/lib/api";
 import type { StatusResponse } from "@/lib/api-types";
 
@@ -70,9 +71,7 @@ export default function DashboardPage(): JSX.Element {
           Deployment status
         </h2>
         {state.kind === "loading" ? (
-          <p className="text-sm text-slate-500" role="status">
-            Loading status…
-          </p>
+          <Skeleton rows={4} label="Loading deployment status…" />
         ) : null}
         {state.kind === "error" ? (
           <p

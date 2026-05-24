@@ -331,6 +331,8 @@ function TaskProgressCard({
   return (
     <section
       aria-labelledby="task-progress-heading"
+      aria-live="polite"
+      aria-atomic="false"
       className="rounded-lg border border-slate-200 bg-white p-6 shadow"
     >
       <header className="flex flex-wrap items-baseline justify-between gap-2">
@@ -341,6 +343,7 @@ function TaskProgressCard({
           Task {task.task_id.slice(0, 8)}…
         </h2>
         <span
+          aria-label={`Task status: ${task.status}`}
           className={
             "rounded px-2 py-0.5 text-xs font-medium uppercase tracking-wide " +
             statusClass(task.status)

@@ -33,6 +33,7 @@ import {
   useEffect,
   useId,
   useMemo,
+  useReducer,
   useRef,
   useState,
   type FormEvent,
@@ -49,6 +50,7 @@ import type {
   RagStreamFinalPayload,
 } from "@/lib/api-types";
 import { ModelPicker, type ModelPickerValue } from "@/components/model-picker";
+import { INITIAL_STATE, reducer, type InFlightState } from "./reducer";
 
 // One committed conversation turn. Mirrors the wire-tier
 // `ConversationTurnSchema` for the `{query, answer}` round-trip plus
@@ -66,27 +68,10 @@ interface ChatTurn {
   refused: boolean;
 }
 
-type InFlight =
-  | { kind: "idle" }
-  | { kind: "planning"; query: string }
-  | {
-      kind: "streaming";
-      query: string;
-      plan: QueryPlanSchema;
-      planProvider: string;
-      planModel: string;
-      answer: string;
-      citations: CitationSchema[];
-    }
-  | {
-      kind: "error";
-      message: string;
-      hint?: string;
-      retryable: boolean;
-      // Snapshot of the in-flight payload for a retry.
-      query: string;
-      plan: QueryPlanSchema | null;
-    };
+// `InFlight` state + transition table live in `./reducer.ts` so the
+// transitions are unit-testable as a pure function. The page is a
+// thin dispatcher over `useReducer`.
+type InFlight = InFlightState;
 
 // History bound on the wire is 10 turns (matches `RAG_CHAT_HISTORY_TURNS`
 // default + `ConversationTurnSchema.history` `max_length`).
@@ -99,7 +84,7 @@ const HISTORY_ANSWER_MAX_CHARS = 4096;
 export default function ChatPage(): JSX.Element {
   const [draft, setDraft] = useState("");
   const [turns, setTurns] = useState<ChatTurn[]>([]);
-  const [state, setState] = useState<InFlight>({ kind: "idle" });
+  const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [pickerValue, setPickerValue] = useState<ModelPickerValue>({
     provider: "",
@@ -158,7 +143,7 @@ export default function ChatPage(): JSX.Element {
       abortRef.current?.abort();
       const controller = new AbortController();
       abortRef.current = controller;
-      setState({ kind: "planning", query });
+      dispatch({ type: "START_PLAN", query });
       let planResponse: Awaited<ReturnType<typeof planRagQuery>>;
       try {
         planResponse = await planRagQuery({
@@ -176,31 +161,26 @@ export default function ChatPage(): JSX.Element {
         const message =
           exc instanceof ApiError ? exc.message : "Could not plan the question.";
         const hint = exc instanceof ApiError ? exc.hint : undefined;
-        setState({
-          kind: "error",
-          message,
-          hint,
-          retryable: false,
-          query,
-          plan: null,
-        });
+        dispatch({ type: "PLAN_FAILED", message, hint, query });
         return;
       }
 
-      setState({
-        kind: "streaming",
+      dispatch({
+        type: "PLAN_OK",
         query,
         plan: planResponse.plan,
         planProvider: planResponse.provider,
         planModel: planResponse.model,
-        answer: "",
-        citations: [],
       });
 
-      let answer = "";
-      const citations: CitationSchema[] = [];
       let final: RagStreamFinalPayload | null = null;
       let streamError: { message: string; hint?: string } | null = null;
+      // Local mirrors of the reducer-owned streaming fields. The
+      // committed-turn snapshot below uses these so we do not have to
+      // race the reducer to read `state.answer` / `state.citations`
+      // right after the last dispatch.
+      let answerMirror = "";
+      const citationsMirror: CitationSchema[] = [];
 
       try {
         await streamRagAnswer(
@@ -217,22 +197,12 @@ export default function ChatPage(): JSX.Element {
           },
           {
             onDelta: (text) => {
-              answer += text;
-              setState((prev) => {
-                if (prev.kind !== "streaming") {
-                  return prev;
-                }
-                return { ...prev, answer };
-              });
+              answerMirror += text;
+              dispatch({ type: "STREAM_DELTA", text });
             },
             onCitation: (citation) => {
-              citations.push(citation);
-              setState((prev) => {
-                if (prev.kind !== "streaming") {
-                  return prev;
-                }
-                return { ...prev, citations: [...citations] };
-              });
+              citationsMirror.push(citation);
+              dispatch({ type: "STREAM_CITATION", citation });
             },
             onFinal: (payload) => {
               final = payload;
@@ -249,22 +219,18 @@ export default function ChatPage(): JSX.Element {
           return;
         }
         if (exc instanceof ApiError) {
-          setState({
-            kind: "error",
+          dispatch({
+            type: "STREAM_ERROR",
             message: exc.message,
             hint: exc.hint,
             retryable: false,
-            query,
-            plan: planResponse.plan,
           });
           return;
         }
-        setState({
-          kind: "error",
+        dispatch({
+          type: "STREAM_ERROR",
           message: "Lost contact with the answer stream.",
           retryable: true,
-          query,
-          plan: planResponse.plan,
         });
         return;
       }
@@ -274,13 +240,11 @@ export default function ChatPage(): JSX.Element {
       }
 
       if (streamError !== null) {
-        setState({
-          kind: "error",
+        dispatch({
+          type: "STREAM_ERROR",
           message: (streamError as { message: string }).message,
           hint: (streamError as { hint?: string }).hint,
           retryable: true,
-          query,
-          plan: planResponse.plan,
         });
         return;
       }
@@ -295,8 +259,9 @@ export default function ChatPage(): JSX.Element {
             ? crypto.randomUUID()
             : `${Date.now().toString()}-${Math.random().toString(36).slice(2)}`,
         query,
-        answer: final !== null ? (final as RagStreamFinalPayload).answer : answer,
-        citations,
+        answer:
+          final !== null ? (final as RagStreamFinalPayload).answer : answerMirror,
+        citations: citationsMirror,
         plan: planResponse.plan,
         provider:
           final !== null
@@ -313,7 +278,7 @@ export default function ChatPage(): JSX.Element {
         refused: final !== null ? (final as RagStreamFinalPayload).refused : false,
       };
       setTurns((prev) => [...prev, settled]);
-      setState({ kind: "idle" });
+      dispatch({ type: "RESET" });
       abortRef.current = null;
     },
     [historyForWire, pickerValue],
@@ -335,12 +300,12 @@ export default function ChatPage(): JSX.Element {
   const handleCancel = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
-    setState({ kind: "idle" });
+    dispatch({ type: "CANCEL" });
   }, []);
 
   const handleClear = useCallback(() => {
     setTurns([]);
-    setState({ kind: "idle" });
+    dispatch({ type: "RESET" });
     abortRef.current?.abort();
     abortRef.current = null;
   }, []);
@@ -600,9 +565,15 @@ function PendingTurn({
         >
           {state.kind === "planning" ? "Planning…" : "Streaming…"}
         </p>
-        {answer.length > 0 ? (
-          <AnswerBody answer={answer} citations={indexById} turnId="pending" />
-        ) : null}
+        {/* The incrementally-built answer surface — aria-live=polite so
+            screen readers track new tokens without interrupting; aria-
+            atomic=false so only the appended text is announced, not the
+            whole answer on every delta. */}
+        <div aria-live="polite" aria-atomic="false">
+          {answer.length > 0 ? (
+            <AnswerBody answer={answer} citations={indexById} turnId="pending" />
+          ) : null}
+        </div>
       </div>
     </li>
   );

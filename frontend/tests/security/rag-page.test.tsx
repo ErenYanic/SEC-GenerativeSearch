@@ -48,28 +48,7 @@ const SAMPLE_PLAN = {
   suggested_answer_mode: "concise",
 };
 
-function sseFrame(event: string, data: unknown): string {
-  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-}
-
-function streamingResponse(frames: string[]): Response {
-  const encoder = new TextEncoder();
-  let i = 0;
-  const body = new ReadableStream<Uint8Array>({
-    pull(controller) {
-      if (i >= frames.length) {
-        controller.close();
-        return;
-      }
-      controller.enqueue(encoder.encode(frames[i] as string));
-      i += 1;
-    },
-  });
-  return new Response(body, {
-    status: 200,
-    headers: { "content-type": "text/event-stream" },
-  });
-}
+import { sseFrame, streamingResponse } from "./_sse-harness";
 
 beforeEach(() => {
   globalThis.fetch = vi.fn();

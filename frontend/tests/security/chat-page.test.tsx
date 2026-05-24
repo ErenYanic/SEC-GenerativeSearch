@@ -54,82 +54,12 @@ const SAMPLE_PLAN = {
   suggested_answer_mode: "concise",
 };
 
-function sseFrame(event: string, data: unknown): string {
-  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-}
-
-function streamingResponse(frames: string[]): Response {
-  const encoder = new TextEncoder();
-  let i = 0;
-  const body = new ReadableStream<Uint8Array>({
-    pull(controller) {
-      if (i >= frames.length) {
-        controller.close();
-        return;
-      }
-      controller.enqueue(encoder.encode(frames[i] as string));
-      i += 1;
-    },
-  });
-  return new Response(body, {
-    status: 200,
-    headers: { "content-type": "text/event-stream" },
-  });
-}
-
-function pendingStreamingResponse(): {
-  response: Response;
-  release: (frames: string[]) => void;
-} {
-  // A stream the test can hold open until it explicitly releases the
-  // frames. Used to simulate a cancel mid-flight.
-  let pull: ((frames: string[]) => void) | null = null;
-  let queued: string[] = [];
-  const encoder = new TextEncoder();
-  const body = new ReadableStream<Uint8Array>({
-    pull(controller) {
-      // Buffer frames; close on empty after release.
-      if (queued.length > 0) {
-        controller.enqueue(encoder.encode(queued.shift() as string));
-        return;
-      }
-      pull = (frames) => {
-        queued.push(...frames);
-        pull = null;
-        if (queued.length === 0) {
-          controller.close();
-        } else {
-          controller.enqueue(encoder.encode(queued.shift() as string));
-        }
-      };
-    },
-  });
-  const response = new Response(body, {
-    status: 200,
-    headers: { "content-type": "text/event-stream" },
-  });
-  function release(frames: string[]): void {
-    if (pull !== null) {
-      pull(frames);
-    } else {
-      queued.push(...frames);
-    }
-  }
-  return { response, release };
-}
-
-function finalFrame(answer: string): string {
-  return sseFrame("final", {
-    answer,
-    provider: "openai",
-    model: "gpt-test",
-    prompt_version: "v1",
-    token_usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
-    latency_seconds: 0.1,
-    streamed: true,
-    refused: false,
-  });
-}
+import {
+  finalFrame,
+  pendingStreamingResponse,
+  sseFrame,
+  streamingResponse,
+} from "./_sse-harness";
 
 beforeEach(() => {
   globalThis.fetch = vi.fn();
