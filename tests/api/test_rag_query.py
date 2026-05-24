@@ -134,6 +134,7 @@ class _StubOrchestrator:
                 "max_output_tokens": max_output_tokens,
                 "history": history,
                 "prefer_structured_output": prefer_structured_output,
+                "routing_hints": kwargs.get("routing_hints"),
                 "llm_provider_name": getattr(self.llm, "provider_name", None),
             }
         )
@@ -892,3 +893,204 @@ class TestRagQueryHistoryPrivacyContract:
         assert response.status_code == 502
         assert secret_q not in response.text
         assert secret_a not in response.text
+
+
+# ---------------------------------------------------------------------------
+# OpenRouter upstream-provider routing hints
+# ---------------------------------------------------------------------------
+
+
+class TestRagQueryRoutingHints:
+    """Mirror of the CLI's ``--openrouter-*`` flag plumbing.
+
+    The route forwards ``routing_hints`` verbatim into
+    :meth:`RAGOrchestrator.generate`; only :class:`OpenRouterProvider`
+    consumes it.  Supplying hints against any other provider must fail
+    closed with 400 ``invalid_flag_combination`` so a caller never gets
+    a silently-no-op generation.
+    """
+
+    def test_hints_forwarded_for_openrouter(self, rag_query_app_factory) -> None:
+        app, _build, orch = rag_query_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        response = client.post(
+            "/api/rag/query",
+            json={
+                "plan": _sample_plan_payload(),
+                "provider": "openrouter",
+                "routing_hints": {
+                    "order": ["anthropic", "openai"],
+                    "allow_fallbacks": False,
+                },
+            },
+            headers={
+                "X-Provider-Key-openrouter": "sk-or-1234",  # pragma: allowlist secret
+            },
+        )
+        assert response.status_code == 200
+        hints = orch.calls[0]["routing_hints"]
+        assert hints is not None
+        assert hints.order == ("anthropic", "openai")
+        assert hints.allow_fallbacks is False
+
+    def test_hints_omitted_yields_none(self, rag_query_app_factory) -> None:
+        app, _build, orch = rag_query_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        response = client.post(
+            "/api/rag/query",
+            json={"plan": _sample_plan_payload()},
+            headers={"X-Provider-Key-openai": "sk-1234"},  # pragma: allowlist secret
+        )
+        assert response.status_code == 200
+        assert orch.calls[0]["routing_hints"] is None
+
+    def test_hints_against_non_openrouter_provider_rejected(self, rag_query_app_factory) -> None:
+        app, _build, orch = rag_query_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        response = client.post(
+            "/api/rag/query",
+            json={
+                "plan": _sample_plan_payload(),
+                "provider": "openai",
+                "routing_hints": {"order": ["anthropic"]},
+            },
+            headers={"X-Provider-Key-openai": "sk-1234"},  # pragma: allowlist secret
+        )
+        assert response.status_code == 400
+        body = response.json()
+        assert body["error"] == "invalid_flag_combination"
+        # Orchestrator MUST NOT have run — the guard rejects before
+        # generation is attempted.
+        assert orch.calls == []
+
+    def test_data_collection_invalid_value_rejected(self, rag_query_app_factory) -> None:
+        app, _build, orch = rag_query_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        response = client.post(
+            "/api/rag/query",
+            json={
+                "plan": _sample_plan_payload(),
+                "provider": "openrouter",
+                "routing_hints": {"data_collection": "perhaps"},
+            },
+            headers={
+                "X-Provider-Key-openrouter": "sk-or-1234",  # pragma: allowlist secret
+            },
+        )
+        # Schema-layer rejection — 422, not 400.
+        assert response.status_code == 422
+        assert orch.calls == []
+
+    def test_upstream_slug_shape_violation_rejected(self, rag_query_app_factory) -> None:
+        app, _build, orch = rag_query_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        response = client.post(
+            "/api/rag/query",
+            json={
+                "plan": _sample_plan_payload(),
+                "provider": "openrouter",
+                "routing_hints": {"order": ["UPPERCASE-NOT-OK"]},
+            },
+            headers={
+                "X-Provider-Key-openrouter": "sk-or-1234",  # pragma: allowlist secret
+            },
+        )
+        assert response.status_code == 422
+        assert orch.calls == []
+
+    def test_audit_log_carries_or_hints_summary_not_slugs(
+        self,
+        rag_query_app_factory,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # The audit log MUST carry the ``or_hints=...`` count summary
+        # without echoing the upstream-provider slug list.  Mirrors the
+        # CLI's ``_format_routing_hints_audit`` privacy stance.
+        app, _build, _orch = rag_query_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        sentinel = "very-secret-upstream-slug"
+        logging.getLogger(LOGGER_NAME).propagate = True
+        try:
+            with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+                response = client.post(
+                    "/api/rag/query",
+                    json={
+                        "plan": _sample_plan_payload(),
+                        "provider": "openrouter",
+                        "routing_hints": {
+                            "order": [sentinel],
+                            "allow_fallbacks": True,
+                        },
+                    },
+                    headers={
+                        "X-Provider-Key-openrouter": "sk-or-1234",  # pragma: allowlist secret
+                    },
+                )
+        finally:
+            logging.getLogger(LOGGER_NAME).propagate = False
+        assert response.status_code == 200
+        audit = [r.getMessage() for r in caplog.records if "SECURITY_AUDIT" in r.getMessage()]
+        assert any("or_hints=order=1 fallbacks=True" in line for line in audit)
+        # The slug itself MUST NOT appear in any audit line.
+        assert all(sentinel not in line for line in audit)
+
+    def test_audit_log_shows_none_when_no_hints(
+        self,
+        rag_query_app_factory,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        app, _build, _orch = rag_query_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        logging.getLogger(LOGGER_NAME).propagate = True
+        try:
+            with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+                response = client.post(
+                    "/api/rag/query",
+                    json={"plan": _sample_plan_payload()},
+                    headers={"X-Provider-Key-openai": "sk-1234"},  # pragma: allowlist secret
+                )
+        finally:
+            logging.getLogger(LOGGER_NAME).propagate = False
+        assert response.status_code == 200
+        audit = [r.getMessage() for r in caplog.records if "SECURITY_AUDIT" in r.getMessage()]
+        assert any("or_hints=none" in line for line in audit)
+
+
+@pytest.mark.security
+class TestRagQueryRoutingHintsSecurityContract:
+    """Pin the load-bearing privacy invariants for routing hints.
+
+    Re-run these when touching :func:`_resolve_routing_hints_api` or
+    :func:`_format_routing_hints_audit`.
+    """
+
+    def test_routing_hints_schema_has_no_credential_fields(self) -> None:
+        # The OpenRouter API key already flows on the request's
+        # ``Authorization`` header.  A redundant key field on the hint
+        # would silently widen the audit surface.
+        from sec_generative_search.api.schemas import OpenRouterRoutingHintsSchema
+
+        forbidden = {"api_key", "authorization", "bearer", "token", "secret"}
+        field_names = set(OpenRouterRoutingHintsSchema.model_fields.keys())
+        assert field_names.isdisjoint(forbidden), (
+            f"OpenRouterRoutingHintsSchema must not carry credential-shaped "
+            f"fields; found: {field_names & forbidden}"
+        )
+
+    def test_invalid_combination_envelope_redacts_slug(self, rag_query_app_factory) -> None:
+        # The 400 envelope MUST NOT echo the supplied upstream slugs —
+        # the message names the provider and the remediation only.
+        app, _build, _orch = rag_query_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        sentinel = "anthropic-redacted-sentinel"
+        response = client.post(
+            "/api/rag/query",
+            json={
+                "plan": _sample_plan_payload(),
+                "provider": "openai",
+                "routing_hints": {"order": [sentinel]},
+            },
+            headers={"X-Provider-Key-openai": "sk-1234"},  # pragma: allowlist secret
+        )
+        assert response.status_code == 400
+        assert sentinel not in response.text

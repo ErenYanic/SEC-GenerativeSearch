@@ -82,7 +82,7 @@ afterEach(() => {
 
 describe("RagPage — planning", () => {
   it("submits the query to /api/admin/rag/plan via POST body (never the URL)", async () => {
-    const fetchMock = vi.fn(async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => {
       return new Response(
         JSON.stringify({
           plan: SAMPLE_PLAN,
@@ -100,12 +100,18 @@ describe("RagPage — planning", () => {
     await user.click(screen.getByRole("button", { name: /^Plan$/i }));
 
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalled();
+      // Find the rag/plan call (the page also fires listProviders on
+      // mount; we don't care about the order, only that the plan call
+      // carries the body and never the URL).
+      const planCall = fetchMock.mock.calls.find(
+        (call) => (call[0] as string) === "/api/admin/rag/plan",
+      );
+      expect(planCall).toBeDefined();
     });
-    const [url, init] = fetchMock.mock.calls[0] as unknown as [
-      string,
-      RequestInit,
-    ];
+    const planCall = fetchMock.mock.calls.find(
+      (call) => (call[0] as string) === "/api/admin/rag/plan",
+    ) as unknown as [string, RequestInit];
+    const [url, init] = planCall;
     expect(url).toBe("/api/admin/rag/plan");
     expect(url).not.toContain("Apple");
     expect(init.body).toContain("Apple AI risk");
@@ -318,5 +324,178 @@ describe("RagPage — generation streaming", () => {
     expect(
       screen.queryByRole("button", { name: /retry/i }),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("RagPage — ModelPicker wiring", () => {
+  it("forwards picker provider/model/routing_hints into the stream POST body", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/api/admin/providers/") {
+        return new Response(
+          JSON.stringify({
+            providers: [
+              { name: "openai", surface: "llm", supports_upstream_routing: false },
+              {
+                name: "openrouter",
+                surface: "llm",
+                supports_upstream_routing: true,
+              },
+            ],
+            total: 2,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/admin/rag/plan") {
+        return new Response(
+          JSON.stringify({
+            plan: SAMPLE_PLAN,
+            provider: "openrouter",
+            model: "openai/gpt-test",
+          }),
+          { status: 200 },
+        );
+      }
+      return streamingResponse([
+        sseFrame("final", {
+          answer: "ok.",
+          provider: "openrouter",
+          model: "openai/gpt-test",
+          prompt_version: "v1",
+          token_usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+          latency_seconds: 0.1,
+          streamed: true,
+          refused: false,
+        }),
+      ]);
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    render(<RagPage />);
+    const user = userEvent.setup();
+
+    // Wait for the catalogue fetch to settle so the picker renders the
+    // routing-capable provider option.
+    await waitFor(() => {
+      expect(
+        screen.getByRole("option", { name: /openrouter \(routing\)/i }),
+      ).toBeInTheDocument();
+    });
+
+    // Pick provider + model.
+    await user.selectOptions(
+      screen.getByLabelText(/^provider$/i),
+      "openrouter",
+    );
+    await user.type(screen.getByLabelText(/model slug/i), "openai/gpt-test");
+    // The routing-hint UI MUST render only after the openrouter choice.
+    await user.type(
+      screen.getByLabelText(/preferred upstream order/i),
+      "anthropic",
+    );
+
+    // Fire the plan + generate flow.
+    await user.type(screen.getByLabelText(/question/i), "topic");
+    await user.click(screen.getByRole("button", { name: /^Plan$/i }));
+    await screen.findByText("AAPL");
+    await user.click(screen.getByRole("button", { name: /generate answer/i }));
+
+    await waitFor(() => {
+      const streamCall = fetchMock.mock.calls.find(
+        (c) => (c[0] as string) === "/api/admin/rag/stream",
+      );
+      expect(streamCall).toBeDefined();
+    });
+    const streamCall = fetchMock.mock.calls.find(
+      (c) => (c[0] as string) === "/api/admin/rag/stream",
+    ) as unknown as [string, RequestInit];
+    const body = JSON.parse(streamCall[1].body as string) as {
+      provider: string;
+      model: string;
+      routing_hints?: { order?: string[] };
+    };
+    expect(body.provider).toBe("openrouter");
+    expect(body.model).toBe("openai/gpt-test");
+    expect(body.routing_hints?.order).toEqual(["anthropic"]);
+  });
+
+  it("does NOT attach routing_hints when the provider is non-OpenRouter", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/api/admin/providers/") {
+        return new Response(
+          JSON.stringify({
+            providers: [
+              { name: "openai", surface: "llm", supports_upstream_routing: false },
+            ],
+            total: 1,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/admin/rag/plan") {
+        return new Response(
+          JSON.stringify({
+            plan: SAMPLE_PLAN,
+            provider: "openai",
+            model: "gpt-test",
+          }),
+          { status: 200 },
+        );
+      }
+      return streamingResponse([
+        sseFrame("final", {
+          answer: "ok.",
+          provider: "openai",
+          model: "gpt-test",
+          prompt_version: "v1",
+          token_usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+          latency_seconds: 0.1,
+          streamed: true,
+          refused: false,
+        }),
+      ]);
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    render(<RagPage />);
+    const user = userEvent.setup();
+    await waitFor(() => {
+      expect(
+        screen.getByRole("option", { name: "openai" }),
+      ).toBeInTheDocument();
+    });
+    await user.selectOptions(screen.getByLabelText(/^provider$/i), "openai");
+    // Routing UI MUST NOT render for a non-routing provider — the
+    // capability gating is the SPA's side of the backend's fail-closed
+    // guard against `invalid_flag_combination`.
+    expect(
+      screen.queryByLabelText(/preferred upstream order/i),
+    ).not.toBeInTheDocument();
+
+    await user.type(screen.getByLabelText(/question/i), "topic");
+    await user.click(screen.getByRole("button", { name: /^Plan$/i }));
+    await screen.findByText("AAPL");
+    await user.click(screen.getByRole("button", { name: /generate answer/i }));
+
+    await waitFor(() => {
+      const streamCall = fetchMock.mock.calls.find(
+        (c) => (c[0] as string) === "/api/admin/rag/stream",
+      );
+      expect(streamCall).toBeDefined();
+    });
+    const streamCall = fetchMock.mock.calls.find(
+      (c) => (c[0] as string) === "/api/admin/rag/stream",
+    ) as unknown as [string, RequestInit];
+    const body = JSON.parse(streamCall[1].body as string) as Record<
+      string,
+      unknown
+    >;
+    // The picker never attached `routing_hints` (capability gated), so
+    // the body MUST NOT carry the field.  This is the SPA's contribution
+    // to the load-bearing invariant that the backend's
+    // `invalid_flag_combination` guard never fires under normal SPA use.
+    expect(body).not.toHaveProperty("routing_hints");
   });
 });

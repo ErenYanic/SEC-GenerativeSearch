@@ -72,6 +72,7 @@ from sec_generative_search.api.errors import envelope, http_error
 from sec_generative_search.api.schemas import (
     CitationSchema,
     ConversationTurnSchema,
+    OpenRouterRoutingHintsSchema,
     QueryPlanSchema,
     RagPlanRequest,
     RagPlanResponse,
@@ -96,6 +97,7 @@ from sec_generative_search.core.types import (
     TokenUsage,
 )
 from sec_generative_search.providers.factory import build_llm_provider
+from sec_generative_search.providers.openrouter import OpenRouterRoutingHints
 from sec_generative_search.providers.registry import (
     ProviderRegistry,
     ProviderSurface,
@@ -422,6 +424,94 @@ def _history_from_schema(
     ]
 
 
+def _routing_hints_from_schema(
+    schema: OpenRouterRoutingHintsSchema | None,
+) -> OpenRouterRoutingHints | None:
+    """Lift the wire schema into the frozen
+    :class:`OpenRouterRoutingHints` dataclass.
+
+    The dataclass is tuple-valued for hashability; the schema's lists are
+    coerced here.  ``None`` propagates so the orchestrator's
+    ``routing_hints is None`` branch stays the common path.
+    """
+    if schema is None:
+        return None
+    return OpenRouterRoutingHints(
+        order=tuple(schema.order),
+        allow_fallbacks=schema.allow_fallbacks,
+        only=tuple(schema.only),
+        ignore=tuple(schema.ignore),
+        require_parameters=schema.require_parameters,
+        data_collection=schema.data_collection,
+    )
+
+
+def _resolve_routing_hints_api(
+    provider_name: str,
+    schema: OpenRouterRoutingHintsSchema | None,
+) -> OpenRouterRoutingHints | None:
+    """Build :class:`OpenRouterRoutingHints` for an API call, fail-closed.
+
+    Mirrors :func:`sec_generative_search.cli.rag._resolve_routing_hints`
+    byte-for-byte on the guard semantics: the orchestrator forwards
+    ``routing_hints`` verbatim into :class:`GenerationRequest`, but only
+    :class:`OpenRouterProvider` consumes it.  Supplying hints against any
+    other provider would silently no-op (the OpenAI-compatible base's
+    empty ``_extra_request_kwargs`` default drops them) — a misleading
+    UX.  We fail closed with a 400 ``invalid_flag_combination`` instead
+    so the caller knows the hint did not take effect.
+
+    The :meth:`ProviderRegistry.supports_upstream_routing` query is the
+    single source of truth — currently only the ``openrouter`` LLM entry
+    advertises the capability; any future meta-provider that lights it
+    up would pick up the hint flow automatically.
+    """
+    if schema is None:
+        return None
+
+    try:
+        honours = ProviderRegistry.supports_upstream_routing(
+            provider_name,
+            ProviderSurface.LLM,
+        )
+    except KeyError:
+        # Unknown provider — the caller's capability probe will already
+        # have raised an envelope, but be defensive here in case this
+        # helper is ever invoked before that probe.
+        honours = False
+
+    if not honours:
+        raise http_error(
+            status_code=400,
+            error="invalid_flag_combination",
+            message=(
+                f"routing_hints supplied but provider '{provider_name}' "
+                "does not honour upstream-routing hints."
+            ),
+            hint=(
+                "Set provider='openrouter' (the only provider that "
+                "consumes these hints) or omit routing_hints."
+            ),
+        )
+
+    return _routing_hints_from_schema(schema)
+
+
+def _format_routing_hints_audit(hints: OpenRouterRoutingHints | None) -> str:
+    """Render hints as an audit-safe metadata fragment.
+
+    Mirrors :func:`sec_generative_search.cli.rag._format_routing_hints_audit`.
+    Reports counts and toggles only — upstream-provider slugs are
+    deliberately omitted so operators can pivot on "was routing pinned?"
+    without leaking which vendors a given run preferred (operator-
+    supplied but still a Tier-2 disclosure telemetry rarely needs).
+    """
+    if hints is None:
+        return "none"
+    fallbacks = hints.allow_fallbacks if hints.allow_fallbacks is not None else "default"
+    return f"order={len(hints.order)} fallbacks={fallbacks}"
+
+
 def _citation_to_schema(citation: Citation) -> CitationSchema:
     """Lift one :class:`Citation` onto the wire schema.
 
@@ -600,6 +690,11 @@ async def generate_answer(
     )
 
     history = _history_from_schema(body.history)
+    # Validate routing-hint compatibility before opening the orchestrator.
+    # ``_resolve_routing_hints_api`` raises HTTPException(400) for the
+    # invalid-combination case so the caller sees a do-not-retry error
+    # rather than a silently-no-op generation.
+    routing_hints = _resolve_routing_hints_api(provider_name, body.routing_hints)
 
     try:
         result = orchestrator.generate(
@@ -609,6 +704,7 @@ async def generate_answer(
             max_output_tokens=body.max_output_tokens,
             history=history,
             prefer_structured_output=capability.structured_output,
+            routing_hints=routing_hints,
         )
     except ProviderAuthError as exc:
         raise http_error(
@@ -670,7 +766,9 @@ async def generate_answer(
             f"forms={len(plan.form_types)} mode={audit_mode} "
             f"prompt_version={result.prompt_version} "
             f"chunks={len(result.retrieved_chunks)} citations={len(result.citations)} "
-            f"history_turns={len(body.history)} refused={refused}"
+            f"history_turns={len(body.history)} "
+            f"or_hints={_format_routing_hints_audit(routing_hints)} "
+            f"refused={refused}"
         ),
     )
 
@@ -794,6 +892,7 @@ def _run_orchestrator_in_thread(
     max_output_tokens: int | None,
     history: list[ConversationTurn] | None,
     prefer_structured_output: bool,
+    routing_hints: OpenRouterRoutingHints | None,
     queue: asyncio.Queue,
     loop: asyncio.AbstractEventLoop,
 ) -> None:
@@ -827,6 +926,7 @@ def _run_orchestrator_in_thread(
                 max_output_tokens=max_output_tokens,
                 history=history,
                 prefer_structured_output=prefer_structured_output,
+                routing_hints=routing_hints,
             ):
                 loop.call_soon_threadsafe(queue.put_nowait, event)
         except Exception as exc:
@@ -937,6 +1037,10 @@ async def stream_answer(
     # the producer thread emits a follow-up ``rag_stream_completed`` line
     # carrying those once the orchestrator finishes.
     history = _history_from_schema(body.history)
+    # Same fail-closed guard as ``/query`` — refuse hints against any
+    # provider that does not advertise ``supports_upstream_routing`` so a
+    # mis-paired hint never opens the SSE stream.
+    routing_hints = _resolve_routing_hints_api(provider_name, body.routing_hints)
 
     audit_log(
         "rag_stream",
@@ -946,7 +1050,8 @@ async def stream_answer(
             f"provider={provider_name} model={model or '<provider default>'} "
             f"lang={plan.detected_language} tickers={len(plan.tickers)} "
             f"forms={len(plan.form_types)} mode={audit_mode} "
-            f"history_turns={len(body.history)}"
+            f"history_turns={len(body.history)} "
+            f"or_hints={_format_routing_hints_audit(routing_hints)}"
         ),
     )
 
@@ -964,6 +1069,7 @@ async def stream_answer(
             max_output_tokens=body.max_output_tokens,
             history=history,
             prefer_structured_output=capability.structured_output,
+            routing_hints=routing_hints,
             queue=queue,
             loop=loop,
         )
@@ -1036,6 +1142,7 @@ async def stream_answer(
                     f"provider={provider_name} model={model or '<provider default>'} "
                     f"deltas={chunks_streamed} citations={citations_emitted} "
                     f"history_turns={len(body.history)} "
+                    f"or_hints={_format_routing_hints_audit(routing_hints)} "
                     f"refused={refused} status={completion_status}"
                 ),
             )

@@ -37,6 +37,7 @@ __all__ = [
     "IngestRequest",
     "IngestResultSchema",
     "IngestTaskResponse",
+    "OpenRouterRoutingHintsSchema",
     "ProviderInfoSchema",
     "ProviderListResponse",
     "ProviderValidateRequest",
@@ -724,6 +725,104 @@ class ConversationTurnSchema(_BaseModel):
     )
 
 
+# Slug shape mirrors OpenRouter's documented upstream-provider slug
+# alphabet (lower-case alphanumerics + ``-`` separator). The bound is
+# intentionally permissive: OpenRouter gains and loses upstreams almost
+# weekly, so this regex defends against control characters and length
+# bombs without baking the catalogue into the API surface. Anything
+# OpenRouter rejects at call time surfaces as their own error message
+# (which the orchestrator's exception mapping translates to 502).
+_OPENROUTER_UPSTREAM_PATTERN = r"^[a-z0-9][a-z0-9-]{0,63}$"
+
+
+class OpenRouterRoutingHintsSchema(_BaseModel):
+    """Wire shape of
+    :class:`~sec_generative_search.providers.openrouter.OpenRouterRoutingHints`.
+
+    Only :class:`OpenRouterProvider` consumes this — every other adapter
+    silently ignores the field via the OpenAI-compatible base's empty
+    ``_extra_request_kwargs`` default. The RAG route fails closed with
+    ``invalid_flag_combination`` (HTTP 400) when hints are supplied but
+    the resolved LLM provider does not advertise
+    ``ProviderRegistry.supports_upstream_routing``. Allowing the hint to
+    silently no-op would be misleading UX — a caller who pinned
+    ``order=["anthropic"]`` against ``provider=openai`` would expect the
+    routing to be honoured.
+
+    Fields mirror the dataclass exactly so the schema does not have to be
+    revised when OpenRouter adds new ``provider``-block keys we have not
+    surfaced in the UI yet — extending the dataclass alone is the
+    canonical way forward (the schema's ``extra="forbid"`` discipline
+    still rejects unknown fields, so a new key requires a deliberate
+    schema edit).
+
+    Carries no credential-shaped fields by design — a
+    ``@pytest.mark.security`` regression test pins the field set against
+    the same credential-hint list used for the registry rows.
+    """
+
+    order: list[str] = Field(
+        default_factory=list,
+        max_length=16,
+        description=(
+            "Preferred upstream-provider order (first match wins). "
+            "Bounded at 16 entries — OpenRouter's effective ceiling is "
+            "lower; this is a memory-side defence against payload bombs."
+        ),
+    )
+    allow_fallbacks: bool | None = Field(
+        default=None,
+        description=(
+            "When ``False``, OpenRouter refuses to fall back to upstreams "
+            "outside ``order`` / ``only``. ``None`` defers to OpenRouter's "
+            "own default."
+        ),
+    )
+    only: list[str] = Field(
+        default_factory=list,
+        max_length=16,
+        description="Allowlist of upstream slugs.",
+    )
+    ignore: list[str] = Field(
+        default_factory=list,
+        max_length=16,
+        description="Blocklist of upstream slugs.",
+    )
+    require_parameters: bool | None = Field(
+        default=None,
+        description=(
+            "When ``True``, only route to upstreams that honour every "
+            "request parameter (e.g. reasoning, tools)."
+        ),
+    )
+    data_collection: str | None = Field(
+        default=None,
+        pattern=r"^(allow|deny)$",
+        description=(
+            "``'allow'`` or ``'deny'`` — refuse upstreams that log "
+            "prompt/response content. Anything else rejected at the "
+            "schema layer."
+        ),
+    )
+
+    @field_validator("order", "only", "ignore")
+    @classmethod
+    def _validate_upstream_slugs(cls, value: list[str]) -> list[str]:
+        """Shape-check each slug at the schema boundary.
+
+        The dataclass downstream is pass-through (frozen, no validation),
+        so this is the only place malformed slugs are caught before they
+        reach OpenRouter. Control characters / oversize entries are
+        rejected here so the upstream API receives well-formed payloads
+        only.
+        """
+        slug_re = re.compile(_OPENROUTER_UPSTREAM_PATTERN)
+        for slug in value:
+            if not slug_re.fullmatch(slug):
+                raise ValueError("Upstream slug must match ^[a-z0-9][a-z0-9-]{0,63}$")
+        return value
+
+
 class RagQueryRequest(_BaseModel):
     """Body for ``POST /api/rag/query``.
 
@@ -799,6 +898,18 @@ class RagQueryRequest(_BaseModel):
             "keep the request body under ``/api/rag/{query,stream}``'s "
             "64 KiB cap.  The orchestrator drops prior-turn retrieval "
             "/ citations — only the rendered Q/A pairs reach the prompt."
+        ),
+    )
+    routing_hints: OpenRouterRoutingHintsSchema | None = Field(
+        default=None,
+        description=(
+            "Optional upstream-provider routing hints. Forwarded only "
+            "when the resolved provider advertises "
+            "``ProviderRegistry.supports_upstream_routing`` (currently "
+            "OpenRouter only); supplied against any other provider "
+            "raises 400 ``invalid_flag_combination``. Mirrors the CLI's "
+            "``--openrouter-provider`` / ``--openrouter-fallbacks`` "
+            "surface — the API never silently no-ops the hint."
         ),
     )
 

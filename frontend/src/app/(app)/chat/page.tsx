@@ -40,13 +40,15 @@ import {
   type KeyboardEvent,
 } from "react";
 
-import { ApiError, planRagQuery, streamRagAnswer } from "@/lib/api";
+import { ApiError, listProviders, planRagQuery, streamRagAnswer } from "@/lib/api";
 import type {
   CitationSchema,
   ConversationTurnSchema,
+  ProviderInfo,
   QueryPlanSchema,
   RagStreamFinalPayload,
 } from "@/lib/api-types";
+import { ModelPicker, type ModelPickerValue } from "@/components/model-picker";
 
 // One committed conversation turn. Mirrors the wire-tier
 // `ConversationTurnSchema` for the `{query, answer}` round-trip plus
@@ -98,6 +100,11 @@ export default function ChatPage(): JSX.Element {
   const [draft, setDraft] = useState("");
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [state, setState] = useState<InFlight>({ kind: "idle" });
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [pickerValue, setPickerValue] = useState<ModelPickerValue>({
+    provider: "",
+    model: "",
+  });
   const abortRef = useRef<AbortController | null>(null);
   const draftId = useId();
 
@@ -106,6 +113,24 @@ export default function ChatPage(): JSX.Element {
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
+    };
+  }, []);
+
+  // Provider catalogue (one fetch on mount). Same non-fatal fallback as
+  // the Ask page — empty list means picker offers `(default)` only.
+  // Defensive Array.isArray guard so a malformed payload never collapses
+  // the page render.
+  useEffect(() => {
+    let cancelled = false;
+    void listProviders()
+      .then((response) => {
+        if (!cancelled && Array.isArray(response?.providers)) {
+          setProviders(response.providers);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
     };
   }, []);
 
@@ -136,7 +161,13 @@ export default function ChatPage(): JSX.Element {
       setState({ kind: "planning", query });
       let planResponse: Awaited<ReturnType<typeof planRagQuery>>;
       try {
-        planResponse = await planRagQuery({ query });
+        planResponse = await planRagQuery({
+          query,
+          ...(pickerValue.provider !== ""
+            ? { provider: pickerValue.provider }
+            : {}),
+          ...(pickerValue.model !== "" ? { model: pickerValue.model } : {}),
+        });
       } catch (exc) {
         if (controller.signal.aborted) {
           // Cancelled mid-plan — drop the turn silently.
@@ -176,6 +207,13 @@ export default function ChatPage(): JSX.Element {
           {
             plan: planResponse.plan,
             history: historyForWire,
+            ...(pickerValue.provider !== ""
+              ? { provider: pickerValue.provider }
+              : {}),
+            ...(pickerValue.model !== "" ? { model: pickerValue.model } : {}),
+            ...(pickerValue.routing_hints !== undefined
+              ? { routing_hints: pickerValue.routing_hints }
+              : {}),
           },
           {
             onDelta: (text) => {
@@ -278,7 +316,7 @@ export default function ChatPage(): JSX.Element {
       setState({ kind: "idle" });
       abortRef.current = null;
     },
-    [historyForWire],
+    [historyForWire, pickerValue],
   );
 
   const handleSubmit = useCallback(
@@ -412,6 +450,12 @@ export default function ChatPage(): JSX.Element {
           placeholder="e.g. Summarise Apple's most recent AI risk disclosures."
           required
           className="w-full rounded border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+        />
+        <ModelPicker
+          providers={providers}
+          value={pickerValue}
+          onChange={setPickerValue}
+          disabled={inFlight}
         />
         <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
           <span>

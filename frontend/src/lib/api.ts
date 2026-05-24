@@ -19,6 +19,7 @@ import type {
   EdgarIdentityRegisterResponse,
   FilingListResponse,
   IngestTaskResponse,
+  OpenRouterRoutingHintsSchema,
   ProviderListResponse,
   ProviderValidateResponse,
   QueryPlanSchema,
@@ -350,6 +351,15 @@ export interface RagStreamRequestBody {
    * intentionally not on the wire.
    */
   history?: ConversationTurnSchema[];
+  /**
+   * Optional OpenRouter upstream-provider routing hints. Only forwarded
+   * when `provider === "openrouter"` (or any future provider that
+   * advertises `supports_upstream_routing`); supplying hints against any
+   * other provider returns 400 `invalid_flag_combination` at the
+   * backend. The SPA's `ModelPicker` hides the hint UI for providers
+   * whose `supports_upstream_routing` flag is `false`.
+   */
+  routing_hints?: OpenRouterRoutingHintsSchema;
 }
 
 /**

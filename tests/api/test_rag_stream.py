@@ -129,6 +129,7 @@ class _StubOrchestrator:
                 "max_output_tokens": max_output_tokens,
                 "history": history,
                 "prefer_structured_output": prefer_structured_output,
+                "routing_hints": kwargs.get("routing_hints"),
                 "llm_provider_name": getattr(self.llm, "provider_name", None),
             }
         )
@@ -869,3 +870,116 @@ class TestRagStreamHistoryPrivacyContract:
         assert any("rag_stream_completed" in line and "history_turns=1" in line for line in audit)
         assert all(secret_q not in line for line in audit)
         assert all(secret_a not in line for line in audit)
+
+
+# ---------------------------------------------------------------------------
+# OpenRouter upstream-provider routing hints (streaming)
+# ---------------------------------------------------------------------------
+
+
+class TestRagStreamRoutingHints:
+    """Mirror of TestRagQueryRoutingHints but for the SSE surface.
+
+    Streaming and non-streaming MUST share the same guard semantics so a
+    misconfiguration cannot surface as ``invalid_flag_combination`` on one
+    and a silent no-op on the other.
+    """
+
+    def test_hints_forwarded_for_openrouter(self, rag_stream_app_factory) -> None:
+        events = [StreamEvent(final=_default_final_result(citations=[]))]
+        app, _build, orch = rag_stream_app_factory(events=events)
+        client = TestClient(app, base_url="https://testserver")
+        with client.stream(
+            "POST",
+            "/api/rag/stream",
+            json={
+                "plan": _sample_plan_payload(),
+                "provider": "openrouter",
+                "routing_hints": {
+                    "order": ["anthropic"],
+                    "allow_fallbacks": False,
+                },
+            },
+            headers={
+                "X-Provider-Key-openrouter": "sk-or-1234",  # pragma: allowlist secret
+            },
+        ) as response:
+            for _ in response.iter_bytes():
+                pass
+            assert response.status_code == 200
+        hints = orch.calls[0]["routing_hints"]
+        assert hints is not None
+        assert hints.order == ("anthropic",)
+        assert hints.allow_fallbacks is False
+
+    def test_hints_against_non_openrouter_provider_rejected_pre_stream(
+        self,
+        rag_stream_app_factory,
+    ) -> None:
+        # Pre-stream guard: the route returns 400 *before* opening the
+        # SSE response body so the client can treat the failure as
+        # do-not-retry (the SSE path is reserved for in-stream errors).
+        app, _build, orch = rag_stream_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        response = client.post(
+            "/api/rag/stream",
+            json={
+                "plan": _sample_plan_payload(),
+                "provider": "openai",
+                "routing_hints": {"order": ["anthropic"]},
+            },
+            headers={"X-Provider-Key-openai": "sk-1234"},  # pragma: allowlist secret
+        )
+        assert response.status_code == 400
+        body = response.json()
+        assert body["error"] == "invalid_flag_combination"
+        assert orch.calls == []
+
+    def test_audit_lines_carry_or_hints_summary(
+        self,
+        rag_stream_app_factory,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        events = [StreamEvent(final=_default_final_result(citations=[]))]
+        app, _build, _orch = rag_stream_app_factory(events=events)
+        client = TestClient(app, base_url="https://testserver")
+        package_logger = logging.getLogger(LOGGER_NAME)
+        prior_propagate = package_logger.propagate
+        package_logger.propagate = True
+        sentinel = "stream-secret-upstream"
+        try:
+            with (
+                caplog.at_level(logging.INFO, logger=LOGGER_NAME),
+                client.stream(
+                    "POST",
+                    "/api/rag/stream",
+                    json={
+                        "plan": _sample_plan_payload(),
+                        "provider": "openrouter",
+                        "routing_hints": {
+                            "order": [sentinel],
+                            "allow_fallbacks": True,
+                        },
+                    },
+                    headers={
+                        "X-Provider-Key-openrouter": "sk-or-1234",  # pragma: allowlist secret
+                    },
+                ) as response,
+            ):
+                for _ in response.iter_bytes():
+                    pass
+        finally:
+            package_logger.propagate = prior_propagate
+
+        audit = [r.getMessage() for r in caplog.records if "SECURITY_AUDIT:" in r.getMessage()]
+        # Both ``rag_stream`` (open) and ``rag_stream_completed`` (close)
+        # MUST carry the ``or_hints=...`` summary; the upstream slug
+        # itself NEVER reaches any audit line.
+        assert any(
+            "rag_stream" in line and "or_hints=order=1 fallbacks=True" in line for line in audit
+        )
+        assert any(
+            "rag_stream_completed" in line and "or_hints=order=1 fallbacks=True" in line
+            for line in audit
+        )
+        assert all(sentinel not in line for line in audit)

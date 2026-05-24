@@ -254,6 +254,15 @@ describe("ChatPage — cancellation semantics", () => {
           { status: 200 },
         );
       }
+      // The page calls listProviders() on mount;
+      // serve it an empty catalogue so the consume-once `pending`
+      // body is reserved for the SSE stream call below.
+      if (url === "/api/admin/providers/") {
+        return new Response(
+          JSON.stringify({ providers: [], total: 0 }),
+          { status: 200 },
+        );
+      }
       return pending.response;
     });
     globalThis.fetch = fetchMock as unknown as typeof fetch;
@@ -293,6 +302,12 @@ describe("ChatPage — cancellation semantics", () => {
             provider: "openai",
             model: "gpt-test",
           }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/admin/providers/") {
+        return new Response(
+          JSON.stringify({ providers: [], total: 0 }),
           { status: 200 },
         );
       }

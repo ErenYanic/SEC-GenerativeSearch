@@ -37,13 +37,15 @@ import {
   type JSX,
 } from "react";
 
-import { ApiError, planRagQuery, streamRagAnswer } from "@/lib/api";
+import { ApiError, listProviders, planRagQuery, streamRagAnswer } from "@/lib/api";
 import type {
   AnswerMode,
   CitationSchema,
+  ProviderInfo,
   QueryPlanSchema,
   RagStreamFinalPayload,
 } from "@/lib/api-types";
+import { ModelPicker, type ModelPickerValue } from "@/components/model-picker";
 
 const ANSWER_MODES: AnswerMode[] = [
   "concise",
@@ -86,6 +88,11 @@ export default function RagPage(): JSX.Element {
     kind: "idle",
   });
   const [citations, setCitations] = useState<CitationSchema[]>([]);
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [pickerValue, setPickerValue] = useState<ModelPickerValue>({
+    provider: "",
+    model: "",
+  });
   const abortRef = useRef<AbortController | null>(null);
 
   const queryId = useId();
@@ -96,6 +103,27 @@ export default function RagPage(): JSX.Element {
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
+    };
+  }, []);
+
+  // Load the provider catalogue once. Failure is non-fatal: the picker
+  // simply offers the empty `(default)` provider option and the request
+  // falls back to settings.llm.default_provider on the backend. The
+  // catalogue carries `supports_upstream_routing` so the ModelPicker
+  // can gate the OpenRouter routing UI client-side. We defend against a
+  // malformed payload (no `providers` array) so a test or proxy quirk
+  // never collapses the page render.
+  useEffect(() => {
+    let cancelled = false;
+    void listProviders()
+      .then((response) => {
+        if (!cancelled && Array.isArray(response?.providers)) {
+          setProviders(response.providers);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
     };
   }, []);
 
@@ -116,7 +144,18 @@ export default function RagPage(): JSX.Element {
       setCitations([]);
       setGeneration({ kind: "idle" });
       try {
-        const response = await planRagQuery({ query: query.trim() });
+        const response = await planRagQuery({
+          query: query.trim(),
+          // Plan + generate share the same provider so the audit log
+          // ties them together; `routing_hints` is intentionally NOT
+          // sent on /plan — the CLI doesn't either, and OpenRouter's
+          // routing block has no semantics for the query-understanding
+          // request shape.
+          ...(pickerValue.provider !== ""
+            ? { provider: pickerValue.provider }
+            : {}),
+          ...(pickerValue.model !== "" ? { model: pickerValue.model } : {}),
+        });
         setPlan(response.plan);
         setPlanMeta({ provider: response.provider, model: response.model });
         setModeOverride(response.plan.suggested_answer_mode);
@@ -129,7 +168,7 @@ export default function RagPage(): JSX.Element {
         setPlanning(false);
       }
     },
-    [planning, query],
+    [planning, query, pickerValue.provider, pickerValue.model],
   );
 
   const handleGenerate = useCallback(async () => {
@@ -147,6 +186,13 @@ export default function RagPage(): JSX.Element {
         {
           plan,
           mode: modeOverride ?? undefined,
+          ...(pickerValue.provider !== ""
+            ? { provider: pickerValue.provider }
+            : {}),
+          ...(pickerValue.model !== "" ? { model: pickerValue.model } : {}),
+          ...(pickerValue.routing_hints !== undefined
+            ? { routing_hints: pickerValue.routing_hints }
+            : {}),
         },
         {
           onDelta: (text) => {
@@ -215,7 +261,7 @@ export default function RagPage(): JSX.Element {
         retryable: true,
       });
     }
-  }, [plan, modeOverride]);
+  }, [plan, modeOverride, pickerValue]);
 
   const handleCancel = useCallback(() => {
     abortRef.current?.abort();
@@ -260,6 +306,12 @@ export default function RagPage(): JSX.Element {
           placeholder="e.g. How did Apple describe AI risk in its most recent 10-K?"
           required
           className="w-full rounded border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+        />
+        <ModelPicker
+          providers={providers}
+          value={pickerValue}
+          onChange={setPickerValue}
+          disabled={planning || generating}
         />
         {planError !== null ? (
           <p

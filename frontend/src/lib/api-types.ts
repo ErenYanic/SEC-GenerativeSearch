@@ -168,3 +168,30 @@ export interface RagStreamFinalPayload {
   refused: boolean;
 }
 
+/**
+ * OpenRouter upstream-provider routing hints — wire shape of the
+ * `OpenRouterRoutingHintsSchema` Pydantic model.
+ *
+ * Only forwarded to the backend on `POST /api/rag/{query,stream}`; only
+ * `OpenRouterProvider` consumes it. Supplying hints against any other
+ * provider yields HTTP 400 `invalid_flag_combination` at the backend —
+ * the SPA's `ModelPicker` hides the routing UI for providers whose
+ * `supports_upstream_routing` capability is `false`, so the failure
+ * surface should only fire if a future provider drops the capability
+ * without the UI being updated.
+ *
+ * Fields mirror the dataclass exactly. The v1 UI only surfaces
+ * `order` + `allow_fallbacks` (matching the CLI's
+ * `--openrouter-provider` / `--openrouter-fallbacks` surface); the
+ * remaining fields are typed so future UI additions don't need a
+ * schema change.
+ */
+export interface OpenRouterRoutingHintsSchema {
+  order?: string[];
+  allow_fallbacks?: boolean | null;
+  only?: string[];
+  ignore?: string[];
+  require_parameters?: boolean | null;
+  data_collection?: "allow" | "deny" | null;
+}
+
