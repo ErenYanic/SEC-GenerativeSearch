@@ -57,7 +57,7 @@ export function ProviderKeyRow({
   }, []);
 
   const handleSave = useCallback(
-    (event: FormEvent<HTMLFormElement>) => {
+    async (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
       if (busy !== "idle") {
         return;
@@ -65,7 +65,7 @@ export function ProviderKeyRow({
       setBusy("saving");
       setErrorMessage(null);
       try {
-        setProviderKey(provider.name, draftKey);
+        await setProviderKey(provider.name, draftKey);
         // Wipe the cleartext copy from the closure immediately.
         setDraftKey("");
         setEditing(false);
@@ -121,9 +121,9 @@ export function ProviderKeyRow({
     }
   }, [busy, draftKey, provider.name, provider.surface, storedKey]);
 
-  const handleRemove = useCallback(() => {
+  const handleRemove = useCallback(async () => {
     try {
-      removeProviderKey(provider.name);
+      await removeProviderKey(provider.name);
     } catch {
       // Removal is best-effort; nothing to surface.
     }
@@ -181,7 +181,9 @@ export function ProviderKeyRow({
 
       {editing ? (
         <form
-          onSubmit={handleSave}
+          onSubmit={(event) => {
+            void handleSave(event);
+          }}
           className="space-y-2"
           aria-label={`Set ${provider.name} key`}
         >
@@ -251,7 +253,9 @@ export function ProviderKeyRow({
           {storedKey !== undefined ? (
             <button
               type="button"
-              onClick={handleRemove}
+              onClick={() => {
+                void handleRemove();
+              }}
               className="rounded border border-red-300 px-3 py-1.5 text-sm text-red-700 hover:bg-red-50"
             >
               Remove

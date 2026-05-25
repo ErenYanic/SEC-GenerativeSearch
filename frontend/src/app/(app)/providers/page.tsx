@@ -24,6 +24,7 @@ import {
 } from "react";
 
 import { ProviderKeyRow } from "@/components/provider-key-row";
+import { ProviderVaultCard } from "@/components/provider-vault-card";
 import { ApiError, listProviders } from "@/lib/api";
 import type { ProviderInfo } from "@/lib/api-types";
 import {
@@ -94,6 +95,8 @@ export default function ProviderSettingsPage(): JSX.Element {
           tab closes or you sign out.
         </p>
       </header>
+
+      <ProviderVaultCard />
 
       <section
         aria-labelledby="provider-list-heading"
