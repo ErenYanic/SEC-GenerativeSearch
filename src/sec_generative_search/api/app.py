@@ -161,8 +161,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             user_store = UserStore(registry)
         except Exception:  # pragma: no cover — defensive log
             logger.exception(
-                "UserStore failed to initialise — user-tier auth surface "
-                "will not be available."
+                "UserStore failed to initialise — user-tier auth surface will not be available."
             )
             user_store = None
 

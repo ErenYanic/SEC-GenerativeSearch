@@ -36,7 +36,11 @@ dependencies = [
     "chromadb>=1.0",
 
     # API framework
-    "fastapi>=0.115",
+    # ``!=0.136.3`` excludes the single compromised release flagged by
+    # MAL-2026-4750 (osv.dev malicious-package advisory). Drop the
+    # exclusion once upstream publishes a known-good replacement and
+    # the advisory is withdrawn.
+    "fastapi>=0.115,!=0.136.3",
     "uvicorn[standard]>=0.34",
 
     # CLI
