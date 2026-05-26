@@ -13,6 +13,7 @@ import pytest
 from pydantic import ValidationError
 
 from sec_generative_search.config.settings import (
+    ApiSettings,
     DatabaseSettings,
     EmbeddingSettings,
     LLMSettings,
@@ -20,6 +21,7 @@ from sec_generative_search.config.settings import (
     RAGSettings,
     Settings,
     reload_settings,
+    resolve_auth_pepper_from_values,
     resolve_encryption_key_from_values,
 )
 
@@ -630,3 +632,79 @@ class TestApiSettings:
         s = Settings()
         assert s.api.key is None
         assert s.api.admin_key is None
+
+
+@pytest.mark.security
+class TestAuthPepperResolution:
+    """Security: API_AUTH_PEPPER / API_AUTH_PEPPER_FILE mutual exclusion and
+    file validation — mirrors the encryption-key contract byte-for-byte so
+    the operator story (Scenario A inline / Scenario B+C file-mount) carries
+    over without a second mental model.
+    """
+
+    def test_direct_pepper_used(self) -> None:
+        assert resolve_auth_pepper_from_values("pepper-not-a-secret", None) == "pepper-not-a-secret"
+
+    def test_no_source_returns_none(self) -> None:
+        assert resolve_auth_pepper_from_values(None, None) is None
+
+    def test_both_sources_is_error(self) -> None:
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            resolve_auth_pepper_from_values("pepper-not-a-secret", "/some/file")
+
+    def test_pepper_file_read(self, tmp_path: Path) -> None:
+        pepper_file = tmp_path / "pepper.key"
+        pepper_file.write_text("file-pepper-not-a-secret\n")
+        assert resolve_auth_pepper_from_values(None, str(pepper_file)) == "file-pepper-not-a-secret"
+
+    def test_pepper_file_missing_is_error(self, tmp_path: Path) -> None:
+        missing = tmp_path / "nonexistent.key"
+        with pytest.raises(ValueError, match="does not exist"):
+            resolve_auth_pepper_from_values(None, str(missing))
+
+    def test_pepper_file_empty_is_error(self, tmp_path: Path) -> None:
+        empty = tmp_path / "empty.key"
+        empty.write_text("")
+        with pytest.raises(ValueError, match="empty"):
+            resolve_auth_pepper_from_values(None, str(empty))
+
+    def test_pepper_file_is_directory_is_error(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="not a file"):
+            resolve_auth_pepper_from_values(None, str(tmp_path))
+
+    def test_empty_string_auth_pepper_becomes_none(
+        self,
+        clean_env: pytest.MonkeyPatch,
+    ) -> None:
+        """An empty API_AUTH_PEPPER must not authenticate the empty HMAC."""
+        clean_env.setenv("API_AUTH_PEPPER", "")
+        s = ApiSettings()
+        assert s.auth_pepper is None
+
+    def test_pepper_resolved_through_file_at_settings_load(
+        self,
+        clean_env: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """File-path indirection must surface the resolved pepper on the
+        loaded ``ApiSettings`` so downstream callers (UserStore, auth
+        routes) read it as a plain string."""
+        pepper_file = tmp_path / "pepper.key"
+        pepper_file.write_text("file-pepper-not-a-secret\n")
+        clean_env.setenv("API_AUTH_PEPPER_FILE", str(pepper_file))
+        s = ApiSettings()
+        assert s.auth_pepper == "file-pepper-not-a-secret"
+
+    def test_pepper_both_sources_rejected_at_settings_load(
+        self,
+        clean_env: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Operator setting both env vars must be a hard fail, not silently
+        prefer one — same contract as DB_ENCRYPTION_KEY."""
+        pepper_file = tmp_path / "pepper.key"
+        pepper_file.write_text("file-pepper-not-a-secret\n")
+        clean_env.setenv("API_AUTH_PEPPER", "inline-pepper-not-a-secret")
+        clean_env.setenv("API_AUTH_PEPPER_FILE", str(pepper_file))
+        with pytest.raises(ValidationError, match="mutually exclusive"):
+            ApiSettings()

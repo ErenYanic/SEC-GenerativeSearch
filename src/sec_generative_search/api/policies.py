@@ -105,6 +105,41 @@ ROUTE_POLICIES: tuple[tuple[str, str | None, RoutePolicy], ...] = (
         None,
         RoutePolicy(rate_category="session", max_body_bytes=1 * _KIB),
     ),
+    # User-tier authentication. ``login`` + ``login-params`` are the
+    # brute-force surface — kept under a tight per-IP bucket (default
+    # 5 rpm) AND a per-username sliding window enforced inside the
+    # route handler (default 3 rpm). Both must allow the request.
+    # ``password`` and ``session`` (DELETE / sign-out) are authenticated
+    # follow-ups and ride the ``session`` bucket — they are not the
+    # online-guess surface.
+    (
+        "/api/auth/login-params",
+        "GET",
+        RoutePolicy(rate_category="login", max_body_bytes=1 * _KIB),
+    ),
+    (
+        "/api/auth/login",
+        "POST",
+        RoutePolicy(rate_category="login", max_body_bytes=1 * _KIB),
+    ),
+    (
+        "/api/auth/password",
+        "POST",
+        RoutePolicy(rate_category="session", max_body_bytes=4 * _KIB),
+    ),
+    (
+        "/api/auth/session",
+        "DELETE",
+        RoutePolicy(rate_category="session", max_body_bytes=1 * _KIB),
+    ),
+    # Admin user management. ``delete`` bucket reuses the
+    # destructive-tier rate so a leaking admin key cannot churn user
+    # rows in a tight loop.
+    (
+        "/api/admin/users",
+        None,
+        RoutePolicy(rate_category="delete", max_body_bytes=4 * _KIB),
+    ),
     # Provider-key validation: bound generously above the worst-case
     # envelope (provider slug + bearer key + optional model name).
     (

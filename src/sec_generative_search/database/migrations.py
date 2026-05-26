@@ -114,7 +114,67 @@ def _migrate_v2_provider_credentials(conn: Any) -> None:
     """)
 
 
-MIGRATIONS: tuple[tuple[int, MigrationFn], ...] = ((2, _migrate_v2_provider_credentials),)
+def _migrate_v3_users(conn: Any) -> None:
+    """Create the per-user accounts + encrypted vault table.
+
+    Salient fixed points:
+
+    - ``auth_hash`` is ``HMAC-SHA256(server_pepper, auth_proof)``, a
+      32-byte BLOB. Fixed width so a row-level truncation surfaces at
+      the DB layer rather than as a silent comparison failure.
+    - ``ciphertext_vault`` is AES-GCM ciphertext + 16-byte auth tag,
+      client-side under the browser-derived KEK. The server never sees
+      the KEK. Empty at enrolment; grows as the user adds provider keys
+      and EDGAR identity.
+    - ``vault_iv`` is the fresh 12-byte IV for the current ciphertext.
+      Rotates on every mutation; the salt does not.
+    - ``kdf_algo`` is the forward-only rotation seam (initial
+      ``'pbkdf2-sha256'``). A row's algorithm may be raised on a future
+      password change (Argon2id-via-WASM), never lowered. Code paths
+      reading a vault MUST honour the row's recorded ``kdf_algo`` +
+      ``pbkdf2_iterations``; the global default applies only to new
+      enrolments.
+    - **No separate ``edgar_name`` / ``edgar_email`` columns.** EDGAR
+      identity lives inside the encrypted vault — the columns don't
+      exist, so they trivially cannot leak via a future
+      misconfigured-log incident. Flips the
+      ``edgar_identity_persistence_decision`` memory.
+    - ``failed_login_count`` + ``locked_until`` carry the account-level
+      soft-lockout state (10 failures within 15 min → 15-min soft
+      lock; auto-clears; admin-tier early-clear seam is
+      ``POST /api/admin/users/{id}/unlock``).
+    - ``must_enrol`` is the single-use flag that closes the enrolment
+      replay: the route flips it to ``FALSE`` on the first successful
+      consume; a replayed token then surfaces as 409.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            salt_m BLOB NOT NULL,
+            auth_hash BLOB NOT NULL,
+            ciphertext_vault BLOB NOT NULL,
+            vault_iv BLOB NOT NULL,
+            kdf_algo TEXT NOT NULL DEFAULT 'pbkdf2-sha256',
+            pbkdf2_iterations INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            last_login TEXT,
+            failed_login_count INTEGER NOT NULL DEFAULT 0,
+            locked_until TEXT,
+            must_enrol INTEGER NOT NULL DEFAULT 0,
+            enrolment_nonce TEXT
+        )
+    """)
+    # ``enrolment_nonce`` carries the nonce of the most-recently-issued
+    # enrolment token while ``must_enrol = 1``.  Single-use is enforced
+    # by clearing the nonce alongside the ``must_enrol`` flip — a
+    # replayed token's nonce no longer matches.
+
+
+MIGRATIONS: tuple[tuple[int, MigrationFn], ...] = (
+    (2, _migrate_v2_provider_credentials),
+    (3, _migrate_v3_users),
+)
 
 
 _SCHEMA_VERSION_DDL = """

@@ -42,6 +42,7 @@ from sec_generative_search.api.middleware import (
     RateLimitMiddleware,
     SecurityHeadersMiddleware,
 )
+from sec_generative_search.api.routes.auth import router as auth_router
 from sec_generative_search.api.routes.filings import router as filings_router
 from sec_generative_search.api.routes.health import router as health_router
 from sec_generative_search.api.routes.ingest import router as ingest_router
@@ -51,6 +52,7 @@ from sec_generative_search.api.routes.resources import router as resources_route
 from sec_generative_search.api.routes.search import router as search_router
 from sec_generative_search.api.routes.session import router as session_router
 from sec_generative_search.api.routes.status import router as status_router
+from sec_generative_search.api.routes.users import router as users_router
 from sec_generative_search.api.tasks import TaskManager, run_retention_eviction_safe
 from sec_generative_search.api.websocket import router as websocket_router
 from sec_generative_search.config.settings import get_settings
@@ -60,6 +62,7 @@ from sec_generative_search.core.logging import get_logger
 from sec_generative_search.core.types import EmbedderStamp
 from sec_generative_search.database import ChromaDBClient, FilingStore, MetadataRegistry
 from sec_generative_search.database.credentials import EncryptedCredentialStore
+from sec_generative_search.database.users import UserStore
 from sec_generative_search.pipeline.fetch import FilingFetcher
 from sec_generative_search.pipeline.orchestrator import PipelineOrchestrator
 from sec_generative_search.providers.factory import build_embedder
@@ -146,6 +149,41 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
             encrypted_store = None
 
+    # UserStore is gated on SQLCipher (the table holds ``auth_hash`` +
+    # the ciphertext vault; plaintext is unacceptable) and on the
+    # pepper-required-when-non-empty contract. Construction refuses
+    # loudly when either invariant is violated; we surface the refusal
+    # at startup so an operator who rotates the pepper without
+    # realising loses the API process, not their users' next login.
+    user_store: UserStore | None = None
+    if registry.encrypted:
+        try:
+            user_store = UserStore(registry)
+        except Exception:  # pragma: no cover — defensive log
+            logger.exception(
+                "UserStore failed to initialise — user-tier auth surface "
+                "will not be available."
+            )
+            user_store = None
+
+    # Per-username login rate limiter. Sibling to the ``validate``
+    # per-session window in :class:`RateLimitMiddleware` — built here
+    # rather than in middleware because the username arrives in the
+    # JSON body, not the cookie header, and consuming the body in
+    # middleware would break Starlette's request flow.
+    login_username_window = None
+    if settings.api.rate_limit_login_per_username > 0:
+        from sec_generative_search.api.middleware import _SlidingWindow
+
+        login_username_window = _SlidingWindow(settings.api.rate_limit_login_per_username)
+
+    # 9c. ``session_id → user_id`` mapping for the user-tier routes.
+    # Process-local dict; entries evict on logout and on rotation.  The
+    # parallel ``session_store`` (provider-key cache) is keyed by
+    # ``session_id`` opaquely — this dict adds the typed link the auth
+    # follow-up routes need without widening that store's protocol.
+    session_user_index: dict[str, int] = {}
+
     # Background ingestion TaskManager. The fetcher / orchestrator chain
     # is built fresh per app — both are stateless apart from the
     # process-global ``edgar.set_identity`` mutation, which the manager
@@ -181,14 +219,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.session_store = session_store
     app.state.edgar_identity_store = edgar_identity_store
     app.state.encrypted_credential_store = encrypted_store
+    app.state.user_store = user_store
+    app.state.login_username_window = login_username_window
+    app.state.session_user_index = session_user_index
     app.state.task_manager = task_manager
 
     logger.info(
-        "API ready: embedder=%s/%s, dim=%d, encrypted_store=%s",
+        "API ready: embedder=%s/%s, dim=%d, encrypted_store=%s, user_store=%s",
         stamp.provider,
         stamp.model,
         stamp.dimension,
         "yes" if encrypted_store is not None else "no",
+        "yes" if user_store is not None else "no",
     )
 
     # One-shot startup retention sweep. Best-effort: a failure inside
@@ -282,6 +324,7 @@ def create_app() -> FastAPI:
         validate_rpm=settings.api.rate_limit_validate,
         validate_per_session_rpm=settings.api.rate_limit_validate_per_session,
         session_rpm=settings.api.rate_limit_session,
+        login_rpm=settings.api.rate_limit_login,
     )
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(
@@ -304,6 +347,8 @@ def create_app() -> FastAPI:
     app.include_router(health_router, prefix="/api", tags=["meta"])
     app.include_router(status_router, prefix="/api/status", tags=["status"])
     app.include_router(session_router, prefix="/api", tags=["session"])
+    app.include_router(auth_router, prefix="/api", tags=["auth"])
+    app.include_router(users_router, prefix="/api/admin", tags=["admin-users"])
     app.include_router(providers_router, prefix="/api/providers", tags=["providers"])
     app.include_router(filings_router, prefix="/api/filings", tags=["filings"])
     app.include_router(search_router, prefix="/api/search", tags=["search"])

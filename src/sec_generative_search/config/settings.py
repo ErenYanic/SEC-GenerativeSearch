@@ -154,6 +154,43 @@ class ChunkingSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="CHUNKING_")
 
 
+def _resolve_secret_from_value_or_file(
+    value: str | None,
+    file_path: str | None,
+    *,
+    value_env_name: str,
+    file_env_name: str,
+) -> str | None:
+    """Resolve a secret from a direct value or a file path.
+
+    Enforces mutual exclusion between the two sources and validates the
+    file when ``file_path`` is used. Returns the resolved secret, or
+    ``None`` if neither source is set. The env-var names are passed
+    explicitly so error messages name the operator-facing knob rather
+    than the internal field.
+    """
+    if value and file_path:
+        raise ValueError(
+            f"{value_env_name} and {file_env_name} are mutually exclusive. Set only one."
+        )
+
+    if value:
+        return value
+
+    if file_path:
+        path = Path(file_path)
+        if not path.exists():
+            raise ValueError(f"{file_env_name} '{file_path}' does not exist.")
+        if not path.is_file():
+            raise ValueError(f"{file_env_name} '{file_path}' is not a file.")
+        content = path.read_text().strip()
+        if not content:
+            raise ValueError(f"{file_env_name} '{file_path}' is empty.")
+        return content
+
+    return None
+
+
 def resolve_encryption_key_from_values(key: str | None, key_file: str | None) -> str | None:
     """Resolve an encryption key from a direct value or file path.
 
@@ -165,26 +202,36 @@ def resolve_encryption_key_from_values(key: str | None, key_file: str | None) ->
     ``MetadataRegistry`` (runtime resolution without re-instantiating
     settings).
     """
-    if key and key_file:
-        raise ValueError(
-            "DB_ENCRYPTION_KEY and DB_ENCRYPTION_KEY_FILE are mutually exclusive. Set only one."
-        )
+    return _resolve_secret_from_value_or_file(
+        key,
+        key_file,
+        value_env_name="DB_ENCRYPTION_KEY",
+        file_env_name="DB_ENCRYPTION_KEY_FILE",
+    )
 
-    if key:
-        return key
 
-    if key_file:
-        key_path = Path(key_file)
-        if not key_path.exists():
-            raise ValueError(f"DB_ENCRYPTION_KEY_FILE '{key_file}' does not exist.")
-        if not key_path.is_file():
-            raise ValueError(f"DB_ENCRYPTION_KEY_FILE '{key_file}' is not a file.")
-        key_content = key_path.read_text().strip()
-        if not key_content:
-            raise ValueError(f"DB_ENCRYPTION_KEY_FILE '{key_file}' is empty.")
-        return key_content
+def resolve_auth_pepper_from_values(
+    pepper: str | None,
+    pepper_file: str | None,
+) -> str | None:
+    """Resolve the HMAC auth pepper from a direct value or file path.
 
-    return None
+    Mirrors :func:`resolve_encryption_key_from_values` byte-for-byte —
+    the pepper for ``auth_hash`` shares the deployment story of the
+    SQLCipher key: an env-var inline in Scenario A, a file mount in
+    Scenario B/C secrets managers. The two sources are mutually
+    exclusive.
+
+    Returns ``None`` when neither source is set; the runtime caller
+    (``UserStore`` construction) is responsible for refusing to operate
+    a non-empty ``users`` table with a missing pepper.
+    """
+    return _resolve_secret_from_value_or_file(
+        pepper,
+        pepper_file,
+        value_env_name="API_AUTH_PEPPER",
+        file_env_name="API_AUTH_PEPPER_FILE",
+    )
 
 
 _DEPLOYMENT_PROFILE_DEFAULTS: dict[str, tuple[int, int]] = {
@@ -556,9 +603,27 @@ class ApiSettings(BaseSettings):
     rate_limit_validate: int = 10
     rate_limit_validate_per_session: int = 5
     rate_limit_session: int = 20
+    # User-tier login rate limits. Same pattern as ``validate``:
+    # per-IP + per-username sliding windows; both must allow the
+    # request. ``login`` floors are aggressively low because the route
+    # is the brute-force surface; tune higher only in closed-network
+    # deployments. ``0`` disables (Scenario A).
+    rate_limit_login: int = 5
+    rate_limit_login_per_username: int = 3
 
     # Admin key for destructive operations; unset = unrestricted (Scenario A).
     admin_key: str | None = None
+
+    # HMAC pepper for the ``auth_hash`` column. Mutually exclusive with
+    # ``auth_pepper_file``. Settings load coerces empty string to
+    # ``None`` (same pattern as the API keys); the runtime ``UserStore``
+    # refuses to operate a non-empty ``users`` table when both sources
+    # are unset. The pepper turns a leaked ``auth_hash`` column into a
+    # useless artefact for offline attack — without the
+    # pepper, ``HMAC(pepper, auth_proof)`` collapses to ``SHA256``-shaped
+    # output an attacker could brute-force from a stolen DB.
+    auth_pepper: str | None = None
+    auth_pepper_file: str | None = None
 
     # Per-session EDGAR credentials requirement.
     edgar_session_required: bool = False
@@ -580,10 +645,23 @@ class ApiSettings(BaseSettings):
     max_filings_per_request: int = 0
     max_task_duration_minutes: int = 0
 
-    @field_validator("key", "admin_key", mode="before")
+    @field_validator("key", "admin_key", "auth_pepper", mode="before")
     @classmethod
     def _empty_str_to_none(cls, v: str | None) -> str | None:
         return v or None
+
+    @model_validator(mode="after")
+    def _resolve_auth_pepper(self) -> "ApiSettings":
+        """Resolve ``auth_pepper`` from ``auth_pepper_file`` if set.
+
+        Mutual-exclusion + file validation lives in
+        :func:`resolve_auth_pepper_from_values`. Runs unconditionally —
+        an unset pair simply leaves ``auth_pepper`` as ``None``; the
+        runtime ``UserStore`` is the load-bearing refuser when the
+        ``users`` table needs the pepper.
+        """
+        self.auth_pepper = resolve_auth_pepper_from_values(self.auth_pepper, self.auth_pepper_file)
+        return self
 
     model_config = SettingsConfigDict(env_prefix="API_")
 

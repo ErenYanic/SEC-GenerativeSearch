@@ -375,27 +375,32 @@ class TestApplyPendingMigrations:
         """
         conn = self._open_stamped(tmp_db_path)
 
-        def _v2_ok(c: Any) -> None:
-            c.execute("CREATE TABLE _v2_marker (x INTEGER)")
+        def _v100_ok(c: Any) -> None:
+            c.execute("CREATE TABLE _v100_marker (x INTEGER)")
 
-        def _v3_raises(c: Any) -> None:
+        def _v101_raises(c: Any) -> None:
             raise RuntimeError("simulated migration failure")
 
         try:
             with pytest.raises(RuntimeError, match="simulated migration failure"):
                 apply_pending_migrations(
                     conn,
-                    migrations=((2, _v2_ok), (3, _v3_raises)),
+                    migrations=((100, _v100_ok), (101, _v101_raises)),
                 )
-            # v2 ran and was stamped *before* v3 raised; commit the
+            # v100 ran and was stamped *before* v101 raised; commit the
             # transaction so the next open sees the stamped state.
             conn.commit()
         finally:
             conn.close()
 
-        # v2 stamped, v3 not stamped — exactly the partial state the
-        # forward-only design relies on.
-        assert [row[0] for row in _read_schema_versions(tmp_db_path)] == [1, 2]
+        # v100 stamped, v101 not stamped — exactly the partial state
+        # the forward-only design relies on.  Baseline carries v1 plus
+        # every production migration (kept in lockstep so the assertion
+        # tracks the source of truth).
+        assert [row[0] for row in _read_schema_versions(tmp_db_path)] == [
+            *self._baseline_stamps(),
+            100,
+        ]
 
     @pytest.mark.security
     def test_descending_migrations_rejected(self, tmp_db_path: str) -> None:

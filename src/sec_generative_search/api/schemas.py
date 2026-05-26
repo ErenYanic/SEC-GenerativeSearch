@@ -18,6 +18,10 @@ import re
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 __all__ = [
+    "AdminUserCreateRequest",
+    "AdminUserCreateResponse",
+    "AdminUserDeleteResponse",
+    "AdminUserUnlockResponse",
     "BulkDeleteRequest",
     "BulkDeleteResponse",
     "CitationSchema",
@@ -29,6 +33,8 @@ __all__ = [
     "EdgarIdentityClearResponse",
     "EdgarIdentityRegisterResponse",
     "EdgarIdentityRequest",
+    "EnrolmentCompleteRequest",
+    "EnrolmentCompleteResponse",
     "FilingListResponse",
     "FilingSchema",
     "GpuStatusResponse",
@@ -37,7 +43,12 @@ __all__ = [
     "IngestRequest",
     "IngestResultSchema",
     "IngestTaskResponse",
+    "LoginParamsResponse",
+    "LoginRequest",
+    "LoginResponse",
     "OpenRouterRoutingHintsSchema",
+    "PasswordChangeRequest",
+    "PasswordChangeResponse",
     "ProviderInfoSchema",
     "ProviderListResponse",
     "ProviderValidateRequest",
@@ -57,6 +68,8 @@ __all__ = [
     "TaskProgressSchema",
     "TaskStatusResponse",
     "TokenUsageSchema",
+    "VaultUpdateRequest",
+    "VaultUpdateResponse",
 ]
 
 
@@ -1239,3 +1252,205 @@ class GpuStatusResponse(_BaseModel):
             "auto-unload. Always 0 for hosted embedders."
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# User-tier authentication schemas
+# ---------------------------------------------------------------------------
+
+
+# Username shape: alphanumeric + `._-`, length 1-64, must start with an
+# alnum.  Permissive enough for an email-as-username deployment while
+# excluding control characters, whitespace, and shell metacharacters
+# that the wire layer cannot trust.
+_USERNAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+
+
+# KDF algorithm rotation seam — initial value is the only currently
+# supported algorithm; a future ``argon2id-wasm`` lands by adding to
+# this set, never removing.  Code paths reading a vault MUST honour the
+# row's recorded algorithm; this set bounds what we accept at the wire.
+_KDF_ALGO_PATTERN = r"^(pbkdf2-sha256)$"
+
+
+# Base64url encoding pattern (no padding) — opaque binary fields ride
+# the JSON layer as base64url strings.  Length bounds defend against
+# absurdly-large declared payloads; the route layer further validates
+# decoded-length where the shape is fixed (16-byte salts, 32-byte
+# proofs, 12-byte IVs).
+_BASE64URL_PATTERN = r"^[A-Za-z0-9_\-]+$"
+
+
+class LoginParamsResponse(_BaseModel):
+    """Response envelope for ``GET /api/auth/login-params``.
+
+    Carries the parameters a browser needs to derive ``auth_proof`` from
+    a user-supplied password. The route returns the same shape — and
+    the same length / KDF parameters — for unknown usernames as for
+    real ones, using :func:`decoy_salt` so an attacker cannot
+    distinguish "no such user" from "yes, here is the salt".
+
+    Fields:
+        salt_m: 16-byte salt as base64url. Real for enrolled users,
+            deterministic decoy for unknown ones.
+        kdf_algo: Algorithm slug; client-side dispatches on this for
+            forward compatibility.
+        pbkdf2_iterations: Work-factor for the PBKDF2 stretch.
+    """
+
+    salt_m: str = Field(min_length=22, max_length=24, pattern=_BASE64URL_PATTERN)
+    kdf_algo: str = Field(pattern=_KDF_ALGO_PATTERN)
+    pbkdf2_iterations: int = Field(ge=100_000, le=10_000_000)
+
+
+class LoginRequest(_BaseModel):
+    """Body for ``POST /api/auth/login``.
+
+    ``auth_proof`` is the 32-byte HKDF-SHA256 output the browser
+    derived from the user's password (the ``"sec-gs/auth/v1"`` context).
+    NEVER echoed back. The password itself never crosses the wire.
+    """
+
+    username: str = Field(min_length=1, max_length=64, pattern=_USERNAME_PATTERN)
+    auth_proof: str = Field(
+        min_length=43,
+        max_length=44,
+        pattern=_BASE64URL_PATTERN,
+        description="32-byte HKDF output, base64url. Never echoed back.",
+    )
+
+
+class LoginResponse(_BaseModel):
+    """Response envelope for a successful ``POST /api/auth/login``.
+
+    Carries the ciphertext + IV the browser needs to decrypt the vault
+    locally. The server cannot decrypt — the KEK was derived
+    client-side and never crossed the wire.
+    """
+
+    user_id: int
+    username: str
+    ciphertext_vault: str = Field(pattern=_BASE64URL_PATTERN)
+    vault_iv: str = Field(min_length=16, max_length=16, pattern=_BASE64URL_PATTERN)
+
+
+class EnrolmentCompleteRequest(_BaseModel):
+    """Body for ``POST /api/auth/enrol``.
+
+    Closes the enrolment loop: the user has visited
+    ``/enrol?token=…``, typed their password twice, derived
+    ``salt_M``/``auth_proof``/``kek`` client-side, encrypted an empty
+    vault, and now ships the artefacts. The route validates the token
+    + flips ``must_enrol`` + creates the row.
+    """
+
+    token: str = Field(min_length=1, max_length=512)
+    salt_m: str = Field(min_length=22, max_length=24, pattern=_BASE64URL_PATTERN)
+    auth_proof: str = Field(min_length=43, max_length=44, pattern=_BASE64URL_PATTERN)
+    ciphertext_vault: str = Field(min_length=1, max_length=65536, pattern=_BASE64URL_PATTERN)
+    vault_iv: str = Field(min_length=16, max_length=16, pattern=_BASE64URL_PATTERN)
+    kdf_algo: str = Field(pattern=_KDF_ALGO_PATTERN)
+    pbkdf2_iterations: int = Field(ge=100_000, le=10_000_000)
+
+
+class EnrolmentCompleteResponse(_BaseModel):
+    """Response envelope for a successful ``POST /api/auth/enrol``.
+
+    Minimal by design — the user redirects to the login surface and
+    completes a normal login round-trip on their next request. Echoing
+    the username back is acceptable because the token already bound it
+    server-side; an attacker forging the response cannot promote the
+    enrolment they could not complete.
+    """
+
+    enrolled: bool
+    user_id: int
+    username: str
+
+
+class PasswordChangeRequest(_BaseModel):
+    """Body for ``POST /api/auth/password``.
+
+    Atomic: validates ``auth_proof_old`` against the current
+    ``auth_hash``, then replaces ``salt_M`` / ``auth_hash`` / vault in a
+    single transaction. ``kdf_algo`` rotation is forward-only; the
+    route enforces algo monotonicity.
+    """
+
+    auth_proof_old: str = Field(min_length=43, max_length=44, pattern=_BASE64URL_PATTERN)
+    salt_m: str = Field(min_length=22, max_length=24, pattern=_BASE64URL_PATTERN)
+    auth_proof_new: str = Field(min_length=43, max_length=44, pattern=_BASE64URL_PATTERN)
+    ciphertext_vault: str = Field(min_length=1, max_length=65536, pattern=_BASE64URL_PATTERN)
+    vault_iv: str = Field(min_length=16, max_length=16, pattern=_BASE64URL_PATTERN)
+    kdf_algo: str = Field(pattern=_KDF_ALGO_PATTERN)
+    pbkdf2_iterations: int = Field(ge=100_000, le=10_000_000)
+
+
+class PasswordChangeResponse(_BaseModel):
+    """Response envelope for a successful password change."""
+
+    rotated: bool
+
+
+class VaultUpdateRequest(_BaseModel):
+    """Body for ``POST /api/auth/vault`` — re-upload an updated ciphertext.
+
+    Used by the provider-key write path and the EDGAR-identity update
+    path. The IV is fresh per call (the client never reuses an IV
+    against a given key — load-bearing for AES-GCM security).
+    """
+
+    ciphertext_vault: str = Field(min_length=1, max_length=65536, pattern=_BASE64URL_PATTERN)
+    vault_iv: str = Field(min_length=16, max_length=16, pattern=_BASE64URL_PATTERN)
+
+
+class VaultUpdateResponse(_BaseModel):
+    """Response envelope for a successful vault re-upload."""
+
+    updated: bool
+
+
+# ---------------------------------------------------------------------------
+# Admin user-management schemas
+# ---------------------------------------------------------------------------
+
+
+class AdminUserCreateRequest(_BaseModel):
+    """Body for ``POST /api/admin/users``.
+
+    Admin mints a single-use enrolment token bound to ``username``;
+    the response carries the token verbatim so the admin can share the
+    enrolment link with the user out-of-band. The admin NEVER sees the
+    user password.
+    """
+
+    username: str = Field(min_length=1, max_length=64, pattern=_USERNAME_PATTERN)
+
+
+class AdminUserCreateResponse(_BaseModel):
+    """Result of a successful ``POST /api/admin/users``.
+
+    ``enrolment_token`` is the signed token the admin shares with the
+    user. ``expires_at`` is epoch seconds. ``enrol_url`` is a
+    convenience for the SPA — the route returns it verbatim with no
+    extra parameters baked in.
+    """
+
+    username: str
+    enrolment_token: str
+    expires_at: int
+    enrol_url: str
+
+
+class AdminUserDeleteResponse(_BaseModel):
+    """Result of a successful ``DELETE /api/admin/users/{id}``."""
+
+    deleted: bool
+    user_id: int
+
+
+class AdminUserUnlockResponse(_BaseModel):
+    """Result of a successful ``POST /api/admin/users/{id}/unlock``."""
+
+    unlocked: bool
+    user_id: int

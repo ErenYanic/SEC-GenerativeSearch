@@ -78,11 +78,13 @@ __all__ = [
     "get_embedder",
     "get_encrypted_credential_store",
     "get_filing_store",
+    "get_login_username_window",
     "get_registry",
     "get_retrieval_service",
     "get_session_id",
     "get_session_store",
     "get_task_manager",
+    "get_user_store",
     "header_resolver",
     "is_admin_request",
     "is_valid_session_id_shape",
@@ -331,6 +333,27 @@ def get_edgar_identity_store(request: Request) -> InMemorySessionEdgarIdentitySt
 def get_task_manager(request: Request) -> TaskManager:
     """Return the lifespan-managed background ingestion task manager."""
     return request.app.state.task_manager
+
+
+def get_user_store(request: Request):
+    """Return the Phase-13.11 user store, or ``None`` when not configured.
+
+    The user store is gated on SQLCipher + the pepper; deployments
+    running a pre-13.11 baseline (no users enrolled, no pepper
+    configured) will see ``None`` here. The auth route handlers refuse
+    with a 503 ``user_tier_disabled`` envelope when this is ``None``.
+    """
+    return getattr(request.app.state, "user_store", None)
+
+
+def get_login_username_window(request: Request):
+    """Return the per-username sliding window for the login route.
+
+    ``None`` when ``API_RATE_LIMIT_LOGIN_PER_USERNAME=0`` disables the
+    per-username gate. The route handler treats ``None`` as "allow"
+    (the per-IP bucket in :class:`RateLimitMiddleware` still applies).
+    """
+    return getattr(request.app.state, "login_username_window", None)
 
 
 # ---------------------------------------------------------------------------

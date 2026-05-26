@@ -296,3 +296,27 @@ class CitationError(SECGenerativeSearchError):
         - Citation span does not match source text
         - Malformed citation format in model output
     """
+
+
+class AuthError(SECGenerativeSearchError):
+    """
+    Raised when a Phase-13.11 user-tier authentication operation fails.
+
+    Wire-shape callers (``api/routes/auth.py``) intentionally collapse
+    every login-side failure (unknown user, wrong proof, locked account)
+    into the same opaque HTTP envelope so the wire never distinguishes
+    the cases — username enumeration via response shape is forbidden by
+    design. The exception subclass carries the distinction for the audit
+    log only.
+    """
+
+
+class EnrolmentTokenError(AuthError):
+    """
+    Raised for invalid, expired, or replayed enrolment tokens.
+
+    The wire-shape collapses every failure mode into a single
+    ``401 enrolment_token_invalid`` envelope; the subclass exists so the
+    audit log can distinguish "expired" from "tampered" without echoing
+    that distinction to the caller.
+    """

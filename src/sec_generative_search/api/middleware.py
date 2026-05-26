@@ -440,6 +440,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         validate_rpm: int = 10,
         validate_per_session_rpm: int = 5,
         session_rpm: int = 20,
+        login_rpm: int = 5,
     ) -> None:
         super().__init__(app)
         self._buckets: dict[str, _SlidingWindow] = {}
@@ -451,6 +452,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             ("rag", rag_rpm),
             ("validate", validate_rpm),
             ("session", session_rpm),
+            ("login", login_rpm),
         ):
             if rpm > 0:
                 self._buckets[category] = _SlidingWindow(rpm)
