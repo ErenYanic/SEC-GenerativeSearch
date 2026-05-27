@@ -1,15 +1,16 @@
 // Storage discipline.
 //
-// The browser tab is the only place per-provider keys live in
-// cleartext. `sessionStorage` closes when the tab closes; `localStorage`
-// persists across browser restarts and across tabs and would
-// dramatically widen the exfiltration window if an injected script ever
-// reached the SPA. Two regression nets:
+// Per-user provider keys + EDGAR identity now live in the in-memory
+// vault snapshot (`user-vault.ts`) while the user is logged in; the
+// ciphertext is persisted SERVER-side in `users.ciphertext_vault`. The
+// browser never writes either secret to disk-backed storage. Pre-13.11
+// the keys lived in `sessionStorage`; post-13.11 NO production source
+// file touches `sessionStorage` OR `localStorage` at all. Two regression
+// nets:
 //
-//   1. Static — scan every `src/` source file (excluding the sanctioned
-//      `provider-keys.ts` and code comments) for any `localStorage` /
-//      `window.localStorage` token. A drive-by edit that introduces a
-//      stash trips this immediately.
+//   1. Static — scan every `src/` source file (excluding code comments)
+//      for any `localStorage` / `sessionStorage` token. A drive-by edit
+//      that introduces a browser-storage stash trips this immediately.
 //   2. Config — `eslint.config.mjs` ships `no-restricted-globals` and
 //      `no-restricted-properties` rules banning `localStorage`.
 
@@ -79,17 +80,14 @@ describe("localStorage ban", () => {
   });
 });
 
-describe("provider-keys is the sole sanctioned sessionStorage seam", () => {
-  it("`sessionStorage` only appears in `src/lib/provider-keys.ts`", () => {
+describe("no browser-storage seam (vault is in-memory + server)", () => {
+  it("no production source file references `sessionStorage`", () => {
     const offenders: string[] = [];
     for (const file of walk(srcRoot)) {
       const raw = readFileSync(file, "utf-8");
       const code = stripComments(raw);
       if (/\bsessionStorage\b/.test(code)) {
-        const rel = path.relative(repoRoot, file);
-        if (rel !== path.join("src", "lib", "provider-keys.ts")) {
-          offenders.push(rel);
-        }
+        offenders.push(path.relative(repoRoot, file));
       }
     }
     expect(offenders).toEqual([]);

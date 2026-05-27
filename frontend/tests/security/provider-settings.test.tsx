@@ -2,11 +2,12 @@
 //
 // Asserts:
 //   - the page loads /api/admin/providers/ and renders each entry
-//   - "Save" writes to sessionStorage and clears the password input
+//   - "Save" re-encrypts + uploads the vault and clears the password
+//     input (NEVER touches browser storage)
 //   - "Validate" POSTs to /api/admin/providers/validate, body carries
 //     the key but the UI never echoes it back
 //   - "Remove" wipes the stored key
-//   - "Clear all keys" wipes every namespaced key
+//   - "Clear all keys" wipes every provider entry
 //   - the key value is never rendered into the DOM at any point after
 //     save — only the masked tail
 
@@ -32,9 +33,19 @@ vi.mock("next/navigation", async () => {
 });
 
 import ProviderSettingsPage from "@/app/(app)/providers/page";
-import { clearProviderKeys, loadProviderKeys } from "@/lib/provider-keys";
+import * as apiModule from "@/lib/api";
+import { loadProviderKeys } from "@/lib/provider-keys";
+import {
+  derivePasswordMaterial,
+  encryptVault,
+  loginUser,
+  resetLocalState,
+  _internals,
+} from "@/lib/user-vault";
 
 const originalFetch = globalThis.fetch;
+
+const TEST_ITERATIONS = 1_000;
 
 const CATALOGUE = {
   providers: [
@@ -44,15 +55,37 @@ const CATALOGUE = {
   total: 2,
 };
 
+// Unlock an empty vault so the page's key mutations can re-encrypt +
+// upload. `loginParamsRequest` / `loginRequest` / `updateVaultRequest`
+// are spied directly so they never collide with the catalogue fetch
+// mock.
+async function unlockVault(): Promise<void> {
+  const saltBytes = new Uint8Array(16).fill(0x42);
+  const { kek } = await derivePasswordMaterial("pw", saltBytes, TEST_ITERATIONS);
+  const blob = await encryptVault(kek, { providers: {}, edgar: null });
+  vi.spyOn(apiModule, "loginParamsRequest").mockResolvedValue({
+    salt_m: _internals.bytesToBase64Url(saltBytes),
+    kdf_algo: "pbkdf2-sha256",
+    pbkdf2_iterations: TEST_ITERATIONS,
+  });
+  vi.spyOn(apiModule, "loginRequest").mockResolvedValue({
+    user_id: 1,
+    username: "pat",
+    ciphertext_vault: _internals.bytesToBase64Url(blob.ciphertext),
+    vault_iv: _internals.bytesToBase64Url(blob.iv),
+  });
+  vi.spyOn(apiModule, "updateVaultRequest").mockResolvedValue({ updated: true });
+  await loginUser("pat", "pw");
+}
+
 beforeEach(() => {
-  window.sessionStorage.clear();
   globalThis.fetch = vi.fn();
 });
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  resetLocalState();
   vi.restoreAllMocks();
-  clearProviderKeys();
 });
 
 function mockCatalogue(): ReturnType<typeof vi.fn> {
@@ -82,8 +115,9 @@ describe("ProviderSettingsPage", () => {
     ]);
   });
 
-  it("Save writes to sessionStorage and clears the input field", async () => {
+  it("Save uploads the vault and clears the input field", async () => {
     mockCatalogue();
+    await unlockVault();
     render(<ProviderSettingsPage />);
 
     await screen.findByText("openai");
@@ -132,6 +166,7 @@ describe("ProviderSettingsPage", () => {
     });
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
+    await unlockVault();
     render(<ProviderSettingsPage />);
     await screen.findByText("openai");
     const user = userEvent.setup();
@@ -179,6 +214,7 @@ describe("ProviderSettingsPage", () => {
     });
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
+    await unlockVault();
     render(<ProviderSettingsPage />);
     await screen.findByText("openai");
     const user = userEvent.setup();
@@ -198,6 +234,7 @@ describe("ProviderSettingsPage", () => {
 
   it("Remove wipes the stored key for that row", async () => {
     mockCatalogue();
+    await unlockVault();
     render(<ProviderSettingsPage />);
     await screen.findByText("openai");
 
@@ -220,6 +257,7 @@ describe("ProviderSettingsPage", () => {
 
   it("Clear all keys nukes every stored key", async () => {
     mockCatalogue();
+    await unlockVault();
     render(<ProviderSettingsPage />);
     await screen.findByText("openai");
 

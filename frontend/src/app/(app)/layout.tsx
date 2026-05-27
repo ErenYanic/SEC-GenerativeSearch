@@ -1,15 +1,22 @@
 // Layout for every authenticated page. The route group `(app)` does not
 // affect URLs — `/dashboard`, `/filings`, `/ingest` remain at the root —
-// but co-locates the gate + shell once.
+// but co-locates the two gates + shell once.
 //
-// `WelcomeGate` checks the admin session via the server-side probe; while
-// the probe is in flight, the gate renders a status message. Once
-// authenticated, `AppShell` paints the navigation bar around the page
-// content.
+// Auth tiers (outer → inner):
+//   - `WelcomeGate` — operator tier. Validates `API_KEY` / `API_ADMIN_KEY`
+//     against the backend and mints an HttpOnly admin-session cookie
+//     (server-side store; the keys never reach the browser).
+//   - `LoginGate` — user tier. Once user-tier is enabled
+//     on the backend (SQLCipher + `API_AUTH_PEPPER` set), this gate
+//     requires per-user username + password. The password derives a
+//     KEK client-side and unlocks the per-user encrypted vault. When
+//     user-tier is disabled at the backend, `LoginGate` is a no-op.
+//   - `AppShell` — nav bar + sign-out around the page content.
 
 import type { JSX, ReactNode } from "react";
 
 import { AppShell } from "@/components/app-shell";
+import { LoginGate } from "@/components/login-gate";
 import { WelcomeGate } from "@/components/welcome-gate";
 
 export default function AuthenticatedLayout({
@@ -19,7 +26,9 @@ export default function AuthenticatedLayout({
 }): JSX.Element {
   return (
     <WelcomeGate>
-      <AppShell>{children}</AppShell>
+      <LoginGate>
+        <AppShell>{children}</AppShell>
+      </LoginGate>
     </WelcomeGate>
   );
 }

@@ -1,18 +1,53 @@
 // EDGAR identity card UI.
 //
 // Asserts:
-//  - submitting calls POST /api/admin/session/edgar with JSON body
-//  - on success, the form swaps to "registered" and clears local state
+//  - submitting pushes to the session store (POST /api/admin/session/edgar)
+//    AND persists into the encrypted vault (POST /api/admin/auth/vault)
+//  - on success, the card swaps to the vault-saved state and clears
+//    local form state
 //  - on 400/422 the error message NEVER echoes the offending input value
-//  - clear button hits DELETE /api/admin/session/edgar
+//  - the registered view is driven by the vault's EDGAR slot
+//  - clear hits DELETE /api/admin/session/edgar and wipes the vault slot
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { EdgarIdentityCard } from "@/components/edgar-identity-card";
+import * as apiModule from "@/lib/api";
+import {
+  derivePasswordMaterial,
+  encryptVault,
+  loginUser,
+  resetLocalState,
+  _internals,
+} from "@/lib/user-vault";
 
 const originalFetch = globalThis.fetch;
+const TEST_ITERATIONS = 1_000;
+
+// Unlock an empty vault so the card's `mutateVault` can persist. The
+// login + vault-upload seams are spied directly; `registerEdgarIdentity`
+// / `clearEdgarIdentity` flow through the mocked global fetch so the
+// tests can assert on the session-edgar URL + method.
+async function unlockVault(): Promise<void> {
+  const saltBytes = new Uint8Array(16).fill(0x52);
+  const { kek } = await derivePasswordMaterial("pw", saltBytes, TEST_ITERATIONS);
+  const blob = await encryptVault(kek, { providers: {}, edgar: null });
+  vi.spyOn(apiModule, "loginParamsRequest").mockResolvedValue({
+    salt_m: _internals.bytesToBase64Url(saltBytes),
+    kdf_algo: "pbkdf2-sha256",
+    pbkdf2_iterations: TEST_ITERATIONS,
+  });
+  vi.spyOn(apiModule, "loginRequest").mockResolvedValue({
+    user_id: 1,
+    username: "pat",
+    ciphertext_vault: _internals.bytesToBase64Url(blob.ciphertext),
+    vault_iv: _internals.bytesToBase64Url(blob.iv),
+  });
+  vi.spyOn(apiModule, "updateVaultRequest").mockResolvedValue({ updated: true });
+  await loginUser("pat", "pw");
+}
 
 beforeEach(() => {
   globalThis.fetch = vi.fn();
@@ -20,11 +55,13 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  resetLocalState();
   vi.restoreAllMocks();
 });
 
 describe("EdgarIdentityCard", () => {
-  it("renders the form when no identity is registered yet", () => {
+  it("renders the form when no identity is in the vault yet", async () => {
+    await unlockVault();
     render(<EdgarIdentityCard />);
     expect(
       screen.getByRole("form", { name: /edgar identity registration/i }),
@@ -33,13 +70,13 @@ describe("EdgarIdentityCard", () => {
     expect(screen.getByLabelText(/email/i)).toBeInTheDocument();
   });
 
-  it("submits the form and swaps to the registered state on success", async () => {
+  it("pushes to the session store AND persists into the vault on submit", async () => {
+    await unlockVault();
     const fetchMock = vi.fn(async () => {
-      return new Response(JSON.stringify({ registered: true }), {
-        status: 201,
-      });
+      return new Response(JSON.stringify({ registered: true }), { status: 201 });
     });
     globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const updateSpy = vi.spyOn(apiModule, "updateVaultRequest");
 
     const onRegistered = vi.fn();
     render(<EdgarIdentityCard onRegistered={onRegistered} />);
@@ -47,57 +84,52 @@ describe("EdgarIdentityCard", () => {
     const user = userEvent.setup();
     await user.type(screen.getByLabelText(/full name/i), "Alice Example");
     await user.type(screen.getByLabelText(/email/i), "alice@example.com");
-    await user.click(screen.getByRole("button", { name: /register/i }));
+    await user.click(screen.getByRole("button", { name: /save to vault/i }));
 
     await waitFor(() => {
-      expect(
-        screen.getByText(/EDGAR identity registered/i),
-      ).toBeInTheDocument();
+      expect(screen.getByText(/saved to your vault/i)).toBeInTheDocument();
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0] as unknown as [
-      string,
-      RequestInit,
-    ];
-    expect(url).toBe("/api/admin/session/edgar");
-    expect(init.method).toBe("POST");
-    const body = JSON.parse(init.body as string) as {
+    // Session-store push.
+    const sessionCall = fetchMock.mock.calls.find((c) =>
+      String((c as unknown[])[0]).endsWith("/session/edgar"),
+    ) as unknown as [string, RequestInit] | undefined;
+    expect(sessionCall).toBeDefined();
+    expect(sessionCall![1].method).toBe("POST");
+    const body = JSON.parse(sessionCall![1].body as string) as {
       name: string;
       email: string;
     };
-    expect(body.name).toBe("Alice Example");
-    expect(body.email).toBe("alice@example.com");
+    expect(body).toEqual({ name: "Alice Example", email: "alice@example.com" });
+
+    // Vault persistence.
+    expect(updateSpy).toHaveBeenCalledTimes(1);
     expect(onRegistered).toHaveBeenCalledTimes(1);
   });
 
   it("clears local form state after a successful submit", async () => {
+    await unlockVault();
     globalThis.fetch = vi.fn(async () => {
-      return new Response(JSON.stringify({ registered: true }), {
-        status: 201,
-      });
+      return new Response(JSON.stringify({ registered: true }), { status: 201 });
     }) as unknown as typeof fetch;
 
     render(<EdgarIdentityCard />);
     const user = userEvent.setup();
     await user.type(screen.getByLabelText(/full name/i), "Bob Tester");
     await user.type(screen.getByLabelText(/email/i), "bob@example.com");
-    await user.click(screen.getByRole("button", { name: /register/i }));
+    await user.click(screen.getByRole("button", { name: /save to vault/i }));
 
     await waitFor(() => {
-      expect(
-        screen.getByText(/EDGAR identity registered/i),
-      ).toBeInTheDocument();
+      expect(screen.getByText(/saved to your vault/i)).toBeInTheDocument();
     });
 
-    // After success, the form is unmounted; values must not linger in
-    // the DOM. (Either the registered state is shown OR the inputs are
-    // empty — the registered state hides the form entirely.)
+    // After success the form is gone; values must not linger in the DOM.
     expect(document.body.innerHTML).not.toContain("Bob Tester");
     expect(document.body.innerHTML).not.toContain("bob@example.com");
   });
 
   it("never echoes the offending value when the backend rejects the input", async () => {
+    await unlockVault();
     globalThis.fetch = vi.fn(async () => {
       return new Response(
         JSON.stringify({
@@ -111,11 +143,9 @@ describe("EdgarIdentityCard", () => {
 
     render(<EdgarIdentityCard />);
     const user = userEvent.setup();
-    // Submit a deliberately ugly value; the backend rejects with a
-    // canned message and the UI must NOT render the value back.
     await user.type(screen.getByLabelText(/full name/i), "BadValueXYZ");
     await user.type(screen.getByLabelText(/email/i), "bad@example.com");
-    await user.click(screen.getByRole("button", { name: /register/i }));
+    await user.click(screen.getByRole("button", { name: /save to vault/i }));
 
     await waitFor(() => {
       expect(screen.getByRole("alert")).toBeInTheDocument();
@@ -123,44 +153,113 @@ describe("EdgarIdentityCard", () => {
     const alert = screen.getByRole("alert");
     expect(alert).toHaveTextContent(/EDGAR identity failed validation/);
     expect(alert).toHaveTextContent(/control characters/);
-    // The offending input value MUST NOT appear in the alert.
     expect(alert.textContent ?? "").not.toContain("BadValueXYZ");
   });
 
-  it("clear button hits DELETE /api/admin/session/edgar", async () => {
-    let call = 0;
-    const fetchMock = vi.fn(async () => {
-      call += 1;
-      if (call === 1) {
-        return new Response(JSON.stringify({ registered: true }), {
-          status: 201,
-        });
-      }
-      return new Response(JSON.stringify({ cleared: true }), { status: 200 });
-    });
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+  it("does not persist into the vault when the session-store push fails", async () => {
+    await unlockVault();
+    globalThis.fetch = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          error: "invalid_edgar_identity",
+          message: "EDGAR identity failed validation.",
+        }),
+        { status: 400 },
+      );
+    }) as unknown as typeof fetch;
+    const updateSpy = vi.spyOn(apiModule, "updateVaultRequest");
 
     render(<EdgarIdentityCard />);
     const user = userEvent.setup();
-    await user.type(screen.getByLabelText(/full name/i), "Eve");
-    await user.type(screen.getByLabelText(/email/i), "eve@example.com");
-    await user.click(screen.getByRole("button", { name: /register/i }));
+    await user.type(screen.getByLabelText(/full name/i), "Carol");
+    await user.type(screen.getByLabelText(/email/i), "carol@example.com");
+    await user.click(screen.getByRole("button", { name: /save to vault/i }));
 
     await waitFor(() => {
-      expect(
-        screen.getByText(/EDGAR identity registered/i),
-      ).toBeInTheDocument();
+      expect(screen.getByRole("alert")).toBeInTheDocument();
+    });
+    // The session push threw, so the vault write must not have happened.
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+
+  it("renders the saved state when the vault already carries an identity", async () => {
+    // Unlock a vault that already has an EDGAR identity.
+    const saltBytes = new Uint8Array(16).fill(0x53);
+    const { kek } = await derivePasswordMaterial("pw", saltBytes, TEST_ITERATIONS);
+    const blob = await encryptVault(kek, {
+      providers: {},
+      edgar: { name: "Dave", email: "dave@example.com" },
+    });
+    vi.spyOn(apiModule, "loginParamsRequest").mockResolvedValue({
+      salt_m: _internals.bytesToBase64Url(saltBytes),
+      kdf_algo: "pbkdf2-sha256",
+      pbkdf2_iterations: TEST_ITERATIONS,
+    });
+    vi.spyOn(apiModule, "loginRequest").mockResolvedValue({
+      user_id: 1,
+      username: "pat",
+      ciphertext_vault: _internals.bytesToBase64Url(blob.ciphertext),
+      vault_iv: _internals.bytesToBase64Url(blob.iv),
+    });
+    vi.spyOn(apiModule, "updateVaultRequest").mockResolvedValue({ updated: true });
+    // Re-push to the session store is best-effort via the global fetch.
+    globalThis.fetch = vi.fn(async () => {
+      return new Response(JSON.stringify({ registered: true }), { status: 201 });
+    }) as unknown as typeof fetch;
+    await loginUser("pat", "pw");
+
+    render(<EdgarIdentityCard />);
+    await waitFor(() => {
+      expect(screen.getByText(/saved to your vault/i)).toBeInTheDocument();
+    });
+    // The name/email must NOT render into the DOM — only the saved badge.
+    expect(document.body.innerHTML).not.toContain("dave@example.com");
+  });
+
+  it("clear hits DELETE /api/admin/session/edgar and wipes the vault slot", async () => {
+    // Vault already carries an identity.
+    const saltBytes = new Uint8Array(16).fill(0x54);
+    const { kek } = await derivePasswordMaterial("pw", saltBytes, TEST_ITERATIONS);
+    const blob = await encryptVault(kek, {
+      providers: {},
+      edgar: { name: "Eve", email: "eve@example.com" },
+    });
+    vi.spyOn(apiModule, "loginParamsRequest").mockResolvedValue({
+      salt_m: _internals.bytesToBase64Url(saltBytes),
+      kdf_algo: "pbkdf2-sha256",
+      pbkdf2_iterations: TEST_ITERATIONS,
+    });
+    vi.spyOn(apiModule, "loginRequest").mockResolvedValue({
+      user_id: 1,
+      username: "pat",
+      ciphertext_vault: _internals.bytesToBase64Url(blob.ciphertext),
+      vault_iv: _internals.bytesToBase64Url(blob.iv),
+    });
+    vi.spyOn(apiModule, "updateVaultRequest").mockResolvedValue({ updated: true });
+    const fetchMock = vi.fn(async () => {
+      return new Response(JSON.stringify({ cleared: true }), { status: 200 });
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    await loginUser("pat", "pw");
+
+    render(<EdgarIdentityCard />);
+    await waitFor(() => {
+      expect(screen.getByText(/saved to your vault/i)).toBeInTheDocument();
     });
 
+    const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: /clear identity/i }));
 
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(
+        screen.getByRole("form", { name: /edgar identity registration/i }),
+      ).toBeInTheDocument();
     });
-    const [, init] = fetchMock.mock.calls[1] as unknown as [
-      string,
-      RequestInit,
-    ];
-    expect(init.method).toBe("DELETE");
+    const deleteCall = fetchMock.mock.calls.find(
+      (c) =>
+        String((c as unknown[])[0]).endsWith("/session/edgar") &&
+        ((c as unknown[])[1] as RequestInit)?.method === "DELETE",
+    );
+    expect(deleteCall).toBeDefined();
   });
 });

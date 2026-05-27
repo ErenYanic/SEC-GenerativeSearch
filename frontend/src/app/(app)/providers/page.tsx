@@ -24,7 +24,6 @@ import {
 } from "react";
 
 import { ProviderKeyRow } from "@/components/provider-key-row";
-import { ProviderVaultCard } from "@/components/provider-vault-card";
 import { ApiError, listProviders } from "@/lib/api";
 import type { ProviderInfo } from "@/lib/api-types";
 import {
@@ -79,9 +78,23 @@ export default function ProviderSettingsPage(): JSX.Element {
     };
   }, []);
 
+  const [clearing, setClearing] = useState(false);
+
   const handleClearAll = useCallback(() => {
-    clearProviderKeys();
-  }, []);
+    if (clearing) {
+      return;
+    }
+    setClearing(true);
+    void clearProviderKeys()
+      .catch(() => {
+        // The vault upload may fail (e.g. session expired); the row
+        // subscription keeps the UI in sync regardless, so we swallow
+        // the rejection rather than surface a transient banner here.
+      })
+      .finally(() => {
+        setClearing(false);
+      });
+  }, [clearing]);
 
   return (
     <div className="space-y-8">
@@ -90,13 +103,11 @@ export default function ProviderSettingsPage(): JSX.Element {
           Provider settings
         </h1>
         <p className="text-sm text-slate-600">
-          Per-provider API keys are held in this browser tab only.
-          They are never persisted to the server and are wiped when the
-          tab closes or you sign out.
+          Per-provider API keys are encrypted in your browser under your
+          password and stored in your account vault. The server keeps only
+          the ciphertext — it never sees your keys in cleartext.
         </p>
       </header>
-
-      <ProviderVaultCard />
 
       <section
         aria-labelledby="provider-list-heading"
@@ -113,9 +124,10 @@ export default function ProviderSettingsPage(): JSX.Element {
             <button
               type="button"
               onClick={handleClearAll}
-              className="rounded border border-red-300 px-3 py-1 text-sm text-red-700 hover:bg-red-50"
+              disabled={clearing}
+              className="rounded border border-red-300 px-3 py-1 text-sm text-red-700 hover:bg-red-50 disabled:opacity-50"
             >
-              Clear all keys
+              {clearing ? "Clearing…" : "Clear all keys"}
             </button>
           ) : null}
         </div>

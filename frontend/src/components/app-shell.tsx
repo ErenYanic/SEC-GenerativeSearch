@@ -11,7 +11,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useCallback, useState, type JSX, type ReactNode } from "react";
 
-import { clearProviderKeys } from "@/lib/provider-keys";
+import { signOutUser } from "@/lib/user-vault";
 
 interface NavItem {
   href: string;
@@ -40,15 +40,18 @@ export function AppShell({ children }: AppShellProps): JSX.Element {
       return;
     }
     setSigningOut(true);
-    // Drop every per-provider key in this tab before tearing down the
-    // server session. `sessionStorage` would clear on tab close anyway,
-    // but explicit clearing closes the window during the redirect.
+    // Drop the in-memory user vault FIRST (wipes the KEK + cleartext map
+    // before any network hop) and revoke the backend user session via
+    // DELETE /api/auth/session. `signOutUser` wipes local state before
+    // it awaits the network, so a slow / failed call cannot leave the
+    // cleartext keys reachable from a stale render.
     try {
-      clearProviderKeys();
+      await signOutUser();
     } catch {
-      // Storage may be unavailable in a degraded browser; sign-out
-      // continues regardless.
+      // Best-effort — the in-memory state is already wiped.
     }
+    // Tear down the operator (admin) session in lockstep. Best-effort:
+    // the HttpOnly cookies expire on their own if this fails.
     try {
       await fetch("/api/admin/session", {
         method: "DELETE",
@@ -56,10 +59,10 @@ export function AppShell({ children }: AppShellProps): JSX.Element {
         cache: "no-store",
       });
     } catch {
-      // Best-effort: the HttpOnly cookies will expire on their own.
+      // Best-effort.
     }
-    // Reload to re-trigger the WelcomeGate probe; the server-side store
-    // entry is already revoked.
+    // Reload to re-trigger the WelcomeGate + LoginGate probes; the
+    // server-side store entries are already revoked.
     window.location.assign("/");
   }, [signingOut]);
 

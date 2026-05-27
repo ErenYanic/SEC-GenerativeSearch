@@ -8,27 +8,78 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import * as apiModule from "@/lib/api";
 import {
   ApiError,
   apiFetchWithProviderKeys,
+  changePasswordRequest,
   clearEdgarIdentity,
+  createUserEnrolment,
   deleteFiling,
+  deleteUserEnrolment,
+  enrolUserRequest,
   getStatus,
   listFilings,
   listProviders,
+  loginParamsRequest,
+  loginRequest,
   planRagQuery,
   registerEdgarIdentity,
+  signOutRequest,
   streamRagAnswer,
   submitIngestAdd,
+  unlockUserEnrolment,
+  updateVaultRequest,
   validateProvider,
 } from "@/lib/api";
 import type { QueryPlanSchema } from "@/lib/api-types";
 import {
-  clearProviderKeys,
-  setProviderKey,
-} from "@/lib/provider-keys";
+  derivePasswordMaterial,
+  encryptVault,
+  loginUser,
+  resetLocalState,
+  _internals,
+  type VaultCleartext,
+} from "@/lib/user-vault";
 
 const originalFetch = globalThis.fetch;
+
+const TEST_ITERATIONS = 1_000;
+
+// Seed the in-memory vault with provider keys by performing a real
+// login round-trip (the login + params seams are spied so no PBKDF2
+// fixture is needed beyond the derivation itself). Provider-key header
+// attachment then reads straight from the unlocked vault. Returns once
+// the vault is unlocked; the caller then sets up the endpoint fetch
+// mock for the request under test.
+async function seedVaultWithProviders(
+  providers: Record<string, string>,
+): Promise<void> {
+  const cleartext: VaultCleartext = {
+    providers: Object.fromEntries(
+      Object.entries(providers).map(([name, value]) => [
+        name,
+        { value, updated_at: "2026-05-26T00:00:00Z" },
+      ]),
+    ),
+    edgar: null,
+  };
+  const saltBytes = new Uint8Array(16).fill(0x61);
+  const { kek } = await derivePasswordMaterial("pw", saltBytes, TEST_ITERATIONS);
+  const blob = await encryptVault(kek, cleartext);
+  vi.spyOn(apiModule, "loginParamsRequest").mockResolvedValue({
+    salt_m: _internals.bytesToBase64Url(saltBytes),
+    kdf_algo: "pbkdf2-sha256",
+    pbkdf2_iterations: TEST_ITERATIONS,
+  });
+  vi.spyOn(apiModule, "loginRequest").mockResolvedValue({
+    user_id: 1,
+    username: "pat",
+    ciphertext_vault: _internals.bytesToBase64Url(blob.ciphertext),
+    vault_iv: _internals.bytesToBase64Url(blob.iv),
+  });
+  await loginUser("pat", "pw");
+}
 
 interface Captured {
   url: string;
@@ -53,13 +104,12 @@ function recordingFetch(response: Response): {
 
 beforeEach(() => {
   globalThis.fetch = vi.fn();
-  window.sessionStorage.clear();
 });
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
   vi.restoreAllMocks();
-  clearProviderKeys();
+  resetLocalState();
 });
 
 describe("api client routing", () => {
@@ -234,7 +284,7 @@ describe("provider catalogue + validation", () => {
   });
 
   it("validateProvider posts the body and attaches X-Provider-Key-* headers from the store", async () => {
-    setProviderKey("openai", "sk-LONGENOUGHKEY"); // pragma: allowlist secret
+    await seedVaultWithProviders({ openai: "sk-LONGENOUGHKEY" }); // pragma: allowlist secret
     const { calls } = recordingFetch(
       new Response(
         JSON.stringify({ valid: true, provider: "openai", surface: "llm" }),
@@ -259,7 +309,7 @@ describe("provider catalogue + validation", () => {
   });
 
   it("apiFetchWithProviderKeys attaches browser provider keys", async () => {
-    setProviderKey("anthropic", "sk-ant-PROPAGATETHIS"); // pragma: allowlist secret
+    await seedVaultWithProviders({ anthropic: "sk-ant-PROPAGATETHIS" }); // pragma: allowlist secret
     const { calls } = recordingFetch(
       new Response(JSON.stringify({ ok: true }), { status: 200 }),
     );
@@ -274,7 +324,7 @@ describe("provider catalogue + validation", () => {
   });
 
   it("default apiFetch path (e.g. getStatus) does NOT attach provider keys", async () => {
-    setProviderKey("openai", "sk-SHOULDNOTLEAK"); // pragma: allowlist secret
+    await seedVaultWithProviders({ openai: "sk-SHOULDNOTLEAK" }); // pragma: allowlist secret
     const { calls } = recordingFetch(
       new Response(JSON.stringify({}), { status: 200 }),
     );
@@ -345,7 +395,7 @@ function readableStreamFromChunks(chunks: string[]): ReadableStream<Uint8Array> 
 
 describe("planRagQuery", () => {
   it("POSTs the query in the body, never on the URL, and attaches provider keys", async () => {
-    setProviderKey("openai", "sk-PLANLINEAGE"); // pragma: allowlist secret
+    await seedVaultWithProviders({ openai: "sk-PLANLINEAGE" }); // pragma: allowlist secret
     const { calls } = recordingFetch(
       new Response(
         JSON.stringify({
@@ -604,5 +654,176 @@ describe("streamRagAnswer", () => {
       { onDelta: (t) => deltas.push(t) },
     );
     expect(deltas.join("")).toBe("split");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// User-tier auth client
+// ---------------------------------------------------------------------------
+
+describe("auth client routing", () => {
+  it("routes /api/auth/login-params with URL-encoded username + no body", async () => {
+    const { calls } = recordingFetch(
+      new Response(
+        JSON.stringify({
+          salt_m: "AAAAAAAAAAAAAAAAAAAAAA",
+          kdf_algo: "pbkdf2-sha256",
+          pbkdf2_iterations: 600_000,
+        }),
+        { status: 200 },
+      ),
+    );
+    await loginParamsRequest("user with spaces");
+    expect(calls[0]?.url).toBe(
+      "/api/admin/auth/login-params?username=user%20with%20spaces",
+    );
+    expect(calls[0]?.init.method ?? "GET").toBe("GET");
+    expect(calls[0]?.init.body).toBeUndefined();
+  });
+
+  it("posts /api/auth/login with the supplied auth_proof — never the password", async () => {
+    const { calls } = recordingFetch(
+      new Response(
+        JSON.stringify({
+          user_id: 1,
+          username: "pat",
+          ciphertext_vault: "x",
+          vault_iv: "AAAAAAAAAAAAAAAA",
+        }),
+        { status: 200 },
+      ),
+    );
+    await loginRequest({ username: "pat", auth_proof: "proof-bytes" });
+    expect(calls[0]?.url).toBe("/api/admin/auth/login");
+    expect(calls[0]?.init.method).toBe("POST");
+    expect(calls[0]?.init.body).toBe(
+      JSON.stringify({ username: "pat", auth_proof: "proof-bytes" }),
+    );
+    // Defence in depth: the literal "password" string MUST NOT appear
+    // anywhere in the request payload — the wire only sees auth_proof.
+    const dump = JSON.stringify(calls);
+    expect(dump).not.toContain("password");
+  });
+
+  it("posts /api/auth/enrol with the full enrolment payload", async () => {
+    const { calls } = recordingFetch(
+      new Response(
+        JSON.stringify({ enrolled: true, user_id: 7, username: "newcomer" }),
+        { status: 201 },
+      ),
+    );
+    await enrolUserRequest({
+      token: "token-xyz",
+      salt_m: "salt",
+      auth_proof: "proof",
+      ciphertext_vault: "cipher",
+      vault_iv: "iv",
+      kdf_algo: "pbkdf2-sha256",
+      pbkdf2_iterations: 600_000,
+    });
+    expect(calls[0]?.url).toBe("/api/admin/auth/enrol");
+    expect(calls[0]?.init.method).toBe("POST");
+  });
+
+  it("posts /api/auth/password and /api/auth/vault on the admin proxy", async () => {
+    const { calls } = recordingFetch(
+      new Response(JSON.stringify({ rotated: true }), { status: 200 }),
+    );
+    await changePasswordRequest({
+      auth_proof_old: "old",
+      auth_proof_new: "new",
+      salt_m: "s",
+      ciphertext_vault: "c",
+      vault_iv: "iv",
+      kdf_algo: "pbkdf2-sha256",
+      pbkdf2_iterations: 600_000,
+    });
+    await updateVaultRequest({ ciphertext_vault: "c", vault_iv: "iv" });
+    expect(calls[0]?.url).toBe("/api/admin/auth/password");
+    expect(calls[1]?.url).toBe("/api/admin/auth/vault");
+  });
+
+  it("hits DELETE /api/admin/auth/session on sign-out", async () => {
+    const { calls } = recordingFetch(
+      new Response(JSON.stringify({ cleared: true }), { status: 200 }),
+    );
+    await signOutRequest();
+    expect(calls[0]?.url).toBe("/api/admin/auth/session");
+    expect(calls[0]?.init.method).toBe("DELETE");
+  });
+
+  it("admin user-management routes go through /api/admin/admin/users/*", async () => {
+    const { calls } = recordingFetch(
+      new Response(
+        JSON.stringify({
+          username: "pat",
+          enrolment_token: "T",
+          expires_at: 1,
+          enrol_url: "/enrol?token=T",
+        }),
+        { status: 201 },
+      ),
+    );
+    await createUserEnrolment({ username: "pat" });
+    expect(calls[0]?.url).toBe("/api/admin/admin/users");
+    expect(calls[0]?.init.method).toBe("POST");
+  });
+
+  it("deleteUserEnrolment / unlockUserEnrolment hit the per-id paths", async () => {
+    const { calls } = recordingFetch(
+      new Response(
+        JSON.stringify({ deleted: true, user_id: 42 }),
+        { status: 200 },
+      ),
+    );
+    await deleteUserEnrolment(42);
+    await unlockUserEnrolment(42);
+    expect(calls[0]?.url).toBe("/api/admin/admin/users/42");
+    expect(calls[0]?.init.method).toBe("DELETE");
+    expect(calls[1]?.url).toBe("/api/admin/admin/users/42/unlock");
+    expect(calls[1]?.init.method).toBe("POST");
+  });
+
+  it("does NOT attach X-Provider-Key headers on auth routes", async () => {
+    // Seed a key into the vault, then drop the login spies so the real
+    // `loginRequest` runs against the recording fetch. Auth routes use
+    // plain `apiFetch` (no provider-key attachment), so even with a key
+    // in the vault no `X-Provider-Key-*` header should ride along.
+    await seedVaultWithProviders({ openai: "sk-test-key" }); // pragma: allowlist secret
+    vi.restoreAllMocks();
+    const { calls } = recordingFetch(
+      new Response(
+        JSON.stringify({
+          user_id: 1,
+          username: "pat",
+          ciphertext_vault: "x",
+          vault_iv: "AAAAAAAAAAAAAAAA",
+        }),
+        { status: 200 },
+      ),
+    );
+    await loginRequest({ username: "pat", auth_proof: "p" });
+    const headers = new Headers(calls[0]?.init.headers as HeadersInit);
+    expect(headers.get("x-provider-key-openai")).toBeNull();
+  });
+
+  it("surfaces 401 login_refused as an ApiError without echoing the username", async () => {
+    globalThis.fetch = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({ error: "login_refused", message: "Login refused." }),
+        { status: 401 },
+      );
+    }) as unknown as typeof fetch;
+    let raised: unknown;
+    try {
+      await loginRequest({ username: "secret-account", auth_proof: "p" });
+    } catch (exc) {
+      raised = exc;
+    }
+    expect(raised).toBeInstanceOf(ApiError);
+    const err = raised as ApiError;
+    expect(err.status).toBe(401);
+    expect(err.message).toBe("Login refused.");
+    expect(err.message).not.toContain("secret-account");
   });
 });

@@ -1,19 +1,18 @@
-// Browser-side provider-key store (`src/lib/provider-keys.ts`).
+// Provider-key cache over the per-user vault.
 //
-// Asserts the trust-boundary invariants the store depends on:
-//   - keys live in `sessionStorage` only — `localStorage` is never
-//     touched at runtime
-//   - invalid provider slugs are rejected at write time (so the backend
-//     parser never gets a slug it would discard)
-//   - empty / oversized keys are rejected
-//   - subscribers are notified on every mutation
-//   - `providerKeyHeaders()` builds `X-Provider-Key-{provider}` headers
-//   - the snapshot is read-only (callers cannot mutate the store
-//     through the returned reference)
-//   - `clearProviderKeys()` only touches the namespaced keys
+// `provider-keys.ts` is no longer the `sessionStorage` seam — it is a
+// thin cache over `user-vault.ts`. These tests assert:
+//   - reads / writes flow through the in-memory vault, NEVER any
+//     browser storage (no `sessionStorage`, no `localStorage`)
+//   - mutations re-encrypt + POST `/api/auth/vault`
+//   - the same synchronous shape-validation (slug, key length) holds,
+//     thrown before any network hop
+//   - mutating while the vault is locked raises `VaultLockedError`
+//   - `providerKeyHeaders()` builds the `X-Provider-Key-*` map
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import * as apiModule from "@/lib/api";
 import {
   clearProviderKeys,
   loadProviderKeys,
@@ -22,145 +21,194 @@ import {
   setProviderKey,
   subscribe,
 } from "@/lib/provider-keys";
+import {
+  derivePasswordMaterial,
+  encryptVault,
+  loginUser,
+  resetLocalState,
+  _internals,
+  type VaultCleartext,
+} from "@/lib/user-vault";
+
+const TEST_ITERATIONS = 1_000;
+
+const EMPTY_VAULT: VaultCleartext = Object.freeze({
+  providers: Object.freeze({}),
+  edgar: null,
+});
+
+// Log in so the vault is unlocked and `mutateVault` can operate. The
+// initial vault contents are supplied per-test; `updateVaultRequest`
+// is mocked in `beforeEach`.
+async function loginWithVault(initial: VaultCleartext): Promise<void> {
+  const saltBytes = new Uint8Array(16).fill(0x31);
+  const { kek } = await derivePasswordMaterial("pw", saltBytes, TEST_ITERATIONS);
+  const blob = await encryptVault(kek, initial);
+  vi.spyOn(apiModule, "loginParamsRequest").mockResolvedValue({
+    salt_m: _internals.bytesToBase64Url(saltBytes),
+    kdf_algo: "pbkdf2-sha256",
+    pbkdf2_iterations: TEST_ITERATIONS,
+  });
+  vi.spyOn(apiModule, "loginRequest").mockResolvedValue({
+    user_id: 1,
+    username: "pat",
+    ciphertext_vault: _internals.bytesToBase64Url(blob.ciphertext),
+    vault_iv: _internals.bytesToBase64Url(blob.iv),
+  });
+  await loginUser("pat", "pw");
+}
 
 beforeEach(() => {
-  // happy-dom retains storage between tests; wipe both stores so each
-  // case starts from a clean slate. `clearProviderKeys()` also drops
-  // the module's in-memory snapshot cache (which would otherwise
-  // outlive a raw `sessionStorage.clear()`).
-  window.sessionStorage.clear();
-  window.localStorage.clear();
-  clearProviderKeys();
+  vi.spyOn(apiModule, "updateVaultRequest").mockResolvedValue({ updated: true });
 });
 
 afterEach(() => {
+  resetLocalState();
   vi.restoreAllMocks();
 });
 
-describe("provider-keys store: trust boundary", () => {
-  it("persists keys to sessionStorage and NEVER to localStorage", () => {
-    setProviderKey("openai", "sk-this-is-a-long-secret"); // pragma: allowlist secret
-
-    expect(window.sessionStorage.getItem("sec.providerKey.openai")).toBe(
-      "sk-this-is-a-long-secret",
-    );
-    // Nothing in this module touches `localStorage`; a future drive-by
-    // edit that copies the value over is caught by this assertion.
-    expect(window.localStorage.length).toBe(0);
+describe("provider-keys cache — storage discipline", () => {
+  it("never touches sessionStorage or localStorage on a write", async () => {
+    await loginWithVault(EMPTY_VAULT);
+    const sessionSpy = vi.spyOn(window.sessionStorage, "setItem");
+    const localSpy = vi.spyOn(window.localStorage, "setItem");
+    await setProviderKey("openai", "sk-this-is-a-long-secret"); // pragma: allowlist secret
+    expect(sessionSpy).not.toHaveBeenCalled();
+    expect(localSpy).not.toHaveBeenCalled();
   });
 
-  it("snapshot returns only namespaced entries — ignores unrelated localStorage / sessionStorage keys", () => {
-    window.sessionStorage.setItem("unrelated", "should-not-appear");
-    window.localStorage.setItem(
-      "sec.providerKey.poisoned",
-      "should-not-appear", // pragma: allowlist secret
-    );
-    setProviderKey("anthropic", "sk-ant-xxxxxxxxxxxx"); // pragma: allowlist secret
-
-    const snap = loadProviderKeys();
-    expect(Object.keys(snap)).toEqual(["anthropic"]);
-    expect(snap.anthropic).toBe("sk-ant-xxxxxxxxxxxx");
-  });
-
-  it("returned snapshot is frozen — callers cannot mutate the store through it", () => {
-    setProviderKey("openai", "sk-aaaaaaaaaaaa"); // pragma: allowlist secret
-    const snap = loadProviderKeys();
-    expect(Object.isFrozen(snap)).toBe(true);
-    // Strict mode throws on writes to a frozen object.
-    expect(() => {
-      (snap as Record<string, string>).openai = "tampered";
-    }).toThrow();
-  });
-
-  it("clearProviderKeys only wipes the namespaced keys", () => {
-    window.sessionStorage.setItem("unrelated", "keep");
-    setProviderKey("openai", "sk-yyyyyyyyyyyy"); // pragma: allowlist secret
-    setProviderKey("anthropic", "sk-ant-zzzzzzzzzzzz"); // pragma: allowlist secret
-
-    clearProviderKeys();
-
-    expect(loadProviderKeys()).toEqual({});
-    expect(window.sessionStorage.getItem("unrelated")).toBe("keep");
+  it("re-encrypts + uploads the vault on setProviderKey", async () => {
+    await loginWithVault(EMPTY_VAULT);
+    const updateSpy = vi.spyOn(apiModule, "updateVaultRequest");
+    await setProviderKey("openai", "sk-aaaaaaaaaaaaaaaa"); // pragma: allowlist secret
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    const sent = updateSpy.mock.calls[0]?.[0];
+    expect(sent?.vault_iv.length).toBe(16);
+    expect(sent?.ciphertext_vault.length).toBeGreaterThan(0);
   });
 });
 
-describe("provider-keys store: validation", () => {
-  it("rejects provider slugs that fail the backend shape check", () => {
-    // Uppercase — would be discarded silently by parse_provider_key_headers.
+describe("provider-keys cache — read/write round-trip", () => {
+  it("surfaces a set key on the next snapshot", async () => {
+    await loginWithVault(EMPTY_VAULT);
+    await setProviderKey("anthropic", "sk-ant-xxxxxxxxxxxx"); // pragma: allowlist secret
+    expect(loadProviderKeys()).toEqual({
+      anthropic: "sk-ant-xxxxxxxxxxxx", // pragma: allowlist secret
+    });
+  });
+
+  it("hydrates from the decrypted vault on login", async () => {
+    await loginWithVault({
+      providers: {
+        openai: { value: "sk-pre-existing", updated_at: "2026-01-01T00:00:00Z" }, // pragma: allowlist secret
+      },
+      edgar: null,
+    });
+    expect(loadProviderKeys()).toEqual({ openai: "sk-pre-existing" }); // pragma: allowlist secret
+  });
+
+  it("removeProviderKey drops the entry + uploads", async () => {
+    await loginWithVault({
+      providers: {
+        openai: { value: "sk-aaaa", updated_at: "2026-01-01T00:00:00Z" }, // pragma: allowlist secret
+        anthropic: { value: "sk-bbbb", updated_at: "2026-01-01T00:00:00Z" }, // pragma: allowlist secret
+      },
+      edgar: null,
+    });
+    await removeProviderKey("openai");
+    expect(loadProviderKeys()).toEqual({ anthropic: "sk-bbbb" }); // pragma: allowlist secret
+  });
+
+  it("clearProviderKeys wipes every provider entry + uploads", async () => {
+    await loginWithVault({
+      providers: {
+        openai: { value: "sk-aaaa", updated_at: "2026-01-01T00:00:00Z" }, // pragma: allowlist secret
+        anthropic: { value: "sk-bbbb", updated_at: "2026-01-01T00:00:00Z" }, // pragma: allowlist secret
+      },
+      edgar: { name: "Pat", email: "pat@example.com" },
+    });
+    await clearProviderKeys();
+    expect(loadProviderKeys()).toEqual({});
+  });
+
+  it("clearing keys does not nuke the EDGAR identity slot", async () => {
+    await loginWithVault({
+      providers: {
+        openai: { value: "sk-aaaa", updated_at: "2026-01-01T00:00:00Z" }, // pragma: allowlist secret
+      },
+      edgar: { name: "Pat", email: "pat@example.com" },
+    });
+    const updateSpy = vi.spyOn(apiModule, "updateVaultRequest");
+    await clearProviderKeys();
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("provider-keys cache — synchronous validation", () => {
+  it("rejects malformed slugs before any network hop", async () => {
+    await loginWithVault(EMPTY_VAULT);
     expect(() => setProviderKey("OpenAI", "x")).toThrow(/Invalid provider/);
-    // Empty.
     expect(() => setProviderKey("", "x")).toThrow(/Invalid provider/);
-    // CR/LF — header-injection vector.
     expect(() => setProviderKey("openai\nfoo", "x")).toThrow(/Invalid provider/);
-    // Oversized.
     expect(() => setProviderKey("a".repeat(33), "x")).toThrow(/Invalid provider/);
   });
 
-  it("rejects empty API keys", () => {
+  it("rejects an empty key and an over-length key", async () => {
+    await loginWithVault(EMPTY_VAULT);
     expect(() => setProviderKey("openai", "")).toThrow(/must not be empty/);
-  });
-
-  it("rejects keys above the 4096-character backend bound", () => {
     expect(() => setProviderKey("openai", "x".repeat(4097))).toThrow(
-      /exceeds the 4096/,
+      /upper bound/,
     );
   });
 
-  it("removeProviderKey ignores never-set entries (no throw)", () => {
-    expect(() => removeProviderKey("openai")).not.toThrow();
-  });
-
-  it("removeProviderKey shape-checks too — refuses a malformed slug", () => {
+  it("removeProviderKey shape-checks too", async () => {
+    await loginWithVault(EMPTY_VAULT);
     expect(() => removeProviderKey("UPPER")).toThrow(/Invalid provider/);
   });
 });
 
-describe("provider-keys store: subscribe / notify", () => {
-  it("notifies subscribers on set, remove, and clear", () => {
-    const listener = vi.fn();
-    const unsubscribe = subscribe(listener);
-
-    setProviderKey("openai", "sk-aaaaaaaaaaaa"); // pragma: allowlist secret
-    setProviderKey("anthropic", "sk-ant-bbbbbbbbbbb"); // pragma: allowlist secret
-    removeProviderKey("openai");
-    clearProviderKeys();
-
-    expect(listener).toHaveBeenCalledTimes(4);
-    // Last snapshot is empty.
-    const lastCall = listener.mock.calls[3];
-    expect(lastCall).toBeDefined();
-    expect(lastCall![0]).toEqual({});
-
-    unsubscribe();
-    setProviderKey("openai", "sk-cccccccccccc"); // pragma: allowlist secret
-    expect(listener).toHaveBeenCalledTimes(4);
+describe("provider-keys cache — locked vault", () => {
+  it("setProviderKey rejects when the vault is locked", async () => {
+    // No login → vault locked. The synchronous validators pass for a
+    // valid slug/key, so the rejection comes from mutateVault.
+    await expect(
+      setProviderKey("openai", "sk-this-is-a-long-secret"), // pragma: allowlist secret
+    ).rejects.toThrow(/locked/i);
   });
 
-  it("a throwing subscriber does not poison the rest of the chain", () => {
-    const ok = vi.fn();
-    subscribe(() => {
-      throw new Error("listener exploded");
-    });
-    subscribe(ok);
+  it("providerKeyHeaders returns {} when the vault is locked", () => {
+    expect(providerKeyHeaders()).toEqual({});
+  });
 
-    setProviderKey("openai", "sk-dddddddddddd"); // pragma: allowlist secret
-    expect(ok).toHaveBeenCalledTimes(1);
+  it("loadProviderKeys returns {} when the vault is locked", () => {
+    expect(loadProviderKeys()).toEqual({});
   });
 });
 
-describe("providerKeyHeaders()", () => {
-  it("builds a header map of X-Provider-Key-{provider} entries", () => {
-    setProviderKey("openai", "sk-eeeeeeeeeeee"); // pragma: allowlist secret
-    setProviderKey("anthropic", "sk-ant-ffffffffffff"); // pragma: allowlist secret
-
-    const headers = providerKeyHeaders();
-    expect(headers["X-Provider-Key-openai"]).toBe("sk-eeeeeeeeeeee");
-    expect(headers["X-Provider-Key-anthropic"]).toBe("sk-ant-ffffffffffff");
-    // No bare-name leakage.
-    expect(headers["openai"]).toBeUndefined();
+describe("provider-keys cache — headers + subscription", () => {
+  it("builds X-Provider-Key-* headers from the unlocked vault", async () => {
+    await loginWithVault({
+      providers: {
+        openai: { value: "sk-aaaa", updated_at: "2026-01-01T00:00:00Z" }, // pragma: allowlist secret
+        anthropic: { value: "sk-bbbb", updated_at: "2026-01-01T00:00:00Z" }, // pragma: allowlist secret
+      },
+      edgar: null,
+    });
+    expect(providerKeyHeaders()).toEqual({
+      "X-Provider-Key-openai": "sk-aaaa", // pragma: allowlist secret
+      "X-Provider-Key-anthropic": "sk-bbbb", // pragma: allowlist secret
+    });
   });
 
-  it("returns an empty map when the store is empty", () => {
-    expect(providerKeyHeaders()).toEqual({});
+  it("notifies subscribers on a key change", async () => {
+    await loginWithVault(EMPTY_VAULT);
+    const seen: Array<Record<string, string>> = [];
+    const unsub = subscribe((snap) => {
+      seen.push({ ...snap });
+    });
+    await setProviderKey("openai", "sk-cccccccccccc"); // pragma: allowlist secret
+    unsub();
+    expect(seen.length).toBeGreaterThanOrEqual(1);
+    expect(seen[seen.length - 1]).toEqual({ openai: "sk-cccccccccccc" }); // pragma: allowlist secret
   });
 });

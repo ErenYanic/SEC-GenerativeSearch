@@ -20,6 +20,12 @@ export const runtime = "nodejs";
 // Session-tier routes (`session`, `session/edgar`, `session/logout`) are
 // reached through the same proxy because session minting and EDGAR
 // registration still need the server-held `X-API-Key`.
+//
+// The allow-list includes `auth/` (user-tier login, enrolment, password
+// change, vault re-upload, sign-out) and `admin/users/` (admin mints /
+// deletes / unlocks user enrolments). The browser reaches the admin tier
+// as `/api/admin/admin/users/...` — the leading segment disambiguates the
+// proxy from the backend's own admin namespace.
 const ALLOWED_PATH_PREFIXES = [
   "filings/",
   "filings",
@@ -32,6 +38,9 @@ const ALLOWED_PATH_PREFIXES = [
   "providers/",
   "providers",
   "rag/",
+  "auth/",
+  "admin/users/",
+  "admin/users",
 ] as const;
 
 // Headers that must NEVER be carried verbatim from the browser into the

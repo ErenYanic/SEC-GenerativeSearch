@@ -13,13 +13,25 @@
 // notice; the offending value is intentionally not propagated.
 
 import type {
+  AdminUserCreateRequestBody,
+  AdminUserCreateResponseBody,
+  AdminUserDeleteResponseBody,
+  AdminUserUnlockResponseBody,
   AnswerMode,
+  AuthSignOutResponseBody,
   CitationSchema,
   ConversationTurnSchema,
   EdgarIdentityRegisterResponse,
+  EnrolmentCompleteRequestBody,
+  EnrolmentCompleteResponseBody,
   FilingListResponse,
   IngestTaskResponse,
+  LoginParamsResponse,
+  LoginRequestBody,
+  LoginResponseBody,
   OpenRouterRoutingHintsSchema,
+  PasswordChangeRequestBody,
+  PasswordChangeResponseBody,
   ProviderListResponse,
   ProviderValidateResponse,
   QueryPlanSchema,
@@ -28,6 +40,8 @@ import type {
   StatusResponse,
   TaskListResponse,
   TaskStatusResponse,
+  VaultUpdateRequestBody,
+  VaultUpdateResponseBody,
 } from "@/lib/api-types";
 import { providerKeyHeaders } from "@/lib/provider-keys";
 
@@ -310,6 +324,133 @@ export function apiFetchWithProviderKeys<T>(
   init: RequestInit = {},
 ): Promise<T> {
   return apiFetch<T>(path, { ...init, attachProviderKeys: true });
+}
+
+// ---------------------------------------------------------------------------
+// User-tier authentication
+// ---------------------------------------------------------------------------
+//
+// Wire shapes are pinned in `api-types.ts`. Every request flows through
+// the admin proxy at `/api/admin/auth/*` so the operator's `X-API-Key`
+// is injected server-side — these routes are auth-gated at the backend.
+
+/**
+ * Resolve `salt_M` + KDF params for a username. The backend returns a
+ * deterministic decoy for unknown usernames (same shape, same timing,
+ * same `Cache-Control: no-store`) so the wire never enumerates them.
+ */
+export function loginParamsRequest(
+  username: string,
+): Promise<LoginParamsResponse> {
+  return apiFetch<LoginParamsResponse>(
+    `auth/login-params?username=${encodeURIComponent(username)}`,
+  );
+}
+
+/**
+ * Submit the derived `auth_proof` to mint a session + receive the
+ * ciphertext vault. The password itself is NEVER on the wire —
+ * `auth_proof` is the HKDF output the browser already derived.
+ */
+export function loginRequest(
+  body: LoginRequestBody,
+): Promise<LoginResponseBody> {
+  return apiFetch<LoginResponseBody>("auth/login", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * Close the enrolment loop: the user has visited `/enrol?token=…`,
+ * derived their material client-side, encrypted an empty vault, and
+ * ships the artefacts in one POST. Server flips `must_enrol` and
+ * persists the row.
+ */
+export function enrolUserRequest(
+  body: EnrolmentCompleteRequestBody,
+): Promise<EnrolmentCompleteResponseBody> {
+  return apiFetch<EnrolmentCompleteResponseBody>("auth/enrol", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * Atomic password change. Validates `auth_proof_old`, rotates
+ * `salt_M` / `auth_hash`, re-uploads the re-encrypted vault under the
+ * new KEK — all in a single SQL transaction on the backend.
+ */
+export function changePasswordRequest(
+  body: PasswordChangeRequestBody,
+): Promise<PasswordChangeResponseBody> {
+  return apiFetch<PasswordChangeResponseBody>("auth/password", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * Re-upload the vault ciphertext + a fresh 12-byte IV. The IV is the
+ * caller's responsibility — `user-vault.ts::encryptVault` mints a
+ * fresh one per write because AES-GCM IV reuse is catastrophic.
+ */
+export function updateVaultRequest(
+  body: VaultUpdateRequestBody,
+): Promise<VaultUpdateResponseBody> {
+  return apiFetch<VaultUpdateResponseBody>("auth/vault", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * Revoke the active session in lockstep with the cookie. Idempotent —
+ * a request with no cookie still emits an expired cookie and returns
+ * `{cleared: false}`.
+ */
+export function signOutRequest(): Promise<AuthSignOutResponseBody> {
+  return apiFetch<AuthSignOutResponseBody>("auth/session", {
+    method: "DELETE",
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Admin user management — admin-tier surface
+// ---------------------------------------------------------------------------
+
+/**
+ * Mint a single-use enrolment token bound to `username`. The token is
+ * HMAC'd under the deployment pepper and expires after the configured
+ * TTL (default 30 min). Admin shares the resulting URL out-of-band.
+ */
+export function createUserEnrolment(
+  body: AdminUserCreateRequestBody,
+): Promise<AdminUserCreateResponseBody> {
+  return apiFetch<AdminUserCreateResponseBody>("admin/users", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** Hard-delete a user row + its encrypted vault. */
+export function deleteUserEnrolment(
+  userId: number,
+): Promise<AdminUserDeleteResponseBody> {
+  return apiFetch<AdminUserDeleteResponseBody>(
+    `admin/users/${encodeURIComponent(String(userId))}`,
+    { method: "DELETE" },
+  );
+}
+
+/** Clear the lockout state for a user (operator-driven early-clear). */
+export function unlockUserEnrolment(
+  userId: number,
+): Promise<AdminUserUnlockResponseBody> {
+  return apiFetch<AdminUserUnlockResponseBody>(
+    `admin/users/${encodeURIComponent(String(userId))}/unlock`,
+    { method: "POST" },
+  );
 }
 
 // ---------------------------------------------------------------------------

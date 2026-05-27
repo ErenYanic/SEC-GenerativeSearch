@@ -193,6 +193,75 @@ describe("path allow-list", () => {
     expect(postRes.status).toBe(200);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  it("allow-lists auth/ (login-params, login, enrol, password, vault, session)", async () => {
+    const fetchMock = vi.fn(
+      async () => new Response("{}", { status: 200 }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const id = createSession("api-k", "admin-k"); // pragma: allowlist secret
+
+    for (const [method, segments] of [
+      ["GET", ["auth", "login-params"]],
+      ["POST", ["auth", "login"]],
+      ["POST", ["auth", "enrol"]],
+      ["POST", ["auth", "password"]],
+      ["POST", ["auth", "vault"]],
+      ["DELETE", ["auth", "session"]],
+    ] as const) {
+      const res = await callHandler(method, [...segments], {
+        cookies: { [ADMIN_SESSION_COOKIE]: id },
+      });
+      expect(res.status).toBe(200);
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
+  it("allow-lists admin/users/ (mint, delete, unlock)", async () => {
+    const fetchMock = vi.fn(
+      async () => new Response("{}", { status: 200 }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const id = createSession("api-k", "admin-k"); // pragma: allowlist secret
+
+    for (const [method, segments] of [
+      ["POST", ["admin", "users"]],
+      ["DELETE", ["admin", "users", "42"]],
+      ["POST", ["admin", "users", "42", "unlock"]],
+    ] as const) {
+      const res = await callHandler(method, [...segments], {
+        cookies: { [ADMIN_SESSION_COOKIE]: id },
+      });
+      expect(res.status).toBe(200);
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("forwards auth/* routes to the backend /api/auth/* path", async () => {
+    const fetchMock = vi.fn(
+      async () => new Response("{}", { status: 200 }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const id = createSession("api-k", "admin-k"); // pragma: allowlist secret
+    await callHandler("POST", ["auth", "login"], {
+      cookies: { [ADMIN_SESSION_COOKIE]: id },
+    });
+    const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(String(call[0])).toContain("/api/auth/login");
+  });
+
+  it("forwards admin/users/* to the backend /api/admin/users/* path", async () => {
+    const fetchMock = vi.fn(
+      async () => new Response("{}", { status: 200 }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const id = createSession("api-k", "admin-k"); // pragma: allowlist secret
+    await callHandler("POST", ["admin", "users"], {
+      cookies: { [ADMIN_SESSION_COOKIE]: id },
+    });
+    const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(String(call[0])).toContain("/api/admin/users");
+  });
 });
 
 describe("header injection", () => {

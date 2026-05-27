@@ -195,3 +195,113 @@ export interface OpenRouterRoutingHintsSchema {
   data_collection?: "allow" | "deny" | null;
 }
 
+// ---------------------------------------------------------------------------
+// User-tier authentication
+// ---------------------------------------------------------------------------
+
+/**
+ * Response shape of `GET /api/auth/login-params?username=…`.
+ * The backend returns the same shape (real or deterministic decoy) for
+ * unknown usernames so the wire never enumerates them.
+ *
+ * `salt_m` is base64url over 16 bytes (22–24 chars).
+ */
+export interface LoginParamsResponse {
+  salt_m: string;
+  kdf_algo: string;
+  pbkdf2_iterations: number;
+}
+
+/** Body for `POST /api/auth/login`. `auth_proof` is 32 base64url bytes. */
+export interface LoginRequestBody {
+  username: string;
+  auth_proof: string;
+}
+
+/**
+ * Response shape of a successful `POST /api/auth/login`. Both
+ * `ciphertext_vault` and `vault_iv` are base64url; the vault decrypts
+ * client-side under the KEK derived from the user password.
+ */
+export interface LoginResponseBody {
+  user_id: number;
+  username: string;
+  ciphertext_vault: string;
+  vault_iv: string;
+}
+
+/** Body for `POST /api/auth/enrol`. */
+export interface EnrolmentCompleteRequestBody {
+  token: string;
+  salt_m: string;
+  auth_proof: string;
+  ciphertext_vault: string;
+  vault_iv: string;
+  kdf_algo: string;
+  pbkdf2_iterations: number;
+}
+
+/** Response shape of a successful `POST /api/auth/enrol`. */
+export interface EnrolmentCompleteResponseBody {
+  enrolled: boolean;
+  user_id: number;
+  username: string;
+}
+
+/** Body for `POST /api/auth/password`. */
+export interface PasswordChangeRequestBody {
+  auth_proof_old: string;
+  auth_proof_new: string;
+  salt_m: string;
+  ciphertext_vault: string;
+  vault_iv: string;
+  kdf_algo: string;
+  pbkdf2_iterations: number;
+}
+
+/** Response shape of a successful `POST /api/auth/password`. */
+export interface PasswordChangeResponseBody {
+  rotated: boolean;
+}
+
+/** Body for `POST /api/auth/vault` — re-upload an updated ciphertext. */
+export interface VaultUpdateRequestBody {
+  ciphertext_vault: string;
+  vault_iv: string;
+}
+
+/** Response shape of a successful `POST /api/auth/vault`. */
+export interface VaultUpdateResponseBody {
+  updated: boolean;
+}
+
+/** Response shape of `DELETE /api/auth/session`. */
+export interface AuthSignOutResponseBody {
+  cleared: boolean;
+}
+
+/** Body for `POST /api/admin/users`. */
+export interface AdminUserCreateRequestBody {
+  username: string;
+}
+
+/** Response shape of a successful `POST /api/admin/users`. */
+export interface AdminUserCreateResponseBody {
+  username: string;
+  enrolment_token: string;
+  expires_at: number;
+  enrol_url: string;
+}
+
+/** Response shape of `DELETE /api/admin/users/{id}`. */
+export interface AdminUserDeleteResponseBody {
+  deleted: boolean;
+  user_id: number;
+}
+
+/** Response shape of `POST /api/admin/users/{id}/unlock`. */
+export interface AdminUserUnlockResponseBody {
+  unlocked: boolean;
+  user_id: number;
+}
+
