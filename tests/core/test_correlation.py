@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 
 import pytest
 
@@ -18,7 +19,7 @@ from sec_generative_search.core.correlation import (
 
 
 @pytest.fixture(autouse=True)
-def _clear_correlation() -> None:
+def _clear_correlation() -> Iterator[None]:
     """Ensure each test starts and ends with no bound correlation ID."""
     token = set_correlation_id("")  # placeholder; immediately reset below
     reset_correlation_id(token)
