@@ -54,7 +54,7 @@ class TestValidateRequestId:
             "abc12345",  # exactly the 8-char floor
             "A" * 128,  # exactly the 128-char ceiling
             "req-2026-05-28_abc",
-            "0123456789abcdef0123456789abcdef",
+            "0123456789abcdef0123456789abcdef",  # pragma: allowlist secret
         ],
     )
     def test_well_formed_ids_accepted(self, value: str) -> None:
