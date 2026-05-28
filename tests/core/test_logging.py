@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from pathlib import Path
 
 import pytest
 
 from sec_generative_search.core import logging as sgs_logging
+from sec_generative_search.core.correlation import bind_correlation_id
 from sec_generative_search.core.logging import (
     LOGGER_NAME,
+    CorrelationIdFilter,
+    JsonFormatter,
     audit_log,
     configure_logging,
     get_logger,
@@ -139,6 +143,112 @@ class TestAuditLog:
         assert "SECURITY_AUDIT:" in msg
         assert "action=delete_filing" in msg
         assert "client=127.0.0.1" in msg
+
+
+def _make_record(msg: str = "hello %s", *args: object) -> logging.LogRecord:
+    return logging.LogRecord(
+        name="sec_generative_search.test",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg=msg,
+        args=args,
+        exc_info=None,
+    )
+
+
+class TestCorrelationIdFilter:
+    def test_injects_dash_without_scope(self) -> None:
+        record = _make_record()
+        assert CorrelationIdFilter().filter(record) is True
+        assert record.correlation_id == "-"
+
+    def test_injects_bound_id(self) -> None:
+        record = _make_record()
+        with bind_correlation_id("cid-12345678"):
+            CorrelationIdFilter().filter(record)
+        assert record.correlation_id == "cid-12345678"
+
+
+class TestJsonFormatter:
+    def test_emits_fixed_field_set(self) -> None:
+        record = _make_record("processed %s filings", 3)
+        CorrelationIdFilter().filter(record)
+        line = JsonFormatter().format(record)
+        payload = json.loads(line)
+        assert payload["level"] == "INFO"
+        assert payload["logger"] == "sec_generative_search.test"
+        assert payload["message"] == "processed 3 filings"
+        assert payload["correlation_id"] == "-"
+        assert set(payload) == {"ts", "level", "logger", "correlation_id", "message"}
+
+    def test_carries_bound_correlation_id(self) -> None:
+        record = _make_record("x")
+        with bind_correlation_id("req-abcdef12"):
+            CorrelationIdFilter().filter(record)
+        payload = json.loads(JsonFormatter().format(record))
+        assert payload["correlation_id"] == "req-abcdef12"
+
+    @pytest.mark.security
+    def test_does_not_serialise_arbitrary_extra(self) -> None:
+        # A stray ``extra`` must never reach the JSON stream — it could
+        # smuggle a ticker / query / secret into the aggregator.
+        record = _make_record("x")
+        record.ticker = "AAPL"  # type: ignore[attr-defined]
+        record.api_key = "sk-secret"  # type: ignore[attr-defined]
+        line = JsonFormatter().format(record)
+        assert "AAPL" not in line
+        assert "sk-secret" not in line
+
+    def test_includes_exception_text_when_present(self) -> None:
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            import sys
+
+            record = logging.LogRecord(
+                name="sec_generative_search.test",
+                level=logging.ERROR,
+                pathname=__file__,
+                lineno=1,
+                msg="failed",
+                args=(),
+                exc_info=sys.exc_info(),
+            )
+        payload = json.loads(JsonFormatter().format(record))
+        assert "ValueError" in payload["exc"]
+
+
+class TestLogFormatSelection:
+    def test_json_format_uses_json_formatter(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LOG_FORMAT", "json")
+        configure_logging(level=logging.INFO, use_rich=False)
+        handlers = logging.getLogger(LOGGER_NAME).handlers
+        assert any(isinstance(h.formatter, JsonFormatter) for h in handlers)
+
+    def test_console_format_does_not_use_json_formatter(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("LOG_FORMAT", "console")
+        configure_logging(level=logging.INFO, use_rich=False)
+        handlers = logging.getLogger(LOGGER_NAME).handlers
+        assert not any(isinstance(h.formatter, JsonFormatter) for h in handlers)
+
+    def test_unknown_format_falls_back_to_console(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LOG_FORMAT", "yaml-nonsense")
+        configure_logging(level=logging.INFO, use_rich=False)
+        handlers = logging.getLogger(LOGGER_NAME).handlers
+        assert not any(isinstance(h.formatter, JsonFormatter) for h in handlers)
+
+    def test_every_handler_carries_correlation_filter(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("LOG_FILE_PATH", str(tmp_path / "run.log"))
+        configure_logging(level=logging.INFO, use_rich=False)
+        handlers = logging.getLogger(LOGGER_NAME).handlers
+        assert handlers
+        for handler in handlers:
+            assert any(isinstance(f, CorrelationIdFilter) for f in handler.filters)
 
 
 class TestSuppressThirdPartyLoggers:

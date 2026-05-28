@@ -49,6 +49,12 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from sec_generative_search.api.errors import envelope
 from sec_generative_search.api.policies import resolve_policy
 from sec_generative_search.config.settings import get_settings
+from sec_generative_search.core.correlation import (
+    new_correlation_id,
+    reset_correlation_id,
+    set_correlation_id,
+    validate_request_id,
+)
 from sec_generative_search.core.logging import get_logger
 
 # Imported lazily inside the dispatch path so the middleware module
@@ -73,7 +79,9 @@ def _session_cookie_name() -> str:
 
 __all__ = [
     "DEFAULT_MAX_CONTENT_LENGTH",
+    "REQUEST_ID_HEADER",
     "ContentSizeLimitMiddleware",
+    "CorrelationIdMiddleware",
     "InsecureTransportWarningMiddleware",
     "RateLimitMiddleware",
     "SecurityHeadersMiddleware",
@@ -81,6 +89,78 @@ __all__ = [
 
 
 logger = get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Correlation ID
+# ---------------------------------------------------------------------------
+
+
+# Both the inbound (operator-supplied) and outbound (echoed) header name.
+REQUEST_ID_HEADER = b"x-request-id"
+
+
+class CorrelationIdMiddleware:
+    """Bind a per-request correlation ID and echo it as ``X-Request-ID``.
+
+    Pure ASGI — avoids the ``BaseHTTPMiddleware`` threadpool hop so the
+    :class:`~contextvars.ContextVar` it sets stays visible to the same
+    task that runs the route, retrieval, and generation. The ID is:
+
+    - adopted from an inbound ``X-Request-ID`` **only** when it passes
+      :func:`~sec_generative_search.core.correlation.validate_request_id`
+      (bounded alphanumeric/``-``/``_``; CR/LF and control characters
+      rejected — a log/header-injection guard); otherwise
+    - freshly minted.
+
+    The ID is echoed back on the ``http.response.start`` headers so a
+    caller can correlate its request with server logs, and it is reset
+    in ``finally`` so the ContextVar never leaks across requests sharing
+    a worker.
+
+    Placed outermost among the bespoke middlewares (just inside CORS) so
+    even rate-limit rejections and oversize-body 413s emit log records —
+    and a response header — carrying the ID.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers", []))
+        raw = headers.get(REQUEST_ID_HEADER)
+        inbound: str | None = None
+        if raw is not None:
+            # Header bytes are latin-1 on the wire; a decode failure or a
+            # shape-check miss both fall through to a freshly minted ID.
+            try:
+                inbound = validate_request_id(raw.decode("latin-1"))
+            except (UnicodeDecodeError, ValueError):
+                inbound = None
+
+        correlation_id = inbound or new_correlation_id()
+        cid_bytes = correlation_id.encode("ascii")
+        token = set_correlation_id(correlation_id)
+
+        async def send_with_id(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                # Drop any X-Request-ID the app set so the response
+                # carries exactly the one we bound, never a duplicate.
+                response_headers = [
+                    (n, v) for n, v in message.get("headers", []) if n != REQUEST_ID_HEADER
+                ]
+                response_headers.append((REQUEST_ID_HEADER, cid_bytes))
+                message["headers"] = response_headers
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_with_id)
+        finally:
+            reset_correlation_id(token)
 
 
 # ---------------------------------------------------------------------------

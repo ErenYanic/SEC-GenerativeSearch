@@ -20,6 +20,7 @@ Usage:
 """
 
 import hashlib
+import json
 import logging
 import logging.handlers
 import os
@@ -29,11 +30,15 @@ from pathlib import Path
 from rich.console import Console
 from rich.logging import RichHandler
 
+from sec_generative_search.core.correlation import get_correlation_id
+
 # Package-level logger name
 LOGGER_NAME = "sec_generative_search"
 
-# Default format for non-Rich handlers (e.g., file output)
-DEFAULT_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+# Default format for non-Rich handlers (e.g., file output). The
+# ``correlation_id`` field is injected onto every record by
+# :class:`CorrelationIdFilter`, so it is always present at format time.
+DEFAULT_FORMAT = "%(asctime)s | %(levelname)-8s | %(correlation_id)s | %(name)s | %(message)s"
 DEFAULT_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # Track whether logging has been configured
@@ -51,16 +56,77 @@ def _get_log_level() -> int:
     return getattr(logging, level_name, logging.INFO)
 
 
+def _get_log_format() -> str:
+    """Return the configured log format mode: ``"console"`` or ``"json"``.
+
+    Read directly from ``LOG_FORMAT`` (same os.environ pattern as
+    :func:`_get_log_level`) to avoid a circular import with
+    pydantic-settings. ``console`` (Rich for interactive terminals, plain
+    text otherwise) is the Scenario-A default; ``json`` emits one JSON
+    object per line for Scenario B/C log aggregators. Unknown values fall
+    back to ``console``.
+    """
+    value = os.environ.get("LOG_FORMAT", "console").strip().lower()
+    return value if value in ("console", "json") else "console"
+
+
+class CorrelationIdFilter(logging.Filter):
+    """Inject the active correlation ID onto every log record.
+
+    Attached to each handler (not the logger) so that both
+    directly-logged and propagated child-logger records carry the
+    attribute before any formatter references it. Absent a request scope
+    the value is ``-``.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.correlation_id = get_correlation_id() or "-"
+        return True
+
+
+class JsonFormatter(logging.Formatter):
+    """Dependency-free JSON-lines formatter for log aggregators.
+
+    Emits a fixed, **content-free** field set: timestamp, level, logger
+    name, correlation ID, and the rendered message. Arbitrary ``extra``
+    record attributes are deliberately NOT serialised — a stray ``extra``
+    could otherwise smuggle a ticker, query, or secret into the log
+    stream. Exception text is included only when the record carries
+    ``exc_info``.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "ts": self.formatTime(record, DEFAULT_DATE_FORMAT),
+            "level": record.levelname,
+            "logger": record.name,
+            "correlation_id": getattr(record, "correlation_id", "-"),
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["exc"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False)
+
+
+def _make_formatter(log_format: str) -> logging.Formatter:
+    """Return the formatter for the non-Rich handlers given the format mode."""
+    if log_format == "json":
+        return JsonFormatter()
+    return logging.Formatter(DEFAULT_FORMAT, datefmt=DEFAULT_DATE_FORMAT)
+
+
 def _add_file_handler(
     logger: logging.Logger,
     file_path: str,
     log_level: int,
+    log_format: str,
 ) -> None:
     """Attach a ``RotatingFileHandler`` to *logger*.
 
     Creates parent directories if they do not exist.  Rotation is
     controlled by ``LOG_FILE_MAX_BYTES`` (default 10 MB) and
-    ``LOG_FILE_BACKUP_COUNT`` (default 3).
+    ``LOG_FILE_BACKUP_COUNT`` (default 3). The handler honours the
+    ``LOG_FORMAT`` mode so file output matches the console stream.
     """
     max_bytes = int(os.environ.get("LOG_FILE_MAX_BYTES", 10_485_760))
     backup_count = int(os.environ.get("LOG_FILE_BACKUP_COUNT", 3))
@@ -75,7 +141,8 @@ def _add_file_handler(
         encoding="utf-8",
     )
     file_handler.setLevel(log_level)
-    file_handler.setFormatter(logging.Formatter(DEFAULT_FORMAT, datefmt=DEFAULT_DATE_FORMAT))
+    file_handler.setFormatter(_make_formatter(log_format))
+    file_handler.addFilter(CorrelationIdFilter())
     logger.addHandler(file_handler)
 
 
@@ -100,6 +167,7 @@ def configure_logging(
         return
 
     log_level = level if level is not None else _get_log_level()
+    log_format = _get_log_format()
 
     # Get the package-level logger
     logger = logging.getLogger(LOGGER_NAME)
@@ -108,8 +176,11 @@ def configure_logging(
     # Remove any existing handlers
     logger.handlers.clear()
 
-    # Determine if we should use Rich (interactive terminal)
-    is_interactive = sys.stdout.isatty() and use_rich
+    # Rich is reserved for human-facing console output. In ``json`` mode
+    # we always use a plain stream handler so the stream stays
+    # machine-parseable for a B/C log aggregator even on an interactive
+    # terminal.
+    is_interactive = sys.stdout.isatty() and use_rich and log_format != "json"
 
     if is_interactive:
         # Rich handler for beautiful console output
@@ -126,9 +197,13 @@ def configure_logging(
     else:
         # Standard handler for non-interactive environments
         handler = logging.StreamHandler(sys.stderr)
-        handler.setFormatter(logging.Formatter(DEFAULT_FORMAT, datefmt=DEFAULT_DATE_FORMAT))
+        handler.setFormatter(_make_formatter(log_format))
 
     handler.setLevel(log_level)
+    # The correlation-ID filter runs on every handler so propagated
+    # child-logger records carry the attribute before the formatter
+    # references it.
+    handler.addFilter(CorrelationIdFilter())
     logger.addHandler(handler)
 
     # Optional file logging via RotatingFileHandler.
@@ -136,7 +211,7 @@ def configure_logging(
     # to avoid circular imports with pydantic-settings.
     log_file_path = os.environ.get("LOG_FILE_PATH")
     if log_file_path:
-        _add_file_handler(logger, log_file_path, log_level)
+        _add_file_handler(logger, log_file_path, log_level, log_format)
 
     # Prevent propagation to root logger
     logger.propagate = False

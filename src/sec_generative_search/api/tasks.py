@@ -85,6 +85,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from sec_generative_search.config.settings import get_settings
+from sec_generative_search.core.correlation import bind_correlation_id, get_correlation_id
 from sec_generative_search.core.exceptions import (
     DatabaseError,
     FetchError,
@@ -506,9 +507,16 @@ class TaskManager:
             if edgar_identity_resolver is not None:
                 self._task_resolvers[task_id] = edgar_identity_resolver
 
+        # Capture the originating request's correlation ID so the worker
+        # thread — which does not inherit the request's ContextVar — can
+        # re-bind it and stitch its log records back to the request that
+        # enqueued the task. ``None`` when enqueued outside a request
+        # scope (e.g. a unit test).
+        correlation_id = get_correlation_id()
+
         thread = threading.Thread(
             target=self._run_task,
-            args=(info,),
+            args=(info, correlation_id),
             name=f"ingest-{task_id[:8]}",
             daemon=True,
         )
@@ -621,7 +629,7 @@ class TaskManager:
     # Worker
     # ------------------------------------------------------------------
 
-    def _run_task(self, info: TaskInfo) -> None:
+    def _run_task(self, info: TaskInfo, correlation_id: str | None = None) -> None:
         """Top-level worker entry. Acquires the GPU slot then runs ``_execute``.
 
         Wraps every error path with the terminal-state persistence
@@ -629,7 +637,15 @@ class TaskManager:
         right ``status``. The duration timer is cancelled in
         ``finally`` so a worker that finishes early does not page the
         operator with a spurious auto-cancel a few minutes later.
+
+        ``correlation_id`` is the ID captured from the enqueuing request;
+        it is re-bound for the lifetime of the worker so every record
+        the worker emits carries the originating request's ID.
         """
+        with bind_correlation_id(correlation_id):
+            self._run_task_body(info)
+
+    def _run_task_body(self, info: TaskInfo) -> None:
         logger.info("Task %s waiting for GPU slot...", info.task_id[:8])
         self._gpu_semaphore.acquire()
 

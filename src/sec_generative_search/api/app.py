@@ -38,6 +38,7 @@ from sec_generative_search import __version__
 from sec_generative_search.api.errors import install_error_handlers
 from sec_generative_search.api.middleware import (
     ContentSizeLimitMiddleware,
+    CorrelationIdMiddleware,
     InsecureTransportWarningMiddleware,
     RateLimitMiddleware,
     SecurityHeadersMiddleware,
@@ -303,12 +304,16 @@ def create_app() -> FastAPI:
     #
     #   1. CORSMiddleware           — first to see preflight; emits
     #                                 headers without invoking the app.
-    #   2. SecurityHeadersMiddleware — touches every response, including
+    #   2. CorrelationIdMiddleware  — binds the per-request correlation ID
+    #                                 before any inner middleware logs, so
+    #                                 even rate-limit / 413 rejections carry
+    #                                 it; echoes X-Request-ID on the way out.
+    #   3. SecurityHeadersMiddleware — touches every response, including
     #                                  rate-limit and 413 responses.
-    #   3. RateLimitMiddleware       — rejects abusive callers before we
+    #   4. RateLimitMiddleware       — rejects abusive callers before we
     #                                  pay the cost of body parsing.
-    #   4. ContentSizeLimitMiddleware — cheap reject on the body stream.
-    #   5. InsecureTransportWarning  — closest to the route layer; only
+    #   5. ContentSizeLimitMiddleware — cheap reject on the body stream.
+    #   6. InsecureTransportWarning  — closest to the route layer; only
     #                                  needs to observe, not modify.
     # ------------------------------------------------------------------
     app.add_middleware(InsecureTransportWarningMiddleware)
@@ -326,6 +331,7 @@ def create_app() -> FastAPI:
         login_rpm=settings.api.rate_limit_login,
     )
     app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(CorrelationIdMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.api.cors_origins,
