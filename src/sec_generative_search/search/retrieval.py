@@ -36,6 +36,7 @@ Logging discipline:
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from datetime import date
 from typing import TYPE_CHECKING
@@ -43,6 +44,7 @@ from typing import TYPE_CHECKING
 from sec_generative_search.config.settings import get_settings
 from sec_generative_search.core.exceptions import SearchError
 from sec_generative_search.core.logging import get_logger, redact_for_log
+from sec_generative_search.core.metrics import get_metrics
 from sec_generative_search.core.types import RetrievalResult, SearchResult
 
 if TYPE_CHECKING:
@@ -292,36 +294,47 @@ class RetrievalService:
             self._reranker is not None,
         )
 
-        raw = self._fetch_candidates(
-            query=query,
-            n_results=fetch_count,
-            ticker=ticker,
-            form_type=form_type,
-            accession_number=accession_number,
-            start_date=start_date,
-            end_date=end_date,
-        )
-
-        if effective_min_sim > 0.0:
-            raw = [r for r in raw if r.similarity >= effective_min_sim]
-
-        candidates = self._lift_to_retrieval_results(raw)
-        candidates = _dedupe_by_chunk_id(candidates)
-
-        if self._reranker is not None and candidates:
-            candidates = self._apply_reranker(query, candidates)
-
-        if max_per_section > 0 or max_per_filing > 0:
-            candidates = _apply_diversity_caps(
-                candidates,
-                max_per_section=max_per_section,
-                max_per_filing=max_per_filing,
+        # Time only the real retrieval work (embed → vector search →
+        # rank → pack), not the cheap validation above. ``finally``
+        # records even when ``_fetch_candidates`` raises, so a backend
+        # outage still shows up as latency in the histogram. The label
+        # set is empty — retrieval carries no content-free axis worth
+        # the cardinality.
+        start = time.monotonic()
+        try:
+            raw = self._fetch_candidates(
+                query=query,
+                n_results=fetch_count,
+                ticker=ticker,
+                form_type=form_type,
+                accession_number=accession_number,
+                start_date=start_date,
+                end_date=end_date,
             )
 
-        if effective_budget > 0:
-            candidates = _pack_to_budget(candidates, budget=effective_budget)
+            if effective_min_sim > 0.0:
+                raw = [r for r in raw if r.similarity >= effective_min_sim]
 
-        final = candidates[:effective_top_k]
+            candidates = self._lift_to_retrieval_results(raw)
+            candidates = _dedupe_by_chunk_id(candidates)
+
+            if self._reranker is not None and candidates:
+                candidates = self._apply_reranker(query, candidates)
+
+            if max_per_section > 0 or max_per_filing > 0:
+                candidates = _apply_diversity_caps(
+                    candidates,
+                    max_per_section=max_per_section,
+                    max_per_filing=max_per_filing,
+                )
+
+            if effective_budget > 0:
+                candidates = _pack_to_budget(candidates, budget=effective_budget)
+
+            final = candidates[:effective_top_k]
+        finally:
+            get_metrics().observe_retrieval(time.monotonic() - start)
+
         logger.info("Retrieval returned %d result(s)", len(final))
         return final
 

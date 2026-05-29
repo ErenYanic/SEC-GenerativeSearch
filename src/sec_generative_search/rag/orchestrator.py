@@ -49,8 +49,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from sec_generative_search.config.settings import get_settings
-from sec_generative_search.core.exceptions import GenerationError
+from sec_generative_search.core.exceptions import GenerationError, ProviderError
 from sec_generative_search.core.logging import get_logger, redact_for_log
+from sec_generative_search.core.metrics import get_metrics
 from sec_generative_search.core.types import (
     GenerationResult,
     RetrievalResult,
@@ -96,6 +97,31 @@ _REFUSAL_TEXT = (
     "were retrieved for this query. Try a different ticker, form type, or "
     "date range, or ingest more filings."
 )
+
+
+def _resolve_pricing_tier(provider: str, model: str) -> str:
+    """Best-effort coarse pricing tier for ``(provider, model)``.
+
+    Reads the static :class:`ProviderRegistry` capability matrix — no
+    network call, no key. Returns the :class:`PricingTier` value string
+    (e.g. ``"low"``) or ``"unknown"`` when the catalogue does not tag
+    the slug (every OpenRouter slug, plus freshly-released models).
+    Until catalogues carry pricing metadata for a slug, this resolves
+    to ``"unknown"`` and the metrics code needs no change.
+
+    Defensive by design: any lookup failure collapses to ``"unknown"``
+    so an instrumentation seam can never break a generation call.
+    """
+    try:
+        from sec_generative_search.providers.registry import (
+            ProviderRegistry,
+            ProviderSurface,
+        )
+
+        capability = ProviderRegistry.get_capability(provider, ProviderSurface.LLM, model or None)
+        return capability.pricing_tier.value
+    except Exception:
+        return "unknown"
 
 
 @dataclass(frozen=True)
@@ -289,7 +315,22 @@ class RAGOrchestrator:
             prefer_structured_output,
         )
 
-        response = self._llm.generate(request)
+        try:
+            response = self._llm.generate(request)
+        except ProviderError as exc:
+            # Count provider-call failures keyed by the curated provider
+            # name and the exception class name (content-free); never the
+            # message, which could echo back upstream-provider text.
+            get_metrics().record_provider_failure(self._llm.provider_name, type(exc).__name__)
+            raise
+
+        result_model = response.model or effective_model
+        self._record_generation_metrics(
+            provider=self._llm.provider_name,
+            model=result_model,
+            token_usage=response.token_usage,
+            latency_seconds=time.monotonic() - start,
+        )
 
         extracted = extract_citations(
             response.text,
@@ -300,7 +341,7 @@ class RAGOrchestrator:
         return GenerationResult(
             answer=extracted.answer,
             provider=self._llm.provider_name,
-            model=response.model or effective_model,
+            model=result_model,
             prompt_version=template.version,
             citations=extracted.citations,
             retrieved_chunks=retrieved,
@@ -401,14 +442,28 @@ class RAGOrchestrator:
         accumulated: list[str] = []
         token_usage = TokenUsage()
         last_model_slug = effective_model
-        for chunk in self._llm.generate_stream(request):
-            if chunk.text:
-                accumulated.append(chunk.text)
-                yield StreamEvent(delta=chunk.text)
-            if chunk.token_usage.total_tokens > 0:
-                token_usage = chunk.token_usage
-            if chunk.model:
-                last_model_slug = chunk.model
+        try:
+            for chunk in self._llm.generate_stream(request):
+                if chunk.text:
+                    accumulated.append(chunk.text)
+                    yield StreamEvent(delta=chunk.text)
+                if chunk.token_usage.total_tokens > 0:
+                    token_usage = chunk.token_usage
+                if chunk.model:
+                    last_model_slug = chunk.model
+        except ProviderError as exc:
+            # A provider failure can surface mid-stream (e.g. an
+            # in-flight rate-limit or content-filter block). Count it the
+            # same way as the non-streaming path before re-raising.
+            get_metrics().record_provider_failure(self._llm.provider_name, type(exc).__name__)
+            raise
+
+        self._record_generation_metrics(
+            provider=self._llm.provider_name,
+            model=last_model_slug,
+            token_usage=token_usage,
+            latency_seconds=time.monotonic() - start,
+        )
 
         full_answer = "".join(accumulated)
         extracted = extract_citations(
@@ -432,6 +487,34 @@ class RAGOrchestrator:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _record_generation_metrics(
+        self,
+        *,
+        provider: str,
+        model: str,
+        token_usage: TokenUsage,
+        latency_seconds: float,
+    ) -> None:
+        """Record generation latency + token counters for one call.
+
+        Single seam shared by :meth:`generate` and
+        :meth:`generate_stream` so both surfaces feed the same series.
+        Every label is content-free: ``provider`` (curated name),
+        ``model`` (slug, cardinality-bounded inside the facade), and the
+        coarse ``pricing_tier``. Token counts carry no PII. The refusal
+        short-circuit deliberately does NOT call this — no provider call
+        was made, so there is no latency or token usage to attribute.
+        """
+        metrics = get_metrics()
+        metrics.observe_generation(provider, latency_seconds)
+        metrics.record_tokens(
+            provider,
+            model,
+            input_tokens=token_usage.input_tokens,
+            output_tokens=token_usage.output_tokens,
+            pricing_tier=_resolve_pricing_tier(provider, model),
+        )
 
     def _resolve_output_language(self, detected_language: str) -> str:
         """Pick the answer-output language from settings + plan.

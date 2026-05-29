@@ -93,6 +93,7 @@ from sec_generative_search.core.exceptions import (
     SECGenerativeSearchError,
 )
 from sec_generative_search.core.logging import get_logger
+from sec_generative_search.core.metrics import get_metrics
 from sec_generative_search.pipeline.fetch import FilingFetcher, FilingInfo
 from sec_generative_search.pipeline.orchestrator import PipelineOrchestrator
 
@@ -1044,6 +1045,13 @@ class TaskManager:
                 )
             )
             info.progress.filings_done += 1
+
+            # Ingestion latency histogram. The orchestrator already
+            # measured the per-filing fetch→parse→chunk→embed→store
+            # wall-clock; reuse it rather than starting a second timer.
+            # No labels — ticker / form type would be both Tier-2/3 and
+            # high-cardinality.
+            get_metrics().observe_ingestion(result.ingest_result.duration_seconds)
 
             self._push(
                 info,

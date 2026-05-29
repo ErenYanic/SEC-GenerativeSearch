@@ -84,6 +84,16 @@ local-embeddings = [
     "torch>=2.2",
 ]
 
+# In-process metrics registry + OpenMetrics exposition for the
+# admin-gated ``GET /api/metrics`` endpoint. Kept optional so
+# Scenario-A local runs that never scrape carry no extra payload;
+# ``core/metrics.py`` degrades to a no-op recorder when the extra is
+# absent and the endpoint returns ``503 metrics_unavailable``.
+# Install with: `uv pip install -e ".[metrics]"`.
+metrics = [
+    "prometheus-client>=0.20",
+]
+
 # Development tools — linting, formatting, pre-commit hooks.
 dev = [
     "ruff>=0.11",

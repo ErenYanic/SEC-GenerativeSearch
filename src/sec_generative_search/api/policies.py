@@ -227,6 +227,15 @@ ROUTE_POLICIES: tuple[tuple[str, str | None, RoutePolicy], ...] = (
         None,
         RoutePolicy(rate_category="general", max_body_bytes=1 * _KIB),
     ),
+    # Metrics exposition (admin-gated GET, no body). 1 KiB cap defends
+    # against declared-Content-Length probes; the route auth is the real
+    # control. Shares the ``general`` bucket — a scraper polls on a fixed
+    # cadence well under that ceiling.
+    (
+        "/api/metrics",
+        None,
+        RoutePolicy(rate_category="general", max_body_bytes=1 * _KIB),
+    ),
 )
 
 

@@ -65,10 +65,13 @@ jobs:
       - name: Install core + test dependencies
         # Intentionally exclude ``[encryption]`` — pysqlcipher3 requires a
         # system library that is slow to install on CI and is covered by
-        # a dedicated integration workflow.
+        # a dedicated integration workflow.  ``[metrics]`` is pure-Python
+        # (prometheus-client) and is included so the metrics facade +
+        # ``GET /api/metrics`` available-path tests run in CI rather than
+        # skipping via ``importorskip``.
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[test]"
+          python -m pip install -e ".[test,metrics]"
 
       - name: Run tests with coverage
         run: pytest --cov=sec_generative_search --cov-report=term-missing
