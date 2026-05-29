@@ -32,7 +32,7 @@ class MimoProvider(OpenAICompatibleLLMProvider):
 
     provider_name = "mimo"
     default_base_url = "https://api.xiaomimimo.com/v1"
-    default_model = "mimo-v2.5-pro"
+    default_model = "mimo-v2.5"
 
     # Xiaomi's published slugs preserve the ``MiMo-V2-*`` casing — the
     # API is case-sensitive. ``MiMo-V2-Pro`` is the reasoning-capable
@@ -48,7 +48,7 @@ class MimoProvider(OpenAICompatibleLLMProvider):
                 prompt_caching=False,
                 context_window_tokens=1_048_576,
                 max_output_tokens=131_072,
-                pricing_tier=PricingTier.STANDARD,
+                pricing_tier=PricingTier.HIGH,
             ),
         ),
         "mimo-v2-pro": ModelInfo(
@@ -60,7 +60,7 @@ class MimoProvider(OpenAICompatibleLLMProvider):
                 prompt_caching=False,
                 context_window_tokens=1_048_576,
                 max_output_tokens=131_072,
-                pricing_tier=PricingTier.STANDARD,
+                pricing_tier=PricingTier.HIGH,
             ),
         ),
         "mimo-v2.5": ModelInfo(

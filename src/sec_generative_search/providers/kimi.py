@@ -27,7 +27,7 @@ class KimiProvider(OpenAICompatibleLLMProvider):
 
     provider_name = "kimi"
     default_base_url = "https://api.moonshot.ai/v1"
-    default_model = "moonshot-v1-8k"
+    default_model = "kimi-k2.5"
 
     MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
         "kimi-k2.6": ModelInfo(
@@ -55,7 +55,7 @@ class KimiProvider(OpenAICompatibleLLMProvider):
                 pricing_tier=PricingTier.STANDARD,
             ),
         ),
-        "kimi-k2-0905-preview": ModelInfo(
+        "kimi-k2-0905": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
                 streaming=True,
@@ -67,7 +67,7 @@ class KimiProvider(OpenAICompatibleLLMProvider):
                 pricing_tier=PricingTier.STANDARD,
             ),
         ),
-        "kimi-k2-0711-preview": ModelInfo(
+        "kimi-k2": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
                 streaming=True,
@@ -77,18 +77,6 @@ class KimiProvider(OpenAICompatibleLLMProvider):
                 context_window_tokens=131_072,
                 max_output_tokens=131_072,
                 pricing_tier=PricingTier.STANDARD,
-            ),
-        ),
-        "kimi-k2-turbo-preview": ModelInfo(
-            capability=ProviderCapability(
-                chat=True,
-                streaming=True,
-                tool_use=True,
-                structured_output=True,
-                prompt_caching=True,
-                context_window_tokens=262_144,
-                max_output_tokens=262_144,
-                pricing_tier=PricingTier.HIGH,
             ),
         ),
         "kimi-k2-thinking": ModelInfo(
@@ -101,54 +89,6 @@ class KimiProvider(OpenAICompatibleLLMProvider):
                 context_window_tokens=262_144,
                 max_output_tokens=262_144,
                 pricing_tier=PricingTier.STANDARD,
-            ),
-        ),
-        "kimi-k2-thinking-turbo": ModelInfo(
-            capability=ProviderCapability(
-                chat=True,
-                streaming=True,
-                tool_use=True,
-                structured_output=True,
-                prompt_caching=True,
-                context_window_tokens=262_144,
-                max_output_tokens=262_144,
-                pricing_tier=PricingTier.HIGH,
-            ),
-        ),
-        "moonshot-v1-8k": ModelInfo(
-            capability=ProviderCapability(
-                chat=True,
-                streaming=True,
-                tool_use=True,
-                structured_output=True,
-                prompt_caching=False,
-                context_window_tokens=8_192,
-                max_output_tokens=8_192,
-                pricing_tier=PricingTier.STANDARD,
-            ),
-        ),
-        "moonshot-v1-32k": ModelInfo(
-            capability=ProviderCapability(
-                chat=True,
-                streaming=True,
-                tool_use=True,
-                structured_output=True,
-                prompt_caching=False,
-                context_window_tokens=32_768,
-                max_output_tokens=32_768,
-                pricing_tier=PricingTier.STANDARD,
-            ),
-        ),
-        "moonshot-v1-128k": ModelInfo(
-            capability=ProviderCapability(
-                chat=True,
-                streaming=True,
-                tool_use=True,
-                structured_output=True,
-                prompt_caching=False,
-                context_window_tokens=131_072,
-                max_output_tokens=131_072,
-                pricing_tier=PricingTier.HIGH,
             ),
         ),
     }

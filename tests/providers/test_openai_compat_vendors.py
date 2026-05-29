@@ -104,7 +104,7 @@ _LLM_VENDORS: list[tuple[type, str, str, str]] = [
         KimiProvider,
         "kimi",
         "https://api.moonshot.ai/v1",
-        "moonshot-v1-8k",
+        "kimi-k2.5",
     ),
     (
         DeepSeekProvider,
@@ -140,7 +140,7 @@ _LLM_VENDORS: list[tuple[type, str, str, str]] = [
         MimoProvider,
         "mimo",
         "https://api.xiaomimimo.com/v1",
-        "mimo-v2.5-pro",
+        "mimo-v2.5",
     ),
     (
         OpenRouterProvider,
