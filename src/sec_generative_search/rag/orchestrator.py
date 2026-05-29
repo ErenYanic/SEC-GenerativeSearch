@@ -52,6 +52,7 @@ from sec_generative_search.config.settings import get_settings
 from sec_generative_search.core.exceptions import GenerationError, ProviderError
 from sec_generative_search.core.logging import get_logger, redact_for_log
 from sec_generative_search.core.metrics import get_metrics
+from sec_generative_search.core.provider_health import get_provider_health
 from sec_generative_search.core.types import (
     GenerationResult,
     RetrievalResult,
@@ -320,8 +321,11 @@ class RAGOrchestrator:
         except ProviderError as exc:
             # Count provider-call failures keyed by the curated provider
             # name and the exception class name (content-free); never the
-            # message, which could echo back upstream-provider text.
+            # message, which could echo back upstream-provider text. The
+            # same content-free signal also feeds the passive health
+            # registry so the admin endpoint can surface the breaker state.
             get_metrics().record_provider_failure(self._llm.provider_name, type(exc).__name__)
+            get_provider_health().record_failure(self._llm.provider_name, type(exc).__name__)
             raise
 
         result_model = response.model or effective_model
@@ -456,6 +460,7 @@ class RAGOrchestrator:
             # in-flight rate-limit or content-filter block). Count it the
             # same way as the non-streaming path before re-raising.
             get_metrics().record_provider_failure(self._llm.provider_name, type(exc).__name__)
+            get_provider_health().record_failure(self._llm.provider_name, type(exc).__name__)
             raise
 
         self._record_generation_metrics(
@@ -515,6 +520,10 @@ class RAGOrchestrator:
             output_tokens=token_usage.output_tokens,
             pricing_tier=_resolve_pricing_tier(provider, model),
         )
+        # Feed the passive health registry the same content-free outcome:
+        # a success closes the breaker and records the call latency the
+        # admin health endpoint surfaces. Shared by generate + stream.
+        get_provider_health().record_success(provider, latency_seconds)
 
     def _resolve_output_language(self, detected_language: str) -> str:
         """Pick the answer-output language from settings + plan.

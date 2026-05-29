@@ -446,6 +446,77 @@ class ProviderValidateResponse(_BaseModel):
     surface: str
 
 
+class ProviderHealthSchema(_BaseModel):
+    """One provider's passive liveness health.
+
+    An explicit allow-list lift of
+    :class:`~sec_generative_search.core.provider_health.ProviderHealthSnapshot`
+    — never an ``**asdict()`` splat, so the snapshot dataclass cannot grow
+    a field that silently surfaces here. Every field is content-free: a
+    curated provider name, a breaker state string, integer counters, and
+    derived scalars.
+
+    ``state`` is the lower-case
+    :class:`~sec_generative_search.core.resilience.CircuitState` value
+    (``"closed"`` / ``"open"`` / ``"half_open"``); the route lifts the
+    enum *value*, never the enum object.
+
+    ``last_error_type`` is the exception *class name* of the most recent
+    failure (``"ProviderTimeoutError"``) — never a message that could
+    carry a ticker / query / accession number. ``last_failure_seconds_ago``
+    is a derived elapsed scalar, not a wall-clock or monotonic timestamp.
+    """
+
+    provider: str = Field(description="Curated LLM provider slug.")
+    state: str = Field(
+        description="Circuit-breaker state: 'closed' / 'open' / 'half_open'.",
+    )
+    consecutive_failures: int = Field(
+        ge=0,
+        description="Failures since the last success (resets to 0 on success).",
+    )
+    total_failures: int = Field(ge=0, description="Lifetime failed-call count for this provider.")
+    total_successes: int = Field(
+        ge=0, description="Lifetime successful-call count for this provider."
+    )
+    last_error_type: str | None = Field(
+        default=None,
+        description=(
+            "Exception class name of the most recent failure (content-free); "
+            "None when no failure has been recorded."
+        ),
+    )
+    last_failure_seconds_ago: float | None = Field(
+        default=None,
+        ge=0,
+        description="Seconds since the last failure; None when none recorded.",
+    )
+    last_latency_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        description="Latency of the most recent successful call; None when none recorded.",
+    )
+
+
+class ProviderHealthResponse(_BaseModel):
+    """Result of ``GET /api/providers/health`` (admin-gated).
+
+    Lifts the process-global
+    :class:`~sec_generative_search.core.provider_health.ProviderHealthRegistry`
+    snapshot onto the wire. ``providers`` lists only providers that have
+    seen at least one call this process — a provider absent from the list
+    has simply not been exercised yet, not "unknown". The endpoint makes
+    no upstream call and reads no credential; it reflects only the
+    content-free outcomes the generation path already recorded.
+
+    ``total`` is the count of returned rows, mirroring
+    :class:`ProviderListResponse`.
+    """
+
+    providers: list[ProviderHealthSchema]
+    total: int
+
+
 # ---------------------------------------------------------------------------
 # Retrieval (POST /api/search) schemas
 # ---------------------------------------------------------------------------
