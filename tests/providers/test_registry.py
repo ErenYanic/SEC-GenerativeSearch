@@ -438,6 +438,57 @@ class TestUpstreamRoutingFlag:
 
 
 # ---------------------------------------------------------------------------
+# Pricing-tier single source of truth
+# ---------------------------------------------------------------------------
+
+
+class TestPricingTierSingleSourceOfTruth:
+    """Every catalogued LLM model carries a real, non-``UNKNOWN`` tier.
+
+    The ``MODEL_CATALOGUE`` ``pricing_tier`` is the single source of
+    truth consumed by both the metrics facade
+    (:meth:`ProviderRegistry.get_capability`) and the web UI
+    (``GET /api/providers/{provider}/models``). A catalogued slug whose
+    tier silently defaulted to ``UNKNOWN`` would collapse the metric's
+    ``pricing_tier`` label to noise and leave the UI unable to render a
+    cheap-vs-premium hint — so the invariant is locked here rather than
+    left to per-provider review.
+
+    OpenRouter is exempt: its catalogue is intentionally empty (arbitrary
+    slugs), so there are no rows to tag and ``UNKNOWN`` is the *correct*
+    answer for any slug a user types.
+    """
+
+    @pytest.mark.security
+    def test_no_closed_catalogue_model_is_unknown_tier(self) -> None:
+        from sec_generative_search.core.types import PricingTier
+
+        offenders: list[str] = []
+        for name in ProviderRegistry.list_providers(ProviderSurface.LLM):
+            if ProviderRegistry.supports_arbitrary_models(name, ProviderSurface.LLM):
+                continue  # OpenRouter — empty catalogue by design.
+            for slug in ProviderRegistry.list_models(name, ProviderSurface.LLM):
+                tier = ProviderRegistry.get_capability(name, ProviderSurface.LLM, slug).pricing_tier
+                if tier is PricingTier.UNKNOWN:
+                    offenders.append(f"{name}/{slug}")
+        assert not offenders, (
+            "every catalogued LLM model must carry a non-UNKNOWN pricing tier; "
+            f"offenders: {offenders}"
+        )
+
+    def test_closed_catalogue_providers_have_at_least_one_model(self) -> None:
+        # Defensive: the UNKNOWN sweep above is vacuously true for an
+        # empty catalogue. A closed-catalogue provider that lost its
+        # catalogue (e.g. a botched edit) would silently pass the sweep —
+        # this guards against that.
+        for name in ProviderRegistry.list_providers(ProviderSurface.LLM):
+            if ProviderRegistry.supports_arbitrary_models(name, ProviderSurface.LLM):
+                continue
+            models = ProviderRegistry.list_models(name, ProviderSurface.LLM)
+            assert models, f"closed-catalogue provider {name!r} has an empty MODEL_CATALOGUE"
+
+
+# ---------------------------------------------------------------------------
 # Capability lookup
 # ---------------------------------------------------------------------------
 

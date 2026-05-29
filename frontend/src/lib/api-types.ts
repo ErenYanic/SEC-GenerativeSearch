@@ -93,6 +93,28 @@ export interface ProviderListResponse {
   total: number;
 }
 
+// `pricing_tier` is the lower-case `PricingTier` value the backend
+// catalogue is the single source of truth for: "free" | "low" |
+// "standard" | "high" | "premium" | "unknown". Typed as a string (not a
+// union) so a backend tier rename never breaks the build silently — the
+// ModelPicker tooltip (14.6.bis) maps the known values and falls back to
+// "unknown" for anything else.
+export interface ModelPricing {
+  model: string;
+  pricing_tier: string;
+}
+
+// `GET /api/providers/{provider}/models`. `models` is empty and
+// `supports_arbitrary_models` is true for OpenRouter (free-text slugs,
+// treated as UNKNOWN pricing).
+export interface ProviderModelsResponse {
+  provider: string;
+  surface: string;
+  supports_arbitrary_models: boolean;
+  models: ModelPricing[];
+  total: number;
+}
+
 export interface ProviderValidateResponse {
   valid: boolean;
   provider: string;

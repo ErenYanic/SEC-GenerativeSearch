@@ -1,6 +1,6 @@
 """Provider catalogue + key-validation routes.
 
-Two endpoints, both read-tier (``Depends(verify_api_key)`` only — never
+Three endpoints, all read-tier (``Depends(verify_api_key)`` only — never
 admin-gated):
 
 - ``GET /api/providers/`` — lifts the curated :class:`ProviderRegistry`
@@ -8,6 +8,12 @@ admin-gated):
   No keys, no masked tails, no model catalogue; the schema is
   intentionally narrow so a future field addition is a deliberate
   security-reviewed change rather than an accidental drift.
+- ``GET /api/providers/{provider}/models`` — lifts the LLM-surface
+    ``MODEL_CATALOGUE`` of one provider as ``(model, pricing_tier)`` rows.
+    The pricing tier is the single source of truth consumed by both the
+    metrics facade and the web UI; the route reads the static catalogue
+    only, never instantiates a provider, never touches the network, and
+    never reads a credential.
 - ``POST /api/providers/validate`` — wraps the audit-logged
   :func:`validate_credential` seam so the SDK round-trip that confirms a
   key is a thin route adapter, not a re-implementation.
@@ -49,13 +55,15 @@ Security contract (list):
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Path
 
 from sec_generative_search.api.dependencies import verify_api_key
 from sec_generative_search.api.errors import http_error
 from sec_generative_search.api.schemas import (
+    ModelPricingSchema,
     ProviderInfoSchema,
     ProviderListResponse,
+    ProviderModelsResponse,
     ProviderValidateRequest,
     ProviderValidateResponse,
 )
@@ -111,6 +119,69 @@ async def list_providers() -> ProviderListResponse:
         for entry in entries
     ]
     return ProviderListResponse(providers=items, total=len(items))
+
+
+@router.get(
+    "/{provider}/models",
+    response_model=ProviderModelsResponse,
+    tags=["providers"],
+    summary="List a provider's catalogued models and pricing tiers",
+)
+async def list_provider_models(
+    provider: str = Path(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$",
+        description="Lower-case provider slug; must be registered on the LLM surface.",
+    ),
+) -> ProviderModelsResponse:
+    """Return the LLM model catalogue of *provider* with pricing tiers.
+
+    Each row is an explicit ``(model, pricing_tier)`` allow-list lift of
+    the provider class's static ``MODEL_CATALOGUE`` — never an
+    ``**asdict()`` of the capability matrix, so a future field added to
+    :class:`~sec_generative_search.core.types.ProviderCapability` cannot
+    leak onto this surface. The pricing tier is the same value the
+    metrics facade reads from :meth:`ProviderRegistry.get_capability`, so
+    the web UI never derives cost from a second table.
+
+    The handler reads the registry's static class attributes only — it
+    never instantiates a provider, never makes a network call, and never
+    reads a credential. A malformed slug is rejected by the path
+    validator (422); an unregistered LLM-surface provider returns 404.
+
+    Meta-providers with an intentionally empty catalogue
+    (:class:`~sec_generative_search.providers.openrouter.OpenRouterProvider`)
+    return an empty ``models`` list with ``supports_arbitrary_models``
+    set — the UI renders a free-text slug input and treats any typed slug
+    as ``UNKNOWN`` pricing.
+    """
+    try:
+        entry = ProviderRegistry.get_entry(provider, ProviderSurface.LLM)
+    except KeyError as exc:
+        raise http_error(
+            status_code=404,
+            error="unknown_provider",
+            message=str(exc),
+            hint="Use GET /api/providers/ to see registered LLM-surface slugs.",
+        ) from None
+
+    models = [
+        ModelPricingSchema(
+            model=slug,
+            pricing_tier=ProviderRegistry.get_capability(
+                provider, ProviderSurface.LLM, slug
+            ).pricing_tier.value,
+        )
+        for slug in ProviderRegistry.list_models(provider, ProviderSurface.LLM)
+    ]
+    return ProviderModelsResponse(
+        provider=provider,
+        surface=ProviderSurface.LLM.value,
+        supports_arbitrary_models=entry.supports_arbitrary_models,
+        models=models,
+        total=len(models),
+    )
 
 
 @router.post(

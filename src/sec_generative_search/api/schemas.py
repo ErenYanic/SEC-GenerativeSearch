@@ -46,11 +46,13 @@ __all__ = [
     "LoginParamsResponse",
     "LoginRequest",
     "LoginResponse",
+    "ModelPricingSchema",
     "OpenRouterRoutingHintsSchema",
     "PasswordChangeRequest",
     "PasswordChangeResponse",
     "ProviderInfoSchema",
     "ProviderListResponse",
+    "ProviderModelsResponse",
     "ProviderValidateRequest",
     "ProviderValidateResponse",
     "QueryPlanSchema",
@@ -211,6 +213,52 @@ class ProviderListResponse(_BaseModel):
     """
 
     providers: list[ProviderInfoSchema]
+    total: int
+
+
+class ModelPricingSchema(_BaseModel):
+    """One catalogued LLM model and its coarse pricing tier.
+
+    Deliberately narrow: only the model slug and its
+    :class:`~sec_generative_search.core.types.PricingTier` value — the
+    single source of truth the web UI needs to surface a "cheap vs.
+    premium" hint without re-deriving cost from a second table. No
+    per-token cost, no dollar figure, no capability matrix: those are
+    either out-of-scope or belong to a deliberate later widening.
+    Widening this schema is a security-sensitive change.
+
+    ``pricing_tier`` is the lower-case :class:`PricingTier` value
+    (``"free"`` / ``"low"`` / ``"standard"`` / ``"high"`` / ``"premium"``
+    / ``"unknown"``); the route lifts the enum *value*, never the enum
+    object, so a future rename is caught as a schema mismatch rather than
+    silently surfacing a Python ``repr``.
+    """
+
+    model: str
+    pricing_tier: str
+
+
+class ProviderModelsResponse(_BaseModel):
+    """Result of ``GET /api/providers/{provider}/models``.
+
+    Lifts the LLM-surface ``MODEL_CATALOGUE`` of a single provider onto
+    the wire as ``(model, pricing_tier)`` rows. The list preserves the
+    catalogue's declaration order so the UI can render it verbatim.
+
+    For meta-providers whose catalogue is intentionally empty
+    (:class:`~sec_generative_search.providers.openrouter.OpenRouterProvider`),
+    ``models`` is an empty list and ``supports_arbitrary_models`` is
+    ``True`` — the UI renders a free-text slug input and treats the tier
+    as ``UNKNOWN`` for any slug the user types.
+
+    ``total`` is the count of returned rows, mirroring
+    :class:`ProviderListResponse`.
+    """
+
+    provider: str
+    surface: str
+    supports_arbitrary_models: bool
+    models: list[ModelPricingSchema]
     total: int
 
 

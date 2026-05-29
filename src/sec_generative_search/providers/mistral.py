@@ -144,7 +144,7 @@ class MistralProvider(OpenAICompatibleLLMProvider):
                 pricing_tier=PricingTier.LOW,
             ),
         ),
-        "de": ModelInfo(
+        "ministral-3b-2512": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
                 streaming=True,

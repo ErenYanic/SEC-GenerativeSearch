@@ -412,3 +412,170 @@ class TestListProvidersBodyCap:
         # path would need its own ROUTE_POLICIES entry.
         response = api_client.post("/api/providers/", json={})
         assert response.status_code in (405, 422)
+
+
+# ---------------------------------------------------------------------------
+# GET /api/providers/{provider}/models — pricing-tier catalogue
+# ---------------------------------------------------------------------------
+
+
+class TestProviderModelsShape:
+    """The models route lifts the LLM ``MODEL_CATALOGUE`` of one provider.
+
+    Asserts the catalogue makes it onto the wire as ``(model,
+    pricing_tier)`` rows in declaration order, that the tier is the
+    registry's single source of truth, and that the allow-list lift drops
+    every other field on the capability matrix.
+    """
+
+    def test_returns_200_with_models(self, api_client: TestClient) -> None:
+        response = api_client.get("/api/providers/openai/models")
+        assert response.status_code == 200
+        body = response.json()
+        assert set(body.keys()) == {
+            "provider",
+            "surface",
+            "supports_arbitrary_models",
+            "models",
+            "total",
+        }
+        assert body["provider"] == "openai"
+        assert body["surface"] == "llm"
+        assert body["supports_arbitrary_models"] is False
+        assert body["total"] == len(body["models"])
+        assert body["total"] >= 1
+
+    def test_each_row_is_exactly_two_fields(self, api_client: TestClient) -> None:
+        response = api_client.get("/api/providers/openai/models")
+        models = response.json()["models"]
+        assert models, "openai must surface at least one catalogued model"
+        for row in models:
+            # The explicit allow-list lift means a future
+            # ProviderCapability field (context window, tool_use, ...)
+            # cannot leak onto this surface. If it does, this fails and
+            # forces a security review.
+            assert set(row.keys()) == {"model", "pricing_tier"}
+
+    def test_rows_match_registry_catalogue(self, api_client: TestClient) -> None:
+        # The wire is the registry's single source of truth, in
+        # declaration order, with the same tier the metrics facade reads.
+        expected = [
+            (
+                slug,
+                ProviderRegistry.get_capability(
+                    "openai", ProviderSurface.LLM, slug
+                ).pricing_tier.value,
+            )
+            for slug in ProviderRegistry.list_models("openai", ProviderSurface.LLM)
+        ]
+        actual = [
+            (row["model"], row["pricing_tier"])
+            for row in api_client.get("/api/providers/openai/models").json()["models"]
+        ]
+        assert actual == expected
+
+    def test_tier_values_are_valid_pricing_tiers(self, api_client: TestClient) -> None:
+        from sec_generative_search.core.types import PricingTier
+
+        valid = {tier.value for tier in PricingTier}
+        for row in api_client.get("/api/providers/openai/models").json()["models"]:
+            assert row["pricing_tier"] in valid
+            # A closed catalogue must never surface UNKNOWN — that would
+            # defeat the single-source-of-truth contract.
+            assert row["pricing_tier"] != PricingTier.UNKNOWN.value
+
+
+class TestProviderModelsArbitraryProvider:
+    def test_openrouter_returns_empty_catalogue(self, api_client: TestClient) -> None:
+        # OpenRouter's catalogue is intentionally empty — the UI renders
+        # a free-text slug input and treats any slug as UNKNOWN pricing.
+        response = api_client.get("/api/providers/openrouter/models")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["models"] == []
+        assert body["total"] == 0
+        assert body["supports_arbitrary_models"] is True
+
+
+@pytest.mark.security
+class TestProviderModelsUnknownProvider:
+    def test_unknown_provider_404(self, api_client: TestClient) -> None:
+        response = api_client.get("/api/providers/definitely-not-real/models")
+        assert response.status_code == 404
+        assert response.json()["error"] == "unknown_provider"
+
+    def test_embedding_only_provider_is_404_on_llm_surface(self, api_client: TestClient) -> None:
+        # ``local`` ships only an embedding adapter. The models route is
+        # LLM-surface only — an embedding-only provider is "not
+        # registered" here, exactly like an unknown name.
+        response = api_client.get("/api/providers/local/models")
+        assert response.status_code == 404
+        assert response.json()["error"] == "unknown_provider"
+
+
+@pytest.mark.security
+class TestProviderModelsSlugGuard:
+    def test_uppercase_slug_rejected(self, api_client: TestClient) -> None:
+        # The path validator mirrors the lower-case provider-slug shape.
+        response = api_client.get("/api/providers/OpenAI/models")
+        assert response.status_code == 422
+
+    def test_control_character_slug_rejected(self, api_client: TestClient) -> None:
+        # A slug carrying a path/control character must never reach the
+        # registry lookup — the anchored pattern rejects it.
+        response = api_client.get("/api/providers/open%0aai/models")
+        assert response.status_code in (404, 422)
+
+
+@pytest.mark.security
+class TestProviderModelsNoSecrets:
+    def test_response_body_carries_no_credential_marker(self, api_client: TestClient) -> None:
+        response = api_client.get("/api/providers/openai/models")
+        assert response.status_code == 200
+        text = response.text.lower()
+        for needle in ("api_key", "api-key", "secret", "bearer", "authorization", "***"):
+            assert needle not in text, f"forbidden substring {needle!r} leaked into models response"
+
+
+@pytest.mark.security
+class TestProviderModelsAuthGate:
+    def test_api_key_required_when_configured(self, api_client_factory) -> None:
+        client = api_client_factory(API_KEY="rotated-key")  # pragma: allowlist secret
+        response = client.get("/api/providers/openai/models")
+        assert response.status_code == 401
+        assert response.json()["error"] == "unauthorised"
+
+    def test_admin_key_not_required(self, api_client_factory) -> None:
+        client = api_client_factory(
+            API_KEY="read-key",  # pragma: allowlist secret
+            API_ADMIN_KEY="admin-key",  # pragma: allowlist secret
+        )
+        response = client.get(
+            "/api/providers/openai/models",
+            headers={"X-API-Key": "read-key"},  # pragma: allowlist secret
+        )
+        assert response.status_code == 200
+
+
+@pytest.mark.security
+class TestProviderModelsDoesNotInstantiate:
+    """The models route is O(1) and credential-free — same contract as
+    the list route. A regression that instantiates the provider would
+    expose the route to upstream network failures and key requirements.
+    """
+
+    def test_handler_never_constructs_a_provider(
+        self, api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from sec_generative_search.providers import registry as registry_module
+
+        def _boom(*_args, **_kwargs):
+            raise AssertionError("provider was instantiated by the models route")
+
+        monkeypatch.setattr(
+            registry_module.ProviderRegistry,
+            "_construct",
+            classmethod(_boom),
+        )
+        response = api_client.get("/api/providers/openai/models")
+        assert response.status_code == 200

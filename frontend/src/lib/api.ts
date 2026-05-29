@@ -33,6 +33,7 @@ import type {
   PasswordChangeRequestBody,
   PasswordChangeResponseBody,
   ProviderListResponse,
+  ProviderModelsResponse,
   ProviderValidateResponse,
   QueryPlanSchema,
   RagPlanResponse,
@@ -277,6 +278,26 @@ export function cancelIngestTask(
 
 export function listProviders(): Promise<ProviderListResponse> {
   return apiFetch<ProviderListResponse>("providers/");
+}
+
+/**
+ * Fetch one provider's catalogued LLM models + pricing tiers via
+ * `GET /api/providers/{provider}/models`. The backend catalogue is the
+ * single source of truth for the tier; this read needs
+ * no provider key, so it goes through the default `apiFetch` (no
+ * `X-Provider-Key-*` headers). OpenRouter returns an empty `models` list
+ * with `supports_arbitrary_models: true`.
+ *
+ * `provider` is encoded so a stray character can never break out of the
+ * path segment; the backend re-validates the slug shape and 404s an
+ * unknown provider.
+ */
+export function listProviderModels(
+  provider: string,
+): Promise<ProviderModelsResponse> {
+  return apiFetch<ProviderModelsResponse>(
+    `providers/${encodeURIComponent(provider)}/models`,
+  );
 }
 
 export interface ProviderValidateRequestBody {
