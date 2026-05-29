@@ -209,7 +209,6 @@ class _GeminiClientMixin:
 # LLM provider
 # ---------------------------------------------------------------------------
 
-
 class GeminiProvider(_GeminiClientMixin, BaseLLMProvider):
     """Chat-completion provider for Google's Gemini models."""
 
