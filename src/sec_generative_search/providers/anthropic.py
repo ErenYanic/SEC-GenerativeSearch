@@ -107,6 +107,19 @@ class AnthropicProvider(BaseLLMProvider):
     # the Anthropic model cards; they change rarely and are surface-
     # only (the SDK will reject an over-long request at call time).
     MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
+        "claude-opus-4-8": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                vision=True,
+                context_window_tokens=1_000_000,
+                max_output_tokens=128_000,
+                pricing_tier=PricingTier.PREMIUM,
+            ),
+        ),
         "claude-opus-4-7": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
