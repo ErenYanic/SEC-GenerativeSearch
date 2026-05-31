@@ -128,7 +128,26 @@ jobs:
         # the audit surface stays limited to the project's resolved runtime
         # and test dependencies. Any genuine advisory in that set still
         # fails the job.
-        run: python -m pip_audit -r audit-requirements.txt
+        #
+        # Documented exceptions (--ignore-vuln). Each MUST be a CVE that
+        # does not apply to this project's usage AND has no fixed release
+        # to bump to. Re-audit and remove the moment a fix ships.
+        #
+        #   CVE-2026-45829 (ChromaToast) — pre-auth RCE in ChromaDB's
+        #     *FastAPI HTTP server* (`chroma run`), via embedding-function
+        #     config / HuggingFace `trust_remote_code` on collection
+        #     creation. NOT applicable: this project embeds ChromaDB as a
+        #     local `chromadb.PersistentClient` only (see
+        #     database/client.py + database/reindex.py) — it never starts
+        #     the network-facing Chroma server, never uses HttpClient, and
+        #     never enables trust_remote_code. All releases 1.0.0–1.5.9
+        #     are affected; no fixed version exists. This exception assumes
+        #     the embedded-only usage above stays true — adding the Chroma
+        #     server would reopen the surface and this ignore MUST be
+        #     removed in that same change.
+        run: |
+          python -m pip_audit -r audit-requirements.txt \
+            --ignore-vuln CVE-2026-45829
 
   secret-scan:
     # Scan the working tree for accidentally-committed
