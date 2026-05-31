@@ -14,6 +14,7 @@ This module imports only the standard library plus the dependency-free
 :mod:`core.resilience` and the settings singleton; it adds no new runtime
 
 """
+
 from __future__ import annotations
 
 import threading
