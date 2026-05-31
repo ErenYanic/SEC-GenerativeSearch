@@ -26,6 +26,7 @@ from sec_generative_search.core.provider_health import (
     get_provider_health,
     reset_provider_health,
 )
+from sec_generative_search.core.resilience import ResilientCallPolicy, resilient_call
 
 
 class _Clock:
@@ -246,6 +247,56 @@ class TestContentFree:
         reg.record_failure("openai", "ProviderAuthError")
         snap = _only(reg)
         assert snap.last_error_type == "ProviderAuthError"
+
+
+# ---------------------------------------------------------------------------
+# Security — the observational breaker is never a live gate
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.security
+@pytest.mark.usefixtures("_reset_singleton")
+class TestObservationalBreakerNeverBlocksLiveCall:
+    """The registry breaker is a health *signal*, never a live gate.
+
+    The degraded-mode runbook tells operators that an ``open``
+    circuit on ``GET /api/providers/health`` is observational — it does
+    NOT auto-reject traffic. That guidance is only safe while the
+    registry's per-provider :class:`CircuitBreaker` stays decoupled from
+    :func:`resilient_call`: a fully-open observational breaker must not
+    short-circuit a live provider call, which runs under the adapter's own
+    breaker-free :class:`ResilientCallPolicy`.
+    """
+
+    def test_open_registry_breaker_does_not_block_resilient_call(self) -> None:
+        registry = get_provider_health()
+        # Drive the provider's observational breaker decisively OPEN —
+        # well past any sane configured threshold.
+        for _ in range(64):
+            registry.record_failure("openai", "ProviderTimeoutError")
+        assert any(
+            row.provider == "openai" and row.state == "open" for row in registry.snapshot()
+        ), "precondition: observational breaker must be open"
+
+        # A live call uses a ResilientCallPolicy with no circuit breaker
+        # (the adapter default). The open observational breaker must not
+        # gate it — fn runs and returns.
+        invocations = 0
+
+        def fn() -> str:
+            nonlocal invocations
+            invocations += 1
+            return "ok"
+
+        result = resilient_call(fn, provider="openai", policy=ResilientCallPolicy())
+        assert result == "ok"
+        assert invocations == 1
+
+    def test_adapter_default_policy_carries_no_circuit_breaker(self) -> None:
+        # The structural complement: the default ResilientCallPolicy that
+        # every provider adapter builds on carries no breaker, so there is
+        # no wiring path from the observational registry into a live call.
+        assert ResilientCallPolicy().circuit_breaker is None
 
 
 # ---------------------------------------------------------------------------
