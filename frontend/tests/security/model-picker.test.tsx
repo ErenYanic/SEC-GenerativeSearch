@@ -14,7 +14,7 @@
 //     called on every interaction)
 
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import {
@@ -208,6 +208,88 @@ describe("ModelPicker — fallbacks tri-state", () => {
       ModelPickerValue,
     ];
     expect(lastCall[0].routing_hints?.allow_fallbacks).toBe(false);
+  });
+});
+
+describe("ModelPicker — pricing-tier help (14.6.bis)", () => {
+  // The tooltip explains the coarse `PricingTier` scale. It MUST be
+  // a focusable, keyboard-reachable disclosure (never hover-only) and MUST
+  // render the tiers as plain text — no Markdown / HTML sink — so it never
+  // widens the SPA's DOM-XSS surface.
+
+  it("exposes a focusable trigger button, collapsed by default", () => {
+    renderPicker();
+    const trigger = screen.getByRole("button", { name: /pricing tiers/i });
+    expect(trigger).toBeInTheDocument();
+    expect(trigger).toBeInstanceOf(HTMLButtonElement);
+    expect((trigger as HTMLButtonElement).type).toBe("button");
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    // Nothing announced while collapsed.
+    expect(screen.queryByRole("note")).toBeNull();
+    // No stale `aria-describedby` dangling at an unrendered node.
+    expect(trigger.getAttribute("aria-describedby")).toBeNull();
+  });
+
+  it("toggles the note on click and wires aria-controls + aria-describedby", async () => {
+    renderPicker();
+    const user = userEvent.setup();
+    const trigger = screen.getByRole("button", { name: /pricing tiers/i });
+    await user.click(trigger);
+
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    const note = screen.getByRole("note");
+    const noteId = note.getAttribute("id");
+    expect(noteId).toBeTruthy();
+    // Both relationships point the assistive-tech user at the explanation.
+    expect(trigger.getAttribute("aria-controls")).toBe(noteId);
+    expect(trigger.getAttribute("aria-describedby")).toBe(noteId);
+
+    // All six PricingTier buckets are explained (free/low/standard/high/
+    // premium/unknown — the full backend enum, never a subset).
+    for (const tier of [
+      "Free",
+      "Low",
+      "Standard",
+      "High",
+      "Premium",
+      "Unknown",
+    ]) {
+      expect(within(note).getByText(tier)).toBeInTheDocument();
+    }
+  });
+
+  it("reveals on keyboard activation — not a hover-only sink", async () => {
+    renderPicker();
+    const user = userEvent.setup();
+    const trigger = screen.getByRole("button", { name: /pricing tiers/i });
+    trigger.focus();
+    expect(trigger).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("note")).toBeInTheDocument();
+  });
+
+  it("closes again on Escape", async () => {
+    renderPicker();
+    const user = userEvent.setup();
+    const trigger = screen.getByRole("button", { name: /pricing tiers/i });
+    await user.click(trigger);
+    expect(screen.getByRole("note")).toBeInTheDocument();
+    trigger.focus();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("note")).toBeNull();
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("renders the tiers as plain text with no markup sink", async () => {
+    renderPicker();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /pricing tiers/i }));
+    const note = screen.getByRole("note");
+    // Plain-text legend only: no script node, no injected markup.
+    expect(note.querySelector("script")).toBeNull();
+    expect(note.innerHTML).not.toContain("dangerouslySetInnerHTML");
+    expect(note.textContent).toMatch(/per 1M output tokens/i);
   });
 });
 

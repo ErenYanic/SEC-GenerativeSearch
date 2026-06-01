@@ -25,7 +25,7 @@
 // abort-controller logic in the parent (the RAG and Chat pages each
 // already manage one).
 
-import { useEffect, useId, useMemo, type JSX } from "react";
+import { useEffect, useId, useMemo, useState, type JSX } from "react";
 
 import type {
   OpenRouterRoutingHintsSchema,
@@ -69,6 +69,85 @@ function parseUpstreamOrder(raw: string): string[] {
 
 function upstreamOrderHasError(entries: string[]): boolean {
   return entries.some((entry) => !UPSTREAM_SLUG_RE.test(entry));
+}
+
+// Plain-text legend for the coarse `PricingTier` scale. The
+// per-model tier itself is served by `GET /api/providers/{provider}/models`
+// — the backend catalogue is the single source of truth. This control does
+// NOT fetch or look anything up: it only EXPLAINS what the tier words mean
+// so an operator who sees "premium" on a model row knows the cost band.
+// Thresholds mirror the 14.3 contract (per 1M output tokens).
+const PRICING_TIERS: ReadonlyArray<{ tier: string; blurb: string }> = [
+  { tier: "Free", blurb: "No charge for output tokens." },
+  { tier: "Low", blurb: "Under $2 per 1M output tokens." },
+  { tier: "Standard", blurb: "Under $5 per 1M output tokens." },
+  { tier: "High", blurb: "Under $10 per 1M output tokens." },
+  { tier: "Premium", blurb: "$10 or more per 1M output tokens." },
+  {
+    tier: "Unknown",
+    blurb:
+      "Un-catalogued or free-form models (e.g. OpenRouter slugs); cost is not classified.",
+  },
+];
+
+/**
+ * Accessible pricing-tier help.
+ *
+ * A focusable `<button>` toggles a plain-text note. `aria-expanded` +
+ * `aria-controls` wire the disclosure; while open the trigger also points
+ * `aria-describedby` at the note so assistive tech announces the
+ * explanation on focus. It is deliberately NOT a hover-only sink — click
+ * or keyboard (Enter / Space) opens it, Escape closes it, so a
+ * keyboard-only user can always reach the content. The tiers render as a
+ * plain `<dl>`; there is no Markdown / HTML sink, so the control widens no
+ * DOM-XSS surface (the SPA's `react/no-danger` lock still holds).
+ *
+ * This `open` flag is presentational chrome only — it is never part of
+ * `ModelPickerValue`, so the picker's "purely controlled selection"
+ * contract is untouched.
+ */
+function PricingTierHelp(): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const noteId = useId();
+
+  return (
+    <div className="text-xs">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={noteId}
+        aria-describedby={open ? noteId : undefined}
+        onClick={() => {
+          setOpen((prev) => !prev);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Escape" && open) {
+            setOpen(false);
+          }
+        }}
+        className="inline-flex items-center gap-1 rounded text-slate-600 underline decoration-dotted underline-offset-2 hover:text-slate-900"
+      >
+        <span aria-hidden="true">ⓘ</span>
+        What do pricing tiers mean?
+      </button>
+      {open ? (
+        <div
+          id={noteId}
+          role="note"
+          className="mt-2 rounded border border-slate-200 bg-white p-2 text-slate-600"
+        >
+          <dl className="space-y-1">
+            {PRICING_TIERS.map(({ tier, blurb }) => (
+              <div key={tier} className="flex gap-2">
+                <dt className="font-medium text-slate-700">{tier}</dt>
+                <dd>{blurb}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 export function ModelPicker({
@@ -150,6 +229,8 @@ export function ModelPicker({
       >
         Model
       </legend>
+
+      <PricingTierHelp />
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div className="flex flex-col gap-1">
