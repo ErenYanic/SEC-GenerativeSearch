@@ -31,6 +31,12 @@ data/
 !tests/fixtures/
 !tests/fixtures/**
 
+# Track committed operator artefacts (e.g. the Grafana dashboard template)
+# even though the blanket *.json rule above ignores them. These are
+# version-controlled deployment assets, not data.
+!deploy/
+!deploy/**/*.json
+
 # Track the frontend project manifest + every .json under frontend/ EXCEPT
 # the build artefacts (node_modules, .next, coverage, etc.) which are still
 # blocked by their own folder ignore rules below. The blanket `*.json` rule
