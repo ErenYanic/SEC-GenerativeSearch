@@ -116,7 +116,7 @@ _LLM_VENDORS: list[tuple[type, str, str, str]] = [
         QwenProvider,
         "qwen",
         "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-        "qwen3.5-plus",
+        "qwen3.6-plus",
     ),
     (
         ZaiProvider,

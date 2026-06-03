@@ -31,7 +31,7 @@ class QwenProvider(OpenAICompatibleLLMProvider):
 
     provider_name = "qwen"
     default_base_url = _QWEN_BASE_URL
-    default_model = "qwen3.5-plus"
+    default_model = "qwen3.6-plus"
 
     MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
         "qwen3.7-max": ModelInfo(
@@ -44,6 +44,18 @@ class QwenProvider(OpenAICompatibleLLMProvider):
                 context_window_tokens=1_000_000,
                 max_output_tokens=65_536,
                 pricing_tier=PricingTier.HIGH,
+            ),
+        ),
+        "qwen3.7-plus": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                context_window_tokens=1_000_000,
+                max_output_tokens=65_536,
+                pricing_tier=PricingTier.STANDARD,
             ),
         ),
         "qwen3-max": ModelInfo(
