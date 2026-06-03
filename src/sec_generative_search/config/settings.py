@@ -154,7 +154,7 @@ class ChunkingSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="CHUNKING_")
 
 
-def _resolve_secret_from_value_or_file(
+def resolve_secret_from_value_or_file(
     value: str | None,
     file_path: str | None,
     *,
@@ -168,6 +168,13 @@ def _resolve_secret_from_value_or_file(
     ``None`` if neither source is set. The env-var names are passed
     explicitly so error messages name the operator-facing knob rather
     than the internal field.
+
+    This is the single canonical secret-file resolver. Besides the
+    encryption key and auth pepper wrappers below, it backs the
+    admin-default provider-key ``*_FILE`` indirection consumed by
+    :func:`sec_generative_search.providers.factory.default_api_key_resolver`,
+    so a Secret-Manager file mount works for provider keys exactly as it
+    does for the SQLCipher key and the pepper.
     """
     if value and file_path:
         raise ValueError(
@@ -202,7 +209,7 @@ def resolve_encryption_key_from_values(key: str | None, key_file: str | None) ->
     ``MetadataRegistry`` (runtime resolution without re-instantiating
     settings).
     """
-    return _resolve_secret_from_value_or_file(
+    return resolve_secret_from_value_or_file(
         key,
         key_file,
         value_env_name="DB_ENCRYPTION_KEY",
@@ -226,7 +233,7 @@ def resolve_auth_pepper_from_values(
     (``UserStore`` construction) is responsible for refusing to operate
     a non-empty ``users`` table with a missing pepper.
     """
-    return _resolve_secret_from_value_or_file(
+    return resolve_secret_from_value_or_file(
         pepper,
         pepper_file,
         value_env_name="API_AUTH_PEPPER",

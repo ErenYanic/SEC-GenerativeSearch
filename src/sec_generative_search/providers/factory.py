@@ -38,7 +38,10 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 
-from sec_generative_search.config.settings import EmbeddingSettings
+from sec_generative_search.config.settings import (
+    EmbeddingSettings,
+    resolve_secret_from_value_or_file,
+)
 from sec_generative_search.core.exceptions import ConfigurationError
 from sec_generative_search.providers.base import (
     BaseEmbeddingProvider,
@@ -88,22 +91,36 @@ _DEFAULT_ENV_VAR_BY_PROVIDER: dict[str, str] = {
 
 
 def default_api_key_resolver(provider: str) -> str | None:
-    """Read the provider's credential from the process environment.
+    """Read the provider's admin-default credential from the environment.
 
     This environment-backed default can be replaced by any session or
     admin credential store that implements the same
     ``Callable[[str], str | None]`` shape.
 
+    Each provider key supports two mutually-exclusive sources, mirroring
+    the SQLCipher key and the auth pepper: the inline ``{ENV_VAR}``
+    (e.g. ``OPENAI_API_KEY``) or a ``{ENV_VAR}_FILE`` path
+    (e.g. ``OPENAI_API_KEY_FILE``) whose contents are read and stripped.
+    The file form keeps the key out of ``/proc/<pid>/environ`` and maps
+    directly onto a Secret-Manager / Docker-secret file mount in
+    Scenarios B/C. Setting both is rejected; an empty file is rejected.
+
     Empty-string env values coerce to ``None`` so a blank
-    ``OPENAI_API_KEY=`` never enables a zero-length credential (same
-    rule :class:`~sec_generative_search.config.settings.ApiSettings`
+    ``OPENAI_API_KEY=`` (or ``OPENAI_API_KEY_FILE=``) never enables a
+    zero-length credential and never spuriously trips the file branch
+    (same rule :class:`~sec_generative_search.config.settings.ApiSettings`
     applies to ``API_KEY``).
     """
     env_var = _DEFAULT_ENV_VAR_BY_PROVIDER.get(provider)
     if env_var is None:
         return None
-    value = os.environ.get(env_var)
-    return value or None
+    file_env_var = f"{env_var}_FILE"
+    return resolve_secret_from_value_or_file(
+        os.environ.get(env_var) or None,
+        os.environ.get(file_env_var) or None,
+        value_env_name=env_var,
+        file_env_name=file_env_var,
+    )
 
 
 def build_embedder(

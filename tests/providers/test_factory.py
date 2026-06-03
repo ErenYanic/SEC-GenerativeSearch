@@ -23,6 +23,7 @@ from __future__ import annotations
 import importlib.util
 import os
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -129,6 +130,139 @@ class TestDefaultApiKeyResolver:
     def test_missing_env_var_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         assert default_api_key_resolver("openai") is None
+
+
+# ---------------------------------------------------------------------------
+# default_api_key_resolver — *_FILE secret-file indirection
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultApiKeyResolverFileIndirection:
+    """Admin-default provider keys resolve from ``{ENV_VAR}_FILE`` too.
+
+    Mirrors the SQLCipher-key / auth-pepper ``*_FILE`` story so a
+    Secret-Manager / Docker-secret file mount supplies the key without
+    it ever landing in ``/proc/<pid>/environ``. The two sources are
+    mutually exclusive and an empty file is rejected — exactly the
+    contract :func:`resolve_secret_from_value_or_file` enforces for the
+    other two secrets.
+    """
+
+    @pytest.mark.parametrize(
+        "provider,env_var",
+        [
+            ("openai", "OPENAI_API_KEY"),  # both surfaces
+            ("anthropic", "ANTHROPIC_API_KEY"),  # LLM-only
+            ("local", "HF_TOKEN"),  # embedding-only
+        ],
+    )
+    def test_reads_key_from_file(
+        self,
+        provider: str,
+        env_var: str,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.delenv(env_var, raising=False)
+        key_file = tmp_path / "key"
+        # Trailing whitespace/newline is stripped — secret managers and
+        # ``printf`` both commonly append one.
+        key_file.write_text("sk-value-from-file-1234\n")
+        monkeypatch.setenv(f"{env_var}_FILE", str(key_file))
+
+        assert default_api_key_resolver(provider) == "sk-value-from-file-1234"
+
+    def test_inline_value_still_resolves_without_file(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression: the inline env var keeps working when no file is set."""
+        monkeypatch.delenv("OPENAI_API_KEY_FILE", raising=False)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-inline-value-5678")
+        assert default_api_key_resolver("openai") == "sk-inline-value-5678"
+
+    def test_blank_file_path_coerces_to_none_no_file_branch(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A blank ``OPENAI_API_KEY_FILE=`` must not trip the file branch.
+
+        An empty string is not a path; coercing it to ``None`` keeps the
+        resolver returning ``None`` rather than raising "does not exist".
+        """
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setenv("OPENAI_API_KEY_FILE", "")
+        assert default_api_key_resolver("openai") is None
+
+    def test_nonexistent_file_raises(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        missing = tmp_path / "absent"
+        monkeypatch.setenv("OPENAI_API_KEY_FILE", str(missing))
+        with pytest.raises(ValueError, match="OPENAI_API_KEY_FILE"):
+            default_api_key_resolver("openai")
+
+    @pytest.mark.security
+    def test_inline_and_file_are_mutually_exclusive(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Both sources set is a hard error — no silent precedence.
+
+        Silent precedence would mask a stale key lingering in one source
+        after the operator rotated the other.
+        """
+        secret = "sk-secret-must-not-leak-9999"  # pragma: allowlist secret
+        key_file = tmp_path / "key"
+        key_file.write_text(secret)
+        monkeypatch.setenv("OPENAI_API_KEY", secret)
+        monkeypatch.setenv("OPENAI_API_KEY_FILE", str(key_file))
+
+        with pytest.raises(ValueError) as exc_info:
+            default_api_key_resolver("openai")
+        message = str(exc_info.value)
+        # Names both operator-facing knobs …
+        assert "OPENAI_API_KEY" in message
+        assert "OPENAI_API_KEY_FILE" in message
+        # … but never echoes the secret material itself.
+        assert secret not in message
+
+    @pytest.mark.security
+    def test_empty_file_is_rejected(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """An empty / whitespace-only key file never enables a blank key."""
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        key_file = tmp_path / "key"
+        key_file.write_text("   \n")
+        monkeypatch.setenv("OPENAI_API_KEY_FILE", str(key_file))
+        with pytest.raises(ValueError, match="empty"):
+            default_api_key_resolver("openai")
+
+    @pytest.mark.security
+    def test_file_backed_key_never_appears_in_factory_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A file-mounted key reaches the provider but never an error string.
+
+        Exercises the full ``build_llm_provider`` path: a valid file key
+        constructs the provider (no error), and when the file is removed
+        the resulting ``ConfigurationError`` names the env knob, never
+        any secret material.
+        """
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY_FILE", raising=False)
+        with pytest.raises(ConfigurationError) as exc_info:
+            build_llm_provider("anthropic")
+        assert "ANTHROPIC_API_KEY" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------
