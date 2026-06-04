@@ -1,0 +1,123 @@
+# syntax=docker/dockerfile:1
+
+# ===========================================================================
+# SEC-GenerativeSearch — FastAPI backend image
+# ===========================================================================
+# Multi-stage build:
+#   - builder : compiles wheels (incl. pysqlcipher3 against libsqlcipher-dev)
+#               into an isolated virtualenv.
+#   - runtime : copies that venv onto a fresh base carrying only the runtime
+#               shared libs + gosu, runs as an unprivileged user.
+#
+# Deployment extras baked in: [encryption,metrics,local-embeddings].
+#   - encryption       → pysqlcipher3 (SQLCipher at-rest encryption, B/C).
+#   - metrics          → prometheus-client (admin-gated GET /api/metrics).
+#   - local-embeddings → torch + sentence-transformers (the default, on-prem
+#                        embedder google/embeddinggemma-300m — keeps query +
+#                        filing text on own infrastructure.
+#
+# CPU torch is the default. For a CUDA image pass the build arg:
+#   docker build -f deploy/Dockerfile.api \
+#     --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu124 .
+#
+# Digest-pinned base (supply-chain hardening). Resolve a fresh digest with:
+#   docker buildx imagetools inspect python:3.12-slim-bookworm \
+#     --format '{{.Manifest.Digest}}'
+# Current pin: python 3.12.13-slim-bookworm.
+ARG PYTHON_BASE=python:3.12-slim-bookworm@sha256:93ab4b7fa528b25124c97bcc755415e60eb671a86b4dbe0328df2fe2d1c1193d
+
+# --------------------------------------------------------------------------
+# Builder stage
+# --------------------------------------------------------------------------
+FROM ${PYTHON_BASE} AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Build toolchain + SQLCipher headers. pysqlcipher3 (the [encryption] extra)
+# compiles a C extension against libsqlcipher-dev; neither survives into the
+# runtime stage.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+        build-essential \
+        libsqlcipher-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Isolated virtualenv — copied wholesale into the runtime stage so no build
+# toolchain leaks forward.
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+
+# Torch wheel index. Default = CPU-only build; override with --build-arg for
+# CUDA. Installed first and explicitly so the project resolve below reuses the
+# already-satisfied torch instead of pulling a default-index (CUDA) wheel.
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+RUN pip install --upgrade pip \
+    && pip install "torch>=2.2" --index-url "${TORCH_INDEX_URL}"
+
+# Copy project metadata + source, then a non-editable install with the
+# deployment extras. pyproject/README land in their own layer so a
+# source-only edit does not bust the dependency layer cache.
+WORKDIR /app
+COPY pyproject.toml README.md ./
+COPY src ./src
+RUN pip install ".[encryption,metrics,local-embeddings]"
+
+# --------------------------------------------------------------------------
+# Runtime stage
+# --------------------------------------------------------------------------
+FROM ${PYTHON_BASE} AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:${PATH}" \
+    HF_HOME=/app/cache/huggingface \
+    APP_USER=appuser \
+    APP_DATA_DIR=/app/data
+
+# Runtime-only system packages:
+#   - libsqlcipher0 : shared lib the compiled pysqlcipher3 extension links.
+#   - gosu          : drop from root → appuser in the entrypoint after the
+#                     mounted volume has been re-owned (non-root server).
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+        libsqlcipher0 \
+        gosu \
+    && rm -rf /var/lib/apt/lists/*
+
+# Unprivileged service account. The container starts as root only long enough
+# to chown the data volume, then the entrypoint execs the server as this user.
+RUN useradd --system --create-home --uid 10001 --shell /usr/sbin/nologin appuser
+
+COPY --from=builder /opt/venv /opt/venv
+
+WORKDIR /app
+# Writable mount points; the entrypoint re-chowns them at boot to cover a
+# freshly attached, root-owned host/named volume.
+RUN mkdir -p "${APP_DATA_DIR}" "${HF_HOME}" \
+    && chown -R appuser:appuser /app
+
+COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# SQLite + ChromaDB persistence (and, by default, the HF model cache nested
+# under /app). Operators MUST attach a durable volume here — task_history is
+# the only crash-durable ingest record.
+VOLUME ["/app/data"]
+EXPOSE 8000
+
+# Liveness probe against the unauthenticated, deliberately tiny /api/health.
+# Uses python only — the slim base ships no curl/wget.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+    CMD ["python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4).status == 200 else 1)"]
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+# Exactly one worker: TaskManager runs ingest workers in-process and mints
+# task IDs in-process, so a second worker produces orphan task-404s.
+# --proxy-headers because nginx / GFE terminates TLS and forwards the client
+# address upstream.
+CMD ["uvicorn", "sec_generative_search.api.app:create_app", "--factory", \
+     "--host", "0.0.0.0", "--port", "8000", \
+     "--workers", "1", "--proxy-headers", "--forwarded-allow-ips", "*"]

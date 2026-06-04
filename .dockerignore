@@ -1,0 +1,72 @@
+# Build-context hygiene for the API image (deploy/Dockerfile.api).
+# Two goals: keep the context small, and — critically — keep secrets and
+# local state OUT of every image layer. Mirrors the secret-/state-bearing
+# paths in .gitignore.
+
+# --- Secrets & credentials (NEVER bake into an image layer) ---------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+*.token
+edgar-identity.txt
+secrets.json
+credentials.json
+client_secret.json
+.netrc
+.aws/
+.gcp/
+.azure/
+.dockercfg
+.docker/
+
+# --- Local data + databases (Tier-2/3 state must not ride in the image) ---
+data/
+*.db
+*.sqlite
+*.sqlite3
+chroma_db/
+
+# --- Python virtualenv, caches, build output ------------------------------
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.egg-info/
+build/
+dist/
+uv.lock
+
+# --- Frontend ships in its own image (deploy/Dockerfile.frontend, 15.4b) --
+frontend/
+
+# --- VCS, CI, docs, editor, tooling ---------------------------------------
+.git/
+.github/
+.gitignore
+.dockerignore
+docs/
+*.md
+!README.md
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- Tests + fixtures are not needed in a runtime image -------------------
+tests/
