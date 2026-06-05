@@ -1,5 +1,6 @@
 # SEC EDGAR identity credentials
 edgar-identity.txt
+.claude/
 
 # Machine learning models
 *.h5
