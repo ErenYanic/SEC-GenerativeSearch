@@ -1,6 +1,5 @@
 # SEC EDGAR identity credentials
 edgar-identity.txt
-.claude/
 
 # Machine learning models
 *.h5
@@ -187,6 +186,7 @@ docs/_build/
 
 # Project documentation
 docs/
+.claude/
 
 # PyBuilder
 .pybuilder/
