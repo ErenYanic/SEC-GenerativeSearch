@@ -27,6 +27,7 @@ from sec_generative_search.core.edgar_identity import (
     validate_edgar_email,
     validate_edgar_name,
 )
+from sec_generative_search.core.logging import configure_logging
 
 # ---------------------------------------------------------------------------
 # Audit-log capture (matches the pattern used by test_credentials).
@@ -37,6 +38,10 @@ from sec_generative_search.core.edgar_identity import (
 def audit_caplog(
     caplog: pytest.LogCaptureFixture,
 ) -> Iterator[pytest.LogCaptureFixture]:
+    # configure_logging() is forced first so the lazy reconfigure inside
+    # get_logger cannot flip propagate back to False mid-test (see
+    # tests/core/test_credentials.py::audit_caplog for the full rationale).
+    configure_logging()
     pkg_logger = logging.getLogger("sec_generative_search")
     previous_propagate = pkg_logger.propagate
     pkg_logger.propagate = True

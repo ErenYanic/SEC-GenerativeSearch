@@ -1,0 +1,43 @@
+# Build-context hygiene for the frontend image (deploy/Dockerfile.frontend).
+# Build context is THIS directory: `docker build -f deploy/Dockerfile.frontend
+# -t sec-gs-frontend:local frontend`. Two goals: keep the context small, and —
+# critically — keep secrets and local build state OUT of every image layer.
+# Mirrors frontend/.gitignore + the repo-root .gitignore env rules.
+
+# --- Secrets & local env files (NEVER bake into an image layer) -----------
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+*.token
+
+# --- Installed deps + build output (re-created inside the image) ----------
+# node_modules is re-installed with --frozen-lockfile; a prior local .next
+# build (and its standalone tree) must never leak host state into the image.
+node_modules/
+.pnp/
+.pnp.*
+.next/
+out/
+
+# --- Test + coverage artefacts (not needed to build the standalone bundle) -
+coverage/
+tsconfig.tsbuildinfo
+*.log
+tests/
+vitest.config.ts
+
+# --- VCS, editor, OS --------------------------------------------------------
+.git/
+.gitignore
+.dockerignore
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

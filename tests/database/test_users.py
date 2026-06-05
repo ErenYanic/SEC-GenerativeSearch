@@ -34,6 +34,7 @@ import pytest
 
 from sec_generative_search.config.settings import ApiSettings, DatabaseSettings
 from sec_generative_search.core.exceptions import AuthError, ConfigurationError
+from sec_generative_search.core.logging import configure_logging
 from sec_generative_search.core.user_auth import (
     AUTH_HASH_BYTES,
     SALT_BYTES,
@@ -114,8 +115,12 @@ def audit_caplog(
     """Capture package-level audit-log records.
 
     The package logger propagates=False by default; toggle it temporarily
-    so caplog (which attaches to root) sees the records.
+    so caplog (which attaches to root) sees the records.  ``configure_logging``
+    is forced first so the lazy reconfigure inside ``get_logger`` cannot flip
+    ``propagate`` back to ``False`` mid-test (see
+    ``tests/core/test_credentials.py::audit_caplog`` for the full rationale).
     """
+    configure_logging()
     pkg_logger = logging.getLogger("sec_generative_search")
     previous = pkg_logger.propagate
     pkg_logger.propagate = True

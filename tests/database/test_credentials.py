@@ -33,6 +33,7 @@ import pytest
 
 from sec_generative_search.config.settings import DatabaseSettings
 from sec_generative_search.core.exceptions import ConfigurationError
+from sec_generative_search.core.logging import configure_logging
 from sec_generative_search.database.credentials import (
     CredentialRecord,
     EncryptedCredentialStore,
@@ -103,7 +104,20 @@ def encrypted_store(
 def audit_caplog(
     caplog: pytest.LogCaptureFixture,
 ) -> Iterator[pytest.LogCaptureFixture]:
-    """See ``tests/core/test_credentials.py::audit_caplog`` for rationale."""
+    """See ``tests/core/test_credentials.py::audit_caplog`` for rationale.
+
+    ``configure_logging()`` is forced first so the propagate flip below is not
+    silently undone: ``audit_log`` → ``get_logger`` lazily configures logging
+    on first use, and ``configure_logging`` resets ``propagate = False``.  If
+    the module-level ``_logging_configured`` flag is ``False`` at the moment
+    the audited call runs (e.g. after ``tests/core/test_logging.py`` resets it
+    in teardown), that lazy reconfigure fires *after* this fixture sets
+    ``propagate = True`` and flips it straight back to ``False`` — the audit
+    record then reaches the package handler but never propagates to caplog's
+    root handler.  Configuring up-front makes the lazy call an idempotent
+    no-op, so ``propagate`` stays ``True`` through the emit.
+    """
+    configure_logging()
     pkg_logger = logging.getLogger("sec_generative_search")
     previous = pkg_logger.propagate
     pkg_logger.propagate = True

@@ -8,6 +8,13 @@ const config: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
   productionBrowserSourceMaps: false,
+  // Self-contained server bundle for the container image. Next traces the
+  // minimal runtime dependency set into `.next/standalone/`, so the runtime
+  // image copies that tree + `.next/static` and runs `node server.js` with NO
+  // `node_modules` install and NO pnpm at runtime. The standalone server is
+  // produced by `next build`, so the Turbopack-compiled middleware (and its
+  // per-request CSP headers) ships correctly — unlike `next dev`.
+  output: "standalone",
   experimental: {
     // Trusted Types is enabled via the CSP header in middleware; this flag
     // tells Next to opt its hydration sinks into a default policy at build.

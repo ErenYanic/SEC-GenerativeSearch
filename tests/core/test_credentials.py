@@ -35,6 +35,7 @@ from sec_generative_search.core.exceptions import (
     ProviderAuthError,
     ProviderRateLimitError,
 )
+from sec_generative_search.core.logging import configure_logging
 from sec_generative_search.providers.registry import ProviderSurface
 
 # ---------------------------------------------------------------------------
@@ -55,7 +56,17 @@ def audit_caplog(
     flipping propagation here it never sees the audit records.  This
     mirrors the audit-log capture pattern used elsewhere in the test
     suite.
+
+    ``configure_logging()`` is forced first so the flip is not silently
+    undone: ``get_logger`` lazily configures logging on first use, and that
+    call resets ``propagate = False``.  When the module-level
+    ``_logging_configured`` flag is ``False`` at emit time (e.g. after
+    ``tests/core/test_logging.py`` resets it in teardown), the lazy reconfigure
+    fires *after* this fixture sets ``propagate = True`` and flips it back —
+    the record then never reaches caplog.  Configuring up-front makes that lazy
+    call an idempotent no-op.
     """
+    configure_logging()
     pkg_logger = logging.getLogger("sec_generative_search")
     previous_propagate = pkg_logger.propagate
     pkg_logger.propagate = True

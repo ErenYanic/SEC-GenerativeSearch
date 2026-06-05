@@ -1,0 +1,118 @@
+# syntax=docker/dockerfile:1
+
+# ===========================================================================
+# SEC-GenerativeSearch — Next.js frontend image
+# ===========================================================================
+# Multi-stage build (mirrors deploy/Dockerfile.api's discipline):
+#   - deps    : installs the locked dependency set with pnpm (via Corepack),
+#               --frozen-lockfile so the image can NEVER drift from the
+#               committed pnpm-lock.yaml.
+#   - builder : compiles the production bundle (`next build`) into Next's
+#               standalone output (.next/standalone + .next/static).
+#   - runtime : copies ONLY the standalone server + static assets onto a fresh
+#               base and runs them as an unprivileged user. No pnpm, no source
+#               tree, no node_modules install at runtime.
+#
+# The standalone server is produced by `next build`, so the Turbopack-compiled
+# middleware ships its per-request CSP nonce + full security-header set
+# correctly (the `next dev` Turbopack header-drop regression does NOT apply to
+# a production build).
+#
+# Build context is the `frontend/` directory (the repo-root .dockerignore
+# excludes frontend/ — it ships here, in its own image):
+#   docker build -f deploy/Dockerfile.frontend -t sec-gs-frontend:local frontend
+#
+# Runtime config is a SINGLE env var, supplied at run time, NEVER baked:
+#   SEC_API_BASE_URL  — server-side base URL the Next admin proxy forwards to.
+# The operator/admin keys live only in the Next server-side admin-session Map
+# (minted via WelcomeGate at runtime) — they are never an image artefact, and
+# SEC_API_BASE_URL is server-side only (never a NEXT_PUBLIC_* leak to the
+# browser).
+#
+# Digest-pinned base (supply-chain hardening), mirroring the SHA-pinned
+# Actions in ci.yml and the API image. Pin the multi-platform INDEX digest,
+# not a per-arch manifest. Re-pin with:
+#   docker buildx imagetools inspect node:22-bookworm-slim \
+#     --format '{{.Manifest.Digest}}'
+# Debian bookworm (glibc) base, matching the API image family — avoids the
+# Alpine/musl native-addon surprises.
+ARG NODE_BASE=node:22-bookworm-slim@sha256:7af03b14a13c8cdd38e45058fd957bf00a72bbe17feac43b1c15a689c029c732
+
+# --------------------------------------------------------------------------
+# deps stage — locked install via Corepack-pinned pnpm
+# --------------------------------------------------------------------------
+FROM ${NODE_BASE} AS deps
+
+ENV NEXT_TELEMETRY_DISABLED=1 \
+    CI=1
+
+# pnpm pinned in lockstep with frontend/package.json `packageManager` and the
+# ci.yml frontend job. Corepack provisions the exact version; do not `npm i -g`.
+RUN corepack enable && corepack prepare pnpm@11.2.2 --activate
+
+WORKDIR /app
+
+# Manifest + lockfile + workspace/.npmrc only, so a source-only edit does not
+# bust this (expensive) dependency layer. --frozen-lockfile fails the build if
+# the lockfile and manifest disagree — the install can never silently drift.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+RUN pnpm install --frozen-lockfile
+
+# --------------------------------------------------------------------------
+# builder stage — production build → Next standalone output
+# --------------------------------------------------------------------------
+FROM ${NODE_BASE} AS builder
+
+ENV NEXT_TELEMETRY_DISABLED=1 \
+    NODE_ENV=production
+
+RUN corepack enable && corepack prepare pnpm@11.2.2 --activate
+
+WORKDIR /app
+
+COPY --from=deps /app/node_modules ./node_modules
+
+# Explicit source/config copies — never `COPY . .` (the .dockerignore is a
+# backstop, not the only line of defence). Everything `next build` needs and
+# nothing it does not (no tests/, no vitest config, no editor cruft).
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+COPY next.config.ts tsconfig.json next-env.d.ts postcss.config.mjs middleware.ts ./
+COPY src ./src
+
+RUN pnpm build
+
+# --------------------------------------------------------------------------
+# runtime stage — standalone server only, non-root
+# --------------------------------------------------------------------------
+FROM ${NODE_BASE} AS runtime
+
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    # The standalone server.js binds HOSTNAME/PORT from the environment.
+    # 0.0.0.0 so nginx/GFE can reach it across the container boundary.
+    HOSTNAME=0.0.0.0 \
+    PORT=3000
+
+WORKDIR /app
+
+# Next's standalone output is a self-contained tree: a minimal server.js plus
+# the traced runtime node_modules. Static assets are NOT included by the
+# tracer and must be copied alongside. The built-in `node` user (uid 1000)
+# owns the tree so the long-lived server never runs as root.
+#   --chown drops privileges at COPY time; no separate chown -R layer needed.
+COPY --from=builder --chown=node:node /app/.next/standalone ./
+COPY --from=builder --chown=node:node /app/.next/static ./.next/static
+
+USER node
+
+EXPOSE 3000
+
+# Liveness probe: the server is up if it answers at all. `/` issues a redirect
+# to /dashboard (3xx), so treat any non-5xx status as healthy. node only — the
+# slim base ships no curl/wget.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD ["node", "-e", "require('http').get('http://127.0.0.1:3000/', (r) => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"]
+
+# The standalone entrypoint. PID 1 so it receives SIGTERM directly for a
+# graceful shutdown.
+CMD ["node", "server.js"]
