@@ -22,13 +22,15 @@ load-bearing control for both deployment images:
 
 All assertions are on tracked, CI-visible files; nothing here requires Docker
 or a network, so the lockers run in the normal pytest job.
+"""
 
+from __future__ import annotations
 
-# ===========================================================================
-# Compose + nginx portable stack lockers.
-# ===========================================================================
+import re
+from pathlib import Path
+from typing import Any
 
-
+import pytest
 import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -269,10 +271,14 @@ def test_server_runs_single_worker_behind_proxy(dockerfile: str) -> None:
     assert "--proxy-headers" in cmd, "uvicorn must run with --proxy-headers behind nginx/GFE"
 
 
+# ==========================================================================
+# Frontend image (deploy/Dockerfile.frontend) — the frontend-image-keyless
+# half of the deployment lockers.
 # ===========================================================================
-# Compose + nginx portable stack lockers.
-# ===========================================================================
-# ===========================================================================
+
+
+def test_frontend_artifacts_exist() -> None:
+    assert _DOCKERFILE_FRONTEND.is_file(), "deploy/Dockerfile.frontend is missing"
     assert _FRONTEND_DOCKERIGNORE.is_file(), "frontend/.dockerignore is missing"
 
 
@@ -401,8 +407,11 @@ def test_frontend_dockerignore_excludes_secrets_and_state(frontend_dockerignore:
 
 # ==========================================================================
 # Compose + nginx portable stack (deploy/docker-compose.yml, deploy/nginx/
-# nginx.conf) — Phase 15.2 / 15.5 / 15.10, the self-hosted-stack half of the
-# 15.11 lockers.
+# nginx.conf) — the supply-chain + runtime contract for the whole deployment, including
+# the in-process TaskManager contract and the edge-proxy contract. The compose file is
+# the single source of truth for the deployment's supply chain (digest-pinned bases)
+# and runtime configuration (replica count, env knobs, volume mounts); the nginx
+# conf is the single source of truth for the edge proxy's routing and TLS contract.
 # ===========================================================================
 
 
