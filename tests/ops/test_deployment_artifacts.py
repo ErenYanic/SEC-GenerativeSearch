@@ -22,14 +22,14 @@ load-bearing control for both deployment images:
 
 All assertions are on tracked, CI-visible files; nothing here requires Docker
 or a network, so the lockers run in the normal pytest job.
-"""
 
-from __future__ import annotations
 
-import re
-from pathlib import Path
+# ===========================================================================
+# Compose + nginx portable stack lockers.
+# ===========================================================================
 
-import pytest
+
+import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DOCKERFILE_API = _REPO_ROOT / "deploy" / "Dockerfile.api"
@@ -38,6 +38,9 @@ _ENTRYPOINT = _REPO_ROOT / "deploy" / "docker-entrypoint.sh"
 _DOCKERIGNORE = _REPO_ROOT / ".dockerignore"
 _FRONTEND_DOCKERIGNORE = _REPO_ROOT / "frontend" / ".dockerignore"
 _NEXT_CONFIG = _REPO_ROOT / "frontend" / "next.config.ts"
+_COMPOSE = _REPO_ROOT / "deploy" / "docker-compose.yml"
+_NGINX_CONF = _REPO_ROOT / "deploy" / "nginx" / "nginx.conf"
+_GITIGNORE = _REPO_ROOT / ".gitignore"
 
 _DIGEST_RE = re.compile(r"@sha256:[0-9a-f]{64}\b")
 _ARG_RE = re.compile(r"^ARG\s+([A-Za-z_][A-Za-z0-9_]*)=(.+)$")
@@ -266,14 +269,10 @@ def test_server_runs_single_worker_behind_proxy(dockerfile: str) -> None:
     assert "--proxy-headers" in cmd, "uvicorn must run with --proxy-headers behind nginx/GFE"
 
 
-# ==========================================================================
-# Frontend image (deploy/Dockerfile.frontend) — the frontend-image-keyless
-# half of the deployment lockers.
 # ===========================================================================
-
-
-def test_frontend_artifacts_exist() -> None:
-    assert _DOCKERFILE_FRONTEND.is_file(), "deploy/Dockerfile.frontend is missing"
+# Compose + nginx portable stack lockers.
+# ===========================================================================
+# ===========================================================================
     assert _FRONTEND_DOCKERIGNORE.is_file(), "frontend/.dockerignore is missing"
 
 
@@ -398,3 +397,299 @@ def test_frontend_dockerignore_excludes_secrets_and_state(frontend_dockerignore:
     }
     missing = sorted(required - entries)
     assert not missing, f"frontend/.dockerignore is missing secret/state exclusions: {missing}"
+
+
+# ==========================================================================
+# Compose + nginx portable stack (deploy/docker-compose.yml, deploy/nginx/
+# nginx.conf) — Phase 15.2 / 15.5 / 15.10, the self-hosted-stack half of the
+# 15.11 lockers.
+# ===========================================================================
+
+
+@pytest.fixture(scope="module")
+def compose() -> dict[str, Any]:
+    return yaml.safe_load(_COMPOSE.read_text(encoding="utf-8"))
+
+
+@pytest.fixture(scope="module")
+def compose_text() -> str:
+    return _COMPOSE.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def nginx_conf() -> str:
+    return _NGINX_CONF.read_text(encoding="utf-8")
+
+
+# A secret-bearing env knob assigned a literal value in the compose file is a
+# leak. A `${VAR}` interpolation or a `*_FILE` path indirection is fine.
+_SECRET_ENV = (
+    "API_KEY",
+    "API_ADMIN_KEY",
+    "API_AUTH_PEPPER",
+    "DB_ENCRYPTION_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "HUGGING_FACE_TOKEN",
+)
+
+
+def test_compose_artifacts_exist() -> None:
+    assert _COMPOSE.is_file(), "deploy/docker-compose.yml is missing"
+    assert _NGINX_CONF.is_file(), "deploy/nginx/nginx.conf is missing"
+
+
+def _services(compose: dict[str, Any]) -> dict[str, Any]:
+    services = compose.get("services", {})
+    assert {"api", "frontend", "nginx"} <= set(services), (
+        f"compose must define api + frontend + nginx services; got {sorted(services)}"
+    )
+    return services
+
+
+# ---------------------------------------------------------------------------
+# Supply chain: the third-party (nginx) base image is digest-pinned.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.security
+def test_compose_nginx_image_is_digest_pinned(compose: dict[str, Any]) -> None:
+    image = _services(compose)["nginx"].get("image", "")
+    assert _DIGEST_RE.search(image), (
+        f"nginx image is not digest-pinned (@sha256:...): {image!r}. "
+        "A floating :tag is a silent-substitution / supply-chain vector."
+    )
+
+
+# ---------------------------------------------------------------------------
+# In-process TaskManager: exactly one api replica.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.security
+def test_compose_api_is_single_replica(compose: dict[str, Any]) -> None:
+    api = _services(compose)["api"]
+    replicas = api.get("deploy", {}).get("replicas", 1)
+    assert replicas == 1, (
+        f"api must run exactly one replica (in-process TaskManager mints task "
+        f"IDs in-process; a second replica orphans them); got replicas={replicas}"
+    )
+    # `scale:` is the deprecated knob for the same thing — pin it too.
+    assert "scale" not in api or api["scale"] == 1, "api must not scale beyond one instance"
+
+
+# ---------------------------------------------------------------------------
+# Only the edge publishes host ports; api + frontend stay internal.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.security
+def test_compose_only_nginx_publishes_ports(compose: dict[str, Any]) -> None:
+    services = _services(compose)
+    for name in ("api", "frontend"):
+        assert not services[name].get("ports"), (
+            f"{name} publishes host ports — the browser must reach the backend only "
+            "through the Next proxy; only nginx should publish ports."
+        )
+    assert services["nginx"].get("ports"), "nginx publishes no host ports — nothing is reachable"
+
+
+# ---------------------------------------------------------------------------
+# No baked secret; secret-bearing knobs only via *_FILE / interpolation.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.security
+def test_compose_bakes_no_secret(compose_text: str) -> None:
+    lowered = compose_text.lower()
+    assert not re.search(r"\bsk-[a-z0-9]{8,}", lowered), (
+        "docker-compose.yml contains an sk- API-key-shaped token"
+    )
+    for needle in ("bearer ", "authorization:", "private key"):
+        assert needle not in lowered, f"compose contains secret-shaped material: {needle!r}"
+    # No secret-bearing env knob may be ASSIGNED a literal value. Allow the
+    # `*_FILE` path indirection (DB_ENCRYPTION_KEY_FILE: /run/secrets/...) and a
+    # `${VAR}` interpolation; a bare `NAME: <value>` / `NAME=<value>` is a leak.
+    for name in _SECRET_ENV:
+        bad = re.search(rf"^\s*-?\s*{name}\s*[:=]\s*(?!\s|$|\$|/run/secrets)\S", compose_text, re.M)
+        assert not bad, (
+            f"compose assigns a literal value to {name} — supply it at runtime via "
+            "env_file / a mounted *_FILE secret, never inline."
+        )
+
+
+@pytest.mark.security
+def test_compose_api_uses_secret_file_indirection(compose: dict[str, Any]) -> None:
+    api = _services(compose)["api"]
+    env = api.get("environment", {}) or {}
+    # The encryption key + auth pepper must arrive via a mounted file, not a
+    # literal env value — so they live in /run/secrets, never in the image or
+    # the process env table as cleartext.
+    for knob in ("DB_ENCRYPTION_KEY_FILE", "API_AUTH_PEPPER_FILE"):
+        value = env.get(knob, "")
+        assert value.startswith("/run/secrets/"), (
+            f"api {knob} must point at a mounted Docker-secret under /run/secrets/; got {value!r}"
+        )
+    # And those files must be wired as Docker secrets (read-only /run/secrets
+    # mount that fails loudly when the source file is absent).
+    secret_refs = {s if isinstance(s, str) else s.get("source") for s in (api.get("secrets") or [])}
+    assert {"db_encryption_key", "api_auth_pepper"} <= secret_refs, (
+        f"api must mount db_encryption_key + api_auth_pepper as Docker secrets; got {secret_refs}"
+    )
+
+
+@pytest.mark.security
+def test_compose_top_level_secrets_are_file_sourced(compose: dict[str, Any]) -> None:
+    secrets = compose.get("secrets", {})
+    for name in ("db_encryption_key", "api_auth_pepper"):
+        spec = secrets.get(name, {})
+        assert "file" in spec, f"secret {name} must be file-sourced (operator-supplied), not inline"
+        assert "environment" not in spec, (
+            f"secret {name} must not be sourced from an env var (would bake into the process table)"
+        )
+
+
+@pytest.mark.security
+def test_compose_frontend_is_keyless(compose: dict[str, Any]) -> None:
+    fe = _services(compose)["frontend"]
+    env = fe.get("environment", {}) or {}
+    # The only runtime knob is the server-side backend base URL. No key, and
+    # crucially no NEXT_PUBLIC_* (that would ship to the browser).
+    for key in env:
+        assert not key.startswith("NEXT_PUBLIC_"), (
+            f"frontend sets {key} — a NEXT_PUBLIC_* var reaches the browser bundle"
+        )
+    assert "SEC_API_BASE_URL" in env, "frontend must point at the backend via SEC_API_BASE_URL"
+    # The base URL is server-side; it must NOT be advertised through a public var.
+    assert "NEXT_PUBLIC_SEC_API_BASE_URL" not in env, (
+        "SEC_API_BASE_URL must stay server-side, never NEXT_PUBLIC_*"
+    )
+
+
+@pytest.mark.security
+def test_compose_api_persists_data_on_a_volume(compose: dict[str, Any]) -> None:
+    api = _services(compose)["api"]
+    targets = []
+    for vol in api.get("volumes", []) or []:
+        if isinstance(vol, str):
+            targets.append(vol.split(":")[1] if ":" in vol else vol)
+        else:
+            targets.append(vol.get("target"))
+    assert "/app/data" in targets, (
+        "api must mount a durable volume at /app/data — task_history is the only "
+        "crash-durable ingest record (§4.7.quinquies)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# .gitignore re-ignores the operator secret / TLS material under deploy/.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.security
+def test_gitignore_reignores_deploy_secrets() -> None:
+    gitignore = _GITIGNORE.read_text(encoding="utf-8")
+    carve_out = gitignore.index("!deploy/")
+    for pattern in ("deploy/secrets/", "deploy/certs/"):
+        idx = gitignore.find(pattern)
+        assert idx != -1, f".gitignore must re-ignore {pattern} (operator secret/TLS material)"
+        assert idx > carve_out, (
+            f"{pattern} re-ignore must come AFTER the !deploy/ carve-out or it has no effect"
+        )
+
+
+# ==========================================================================
+# nginx reverse proxy — routing + TLS only; owns NO CSP.
+# ==========================================================================
+
+# Security / CSP headers nginx MUST NOT inject — the Next middleware owns the
+# full set (a second, un-nonced policy here would fight or weaken it).
+_FORBIDDEN_NGINX_HEADERS = (
+    "content-security-policy",
+    "strict-transport-security",
+    "x-frame-options",
+    "x-content-type-options",
+    "referrer-policy",
+    "permissions-policy",
+)
+
+
+def _nginx_add_headers(nginx_conf: str) -> list[str]:
+    """Lower-cased header names from every (uncommented) add_header directive."""
+    names: list[str] = []
+    for raw in nginx_conf.splitlines():
+        line = raw.strip()
+        if line.startswith("#"):
+            continue
+        match = re.match(r"add_header\s+([A-Za-z0-9-]+)", line)
+        if match:
+            names.append(match.group(1).lower())
+    return names
+
+
+def test_nginx_conf_exists() -> None:
+    assert _NGINX_CONF.is_file(), "deploy/nginx/nginx.conf is missing"
+
+
+@pytest.mark.security
+def test_nginx_sets_no_csp_or_security_headers(nginx_conf: str) -> None:
+    emitted = _nginx_add_headers(nginx_conf)
+    leaked = sorted(set(emitted) & set(_FORBIDDEN_NGINX_HEADERS))
+    assert not leaked, (
+        f"nginx injects security/CSP header(s) {leaked} — the Next.js middleware is the "
+        "single source of truth for CSP + the security-header set. nginx does routing only."
+    )
+
+
+@pytest.mark.security
+def test_nginx_admin_proxy_routes_to_frontend_before_api(nginx_conf: str) -> None:
+    # The browser reaches the backend ONLY through the Next admin proxy at
+    # /api/admin/*. That route lives on the frontend (it injects the server-held
+    # keys), so its location MUST proxy to the frontend AND be declared before the
+    # bare /api/ location so longest-prefix-wins keeps it ahead.
+    admin_idx = nginx_conf.find("location /api/admin/")
+    api_idx = nginx_conf.find("location /api/ ")
+    assert admin_idx != -1, "nginx has no `location /api/admin/` — SPA admin proxy unreachable"
+    assert api_idx != -1, "nginx has no `location /api/` for direct API consumers"
+    assert admin_idx < api_idx, (
+        "`location /api/admin/` must precede `location /api/` so the admin proxy wins"
+    )
+    # The admin-proxy block targets the frontend upstream; the bare /api/ block
+    # targets the api upstream.
+    admin_block = nginx_conf[admin_idx:api_idx]
+    assert "proxy_pass http://frontend" in admin_block, (
+        "`location /api/admin/` must proxy to the frontend (the key-injecting Next proxy)"
+    )
+    api_block = nginx_conf[api_idx : api_idx + 600]
+    assert "proxy_pass http://api" in api_block, "`location /api/` must proxy to the api upstream"
+
+
+@pytest.mark.security
+def test_nginx_websocket_upgrade_to_api(nginx_conf: str) -> None:
+    ws_idx = nginx_conf.find("location /ws/")
+    assert ws_idx != -1, "nginx has no `location /ws/` for the ingest-progress WebSocket"
+    ws_block = nginx_conf[ws_idx : ws_idx + 600]
+    assert "proxy_pass http://api" in ws_block, "`location /ws/` must proxy to the api upstream"
+    assert re.search(r"proxy_set_header\s+Upgrade\s+\$http_upgrade", ws_block), (
+        "WebSocket location must forward the Upgrade header"
+    )
+    assert re.search(r"proxy_set_header\s+Connection\s+\$connection_upgrade", ws_block), (
+        "WebSocket location must set Connection: upgrade"
+    )
+    # The backend's WS authorisation surface is the Origin allow-list — nginx
+    # must forward Origin intact for that check to run.
+    assert re.search(r"proxy_set_header\s+Origin\s+\$http_origin", ws_block), (
+        "WebSocket location must forward the Origin header (backend WS auth surface)"
+    )
+
+
+def test_nginx_terminates_tls(nginx_conf: str) -> None:
+    assert "listen 443 ssl" in nginx_conf, "nginx does not terminate TLS on :443"
+    assert "ssl_certificate" in nginx_conf, "nginx has no TLS certificate directive"
+
+
+@pytest.mark.security
+def test_nginx_no_baked_secret(nginx_conf: str) -> None:
+    lowered = nginx_conf.lower()
+    assert not re.search(r"\bsk-[a-z0-9]{8,}", lowered), "nginx.conf contains an sk- API-key token"
+    assert "private key" not in lowered, "nginx.conf contains secret-shaped material"

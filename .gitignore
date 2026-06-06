@@ -31,11 +31,16 @@ data/
 !tests/fixtures/
 !tests/fixtures/**
 
-# Track committed operator artefacts (e.g. the Grafana dashboard template)
-# even though the blanket *.json rule above ignores them. These are
-# version-controlled deployment assets, not data.
+# Track committed operator artefacts even though the blanket *.json rule above
+# ignores them. These are version-controlled deployment assets, not data.
 !deploy/
 !deploy/**/*.json
+
+# ...but NEVER the operator-supplied runtime secrets / TLS material that live
+# under deploy/. These re-ignores must stay AFTER the !deploy/ carve-out above.
+# deploy/.env is already caught by the .env rule below; these are not.
+deploy/secrets/
+deploy/certs/
 
 # Track the frontend project manifest + every .json under frontend/ EXCEPT
 # the build artefacts (node_modules, .next, coverage, etc.) which are still
@@ -181,10 +186,10 @@ instance/
 # Scrapy stuff
 .scrapy
 
-# Sphinx documentation
+# Sphinx build output
 docs/_build/
 
-# Project documentation
+# Project build output
 docs/
 .claude/
 

@@ -32,6 +32,10 @@ data/
 *.sqlite3
 chroma_db/
 
+# --- Deployment runtime secrets / TLS material (compose mounts, never baked) -
+deploy/secrets/
+deploy/certs/
+
 # --- Python virtualenv, caches, build output ------------------------------
 .venv/
 venv/
@@ -54,7 +58,7 @@ uv.lock
 # --- Frontend ships in its own image (deploy/Dockerfile.frontend, 15.4b) --
 frontend/
 
-# --- VCS, CI, docs, editor, tooling ---------------------------------------
+# --- VCS, CI, editor, tooling ---------------------------------------
 .git/
 .github/
 .gitignore
