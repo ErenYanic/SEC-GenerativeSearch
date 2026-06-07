@@ -43,6 +43,9 @@ _NEXT_CONFIG = _REPO_ROOT / "frontend" / "next.config.ts"
 _COMPOSE = _REPO_ROOT / "deploy" / "docker-compose.yml"
 _NGINX_CONF = _REPO_ROOT / "deploy" / "nginx" / "nginx.conf"
 _GITIGNORE = _REPO_ROOT / ".gitignore"
+_CLOUD_API = _REPO_ROOT / "deploy" / "cloud" / "api-service.yaml"
+_CLOUD_FRONTEND = _REPO_ROOT / "deploy" / "cloud" / "frontend-service.yaml"
+_CLOUD_JOB = _REPO_ROOT / "deploy" / "cloud" / "demo-reset-job.yaml"
 
 _DIGEST_RE = re.compile(r"@sha256:[0-9a-f]{64}\b")
 _ARG_RE = re.compile(r"^ARG\s+([A-Za-z_][A-Za-z0-9_]*)=(.+)$")
@@ -702,3 +705,274 @@ def test_nginx_no_baked_secret(nginx_conf: str) -> None:
     lowered = nginx_conf.lower()
     assert not re.search(r"\bsk-[a-z0-9]{8,}", lowered), "nginx.conf contains an sk- API-key token"
     assert "private key" not in lowered, "nginx.conf contains secret-shaped material"
+
+
+# ==========================================================================
+# GCP Cloud Run manifests (deploy/cloud/{api,frontend}-service.yaml,
+# demo-reset-job.yaml) — the Cloud Run counterparts of the Compose stack and
+# carry the same load-bearing contracts, expressed in Knative annotations:
+#
+#   - the in-process TaskManager single-instance contract (maxScale=1, no
+#     scale-to-zero, no CPU throttling between requests);
+#   - Secret Manager indirection for every secret-bearing knob (the Cloud Run
+#     analogue of the Compose *_FILE / Docker-secret mounts);
+#   - a keyless, GFE-TLS frontend service whose only env knob is the server-side
+#     SEC_API_BASE_URL (no NEXT_PUBLIC_*, no secret);
+#   - an internal-ingress API the browser can never reach directly.
+#
+# Like every other locker here, the assertions are on tracked, CI-visible
+# files and need no gcloud / network / Docker daemon.
+# ===========================================================================
+
+_KNATIVE_SERVICE_KIND = "Service"
+_CLOUD_RUN_JOB_KIND = "Job"
+
+
+def _load_yaml(path: Path) -> dict[str, Any]:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+def _service_container(doc: dict[str, Any]) -> dict[str, Any]:
+    """The first container of a Knative ``Service`` revision template."""
+    containers = doc["spec"]["template"]["spec"]["containers"]
+    assert containers, "Knative Service defines no container"
+    return containers[0]
+
+
+def _job_container(doc: dict[str, Any]) -> dict[str, Any]:
+    """The first container of a Cloud Run ``Job`` task template.
+
+    The nesting is Job → ExecutionTemplate (``spec.template``) → TaskTemplate
+    (``.spec.template``) → ``.spec.containers``.
+    """
+    containers = doc["spec"]["template"]["spec"]["template"]["spec"]["containers"]
+    assert containers, "Cloud Run Job defines no container"
+    return containers[0]
+
+
+def _template_annotations(doc: dict[str, Any]) -> dict[str, str]:
+    return doc["spec"]["template"]["metadata"].get("annotations", {}) or {}
+
+
+def _env_by_name(container: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {entry["name"]: entry for entry in (container.get("env") or [])}
+
+
+def _uses_secret_manager(entry: dict[str, Any]) -> bool:
+    """True iff the env entry resolves from Secret Manager (no inline value)."""
+    if "value" in entry:
+        return False
+    return "secretKeyRef" in (entry.get("valueFrom") or {})
+
+
+@pytest.fixture(scope="module")
+def cloud_api() -> dict[str, Any]:
+    return _load_yaml(_CLOUD_API)
+
+
+@pytest.fixture(scope="module")
+def cloud_frontend() -> dict[str, Any]:
+    return _load_yaml(_CLOUD_FRONTEND)
+
+
+@pytest.fixture(scope="module")
+def cloud_job() -> dict[str, Any]:
+    return _load_yaml(_CLOUD_JOB)
+
+
+def test_cloud_artifacts_exist() -> None:
+    assert _CLOUD_API.is_file(), "deploy/cloud/api-service.yaml is missing"
+    assert _CLOUD_FRONTEND.is_file(), "deploy/cloud/frontend-service.yaml is missing"
+    assert _CLOUD_JOB.is_file(), "deploy/cloud/demo-reset-job.yaml is missing"
+
+
+def test_cloud_services_have_expected_kinds(
+    cloud_api: dict[str, Any], cloud_frontend: dict[str, Any], cloud_job: dict[str, Any]
+) -> None:
+    assert cloud_api["kind"] == _KNATIVE_SERVICE_KIND, "api-service.yaml must be a Knative Service"
+    assert cloud_frontend["kind"] == _KNATIVE_SERVICE_KIND, (
+        "frontend-service.yaml must be a Knative Service"
+    )
+    assert cloud_job["kind"] == _CLOUD_RUN_JOB_KIND, "demo-reset-job.yaml must be a Cloud Run Job"
+
+
+# ---------------------------------------------------------------------------
+# In-process TaskManager: exactly one API instance, never scaled to zero.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.security
+def test_cloud_api_is_single_instance(cloud_api: dict[str, Any]) -> None:
+    ann = _template_annotations(cloud_api)
+    max_scale = ann.get("autoscaling.knative.dev/maxScale")
+    assert max_scale == "1", (
+        f"api maxScale must be '1' (the in-process TaskManager mints task IDs "
+        f"in-process; a second instance orphans them); got {max_scale!r}"
+    )
+
+
+@pytest.mark.security
+def test_cloud_api_never_scales_to_zero(cloud_api: dict[str, Any]) -> None:
+    # Scale-to-zero or CPU-throttling between requests kills the daemon-thread
+    # ingest workers mid-flight (DEPLOYMENT §4.7.quinquies).
+    ann = _template_annotations(cloud_api)
+    min_scale = ann.get("autoscaling.knative.dev/minScale")
+    assert min_scale is not None and int(min_scale) >= 1, (
+        f"api minScale must be >= 1 — scale-to-zero kills in-flight ingest "
+        f"workers; got {min_scale!r}"
+    )
+    throttle = ann.get("run.googleapis.com/cpu-throttling")
+    assert throttle == "false", (
+        f"api cpu-throttling must be 'false' so background worker threads keep "
+        f"running between requests; got {throttle!r}"
+    )
+
+
+@pytest.mark.security
+def test_cloud_api_ingress_is_internal(cloud_api: dict[str, Any]) -> None:
+    # The browser must reach the backend only through the keyless Next admin
+    # proxy on the frontend service — never the API directly.
+    ingress = cloud_api["metadata"].get("annotations", {}).get("run.googleapis.com/ingress")
+    assert ingress == "internal", (
+        f"api ingress must be 'internal' (browser reaches it only via the Next "
+        f"proxy on the frontend); got {ingress!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# No baked secret; secret-bearing knobs only via Secret Manager.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("path", [_CLOUD_API, _CLOUD_FRONTEND, _CLOUD_JOB], ids=lambda p: p.name)
+def test_cloud_manifest_bakes_no_secret(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    lowered = text.lower()
+    assert not re.search(r"\bsk-[a-z0-9]{8,}", lowered), (
+        f"{path.name} contains an sk- API-key-shaped token"
+    )
+    for needle in ("bearer ", "authorization:", "private key", "begin certificate"):
+        assert needle not in lowered, f"{path.name} contains secret-shaped material: {needle!r}"
+    # No secret-bearing knob may be ASSIGNED a literal `value:`. The Secret
+    # Manager indirection (valueFrom.secretKeyRef) carries no literal here, so a
+    # `<NAME>` ... `value: <x>` pairing on adjacent lines is the leak shape.
+    for name in _SECRET_ENV:
+        bad = re.search(rf"name:\s*{name}\b[^\n]*\n\s*value:\s*\S", text)
+        assert not bad, (
+            f"{path.name} assigns a literal `value:` to {name} — resolve it from "
+            "Secret Manager via valueFrom.secretKeyRef, never inline."
+        )
+
+
+@pytest.mark.security
+def test_cloud_api_secret_knobs_use_secret_manager(cloud_api: dict[str, Any]) -> None:
+    env = _env_by_name(_service_container(cloud_api))
+    present_secrets = [name for name in _SECRET_ENV if name in env]
+    # Sanity: the cloud API actually configures the encryption key + pepper, so
+    # the assertion below is never vacuous.
+    assert {"DB_ENCRYPTION_KEY", "API_AUTH_PEPPER"} <= set(present_secrets), (
+        f"cloud API must configure DB_ENCRYPTION_KEY + API_AUTH_PEPPER; got {present_secrets}"
+    )
+    for name in present_secrets:
+        assert _uses_secret_manager(env[name]), (
+            f"api {name} must resolve from Secret Manager (valueFrom.secretKeyRef), "
+            f"never an inline value; got {env[name]!r}"
+        )
+
+
+@pytest.mark.security
+def test_cloud_api_persists_data_via_gcsfuse(cloud_api: dict[str, Any]) -> None:
+    container = _service_container(cloud_api)
+    mounts = {m.get("mountPath") for m in (container.get("volumeMounts") or [])}
+    assert "/app/data" in mounts, (
+        "api must mount a durable volume at /app/data — task_history is the only "
+        "crash-durable ingest record (§4.7.quinquies)"
+    )
+    volumes = cloud_api["spec"]["template"]["spec"].get("volumes") or []
+    drivers = {v.get("csi", {}).get("driver") for v in volumes}
+    assert "gcsfuse.run.googleapis.com" in drivers, (
+        "api /app/data must be backed by the GCS FUSE CSI driver on Cloud Run "
+        f"(no persistent local disk); got volume drivers {drivers}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Keyless, GFE-TLS frontend service.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.security
+def test_cloud_frontend_is_keyless(cloud_frontend: dict[str, Any]) -> None:
+    container = _service_container(cloud_frontend)
+    env = _env_by_name(container)
+    for name, entry in env.items():
+        assert not name.startswith("NEXT_PUBLIC_"), (
+            f"frontend sets {name} — a NEXT_PUBLIC_* var reaches the browser bundle"
+        )
+        assert name not in _SECRET_ENV, f"frontend env carries a secret-bearing knob {name}"
+        assert "valueFrom" not in entry, (
+            f"frontend env {name} resolves from a secret store — the SPA image is keyless"
+        )
+    assert "SEC_API_BASE_URL" in env, "frontend must point at the backend via SEC_API_BASE_URL"
+    assert "NEXT_PUBLIC_SEC_API_BASE_URL" not in env, (
+        "SEC_API_BASE_URL must stay server-side, never NEXT_PUBLIC_*"
+    )
+
+
+@pytest.mark.security
+def test_cloud_frontend_is_public_gfe_tls(cloud_frontend: dict[str, Any]) -> None:
+    # GFE terminates TLS and serves a managed certificate for a public service;
+    # the manifest defines NO TLS material of its own, and the service is
+    # publicly reachable (ingress: all, or unset which defaults to all).
+    ingress = (
+        cloud_frontend["metadata"].get("annotations", {}).get("run.googleapis.com/ingress", "all")
+    )
+    assert ingress == "all", (
+        f"frontend must be publicly reachable (ingress 'all') so GFE fronts it "
+        f"with managed TLS; got {ingress!r}"
+    )
+    text = _CLOUD_FRONTEND.read_text(encoding="utf-8").lower()
+    for needle in ("ssl_certificate", "tls_cert", "443", "begin private key"):
+        assert needle not in text, (
+            f"frontend manifest defines TLS material ({needle!r}); GFE owns TLS — "
+            "the service must not terminate it"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Demo-reset Cloud Run Job.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.security
+def test_cloud_demo_reset_is_a_job(cloud_job: dict[str, Any]) -> None:
+    # A Job runs to completion per trigger — never a long-lived Service that
+    # would hold the destructive `clear` surface open.
+    assert cloud_job["kind"] == _CLOUD_RUN_JOB_KIND, "demo-reset must be a Cloud Run Job"
+    container = _job_container(cloud_job)
+    # It invokes the CLI (which bypasses API_DEMO_MODE) — the only reset path,
+    # since the API blocks `clear` under demo mode.
+    args = container.get("args") or []
+    assert args[:3] == ["sec-rag", "manage", "clear"], (
+        f"demo-reset Job must run `sec-rag manage clear` (the CLI reset path that "
+        f"bypasses demo mode); got args {args}"
+    )
+    # `args` only, no `command`: the image ENTRYPOINT (the gosu drop) stays in
+    # force, so the reset runs as the unprivileged appuser, not root.
+    assert "command" not in container, (
+        "demo-reset Job must not override `command` — keep the image ENTRYPOINT "
+        "(docker-entrypoint.sh) so the gosu non-root drop still runs"
+    )
+
+
+@pytest.mark.security
+def test_cloud_demo_reset_uses_secret_manager(cloud_job: dict[str, Any]) -> None:
+    env = _env_by_name(_job_container(cloud_job))
+    assert "DB_ENCRYPTION_KEY" in env, (
+        "demo-reset Job needs DB_ENCRYPTION_KEY to open the SQLCipher store"
+    )
+    assert _uses_secret_manager(env["DB_ENCRYPTION_KEY"]), (
+        "demo-reset Job DB_ENCRYPTION_KEY must resolve from Secret Manager "
+        "(valueFrom.secretKeyRef), never an inline value"
+    )

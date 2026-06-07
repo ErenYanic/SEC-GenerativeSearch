@@ -1,0 +1,169 @@
+# ===========================================================================
+# SEC-GenerativeSearch — FastAPI backend on Cloud Run (Scenario C, cloud)
+# ===========================================================================
+# A Knative `Service` manifest for `gcloud run services replace`. This is the
+# GCP counterpart of the `api` service in deploy/docker-compose.yml; it carries
+# the same load-bearing contracts, expressed in Cloud Run annotations.
+#
+# Apply (placeholders below are substituted by deploy.yml / the operator):
+#   gcloud run services replace deploy/cloud/api-service.yaml --region REGION
+#
+# Substitution placeholders (NEVER commit a real value):
+#   PROJECT_ID  — GCP project id
+#   REGION      — Cloud Run + Artifact Registry region (e.g. us-central1)
+#   the @sha256 image digest is stamped by the Cloud Build step (Phase 15.7).
+#
+# Security / correctness posture (statically enforced by tests/ops/
+# test_deployment_artifacts.py — the GCP half of the Phase 15.11 lockers):
+#   - SINGLE INSTANCE. maxScale=1 AND minScale=1 AND cpu-throttling=false: the
+#     in-process TaskManager mints ingest task IDs in-process and runs the
+#     workers as daemon threads. A second instance orphans task IDs (task-404s);
+#     scale-to-zero or CPU-throttling between requests kills in-flight workers
+#     (DEPLOYMENT §4.7.quinquies).
+#   - NO BAKED SECRET. Every secret-bearing knob arrives from Secret Manager via
+#     `valueFrom.secretKeyRef` — never an inline `value:`. The cleartext never
+#     lands in the manifest, the image, or `git`.
+#   - INTERNAL INGRESS. The browser never reaches the API directly; it goes
+#     through the keyless Next admin proxy on the frontend service. GFE still
+#     terminates TLS in front of the API for service-to-service traffic.
+#   - DURABLE STATE via the GCS FUSE CSI volume at /app/data — task_history is
+#     the only crash-durable ingest record.
+# ---------------------------------------------------------------------------
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: sec-gs-api
+  labels:
+    app: sec-generative-search
+    component: api
+  annotations:
+    # Internal ingress: only the VPC / other Cloud Run services (the frontend
+    # admin proxy) and Cloud Scheduler may reach the API. The browser cannot.
+    run.googleapis.com/ingress: internal
+spec:
+  template:
+    metadata:
+      annotations:
+        # --- The in-process TaskManager single-instance contract -------------
+        # Exactly one instance: task IDs are minted in-process.
+        autoscaling.knative.dev/maxScale: "1"
+        # Never scale to zero — that kills in-flight ingest worker threads.
+        autoscaling.knative.dev/minScale: "1"
+        # Keep the CPU allocated between requests so the background daemon-thread
+        # workers keep running while no HTTP request is in flight.
+        run.googleapis.com/cpu-throttling: "false"
+        # --- Local-embedder GPU (default embedder, BF16 on CUDA) -------------
+        run.googleapis.com/execution-environment: gen2
+        run.googleapis.com/startup-cpu-boost: "true"
+        run.googleapis.com/accelerator: nvidia-l4
+        # GPU instances are zonal; disabling zonal redundancy keeps the GPU
+        # quota requirement at one accelerator for a single-instance demo.
+        run.googleapis.com/gpu-zonal-redundancy-disabled: "true"
+    spec:
+      # One instance fields every concurrent request; uvicorn handles fan-out.
+      containerConcurrency: 80
+      # Long ingests + SSE generation streams need a generous request timeout.
+      timeoutSeconds: 3600
+      # Dedicated runtime identity: Secret Manager accessor + the GCS data
+      # bucket object admin. NOT a key — an IAM binding resolved at run time.
+      serviceAccountName: sec-gs-api-sa@PROJECT_ID.iam.gserviceaccount.com
+      containers:
+        - name: api
+          # Stamped to an immutable @sha256 digest by the Cloud Build step.
+          image: REGION-docker.pkg.dev/PROJECT_ID/sec-gs/api:latest
+          ports:
+            # Cloud Run sets PORT to this value; the image CMD binds :8000.
+            - name: http1
+              containerPort: 8000
+          resources:
+            limits:
+              cpu: "4"
+              memory: 16Gi
+              nvidia.com/gpu: "1"
+          # --- Non-secret configuration (Scenario C / cloud profile) ---------
+          env:
+            - name: DB_DEPLOYMENT_PROFILE
+              value: cloud
+            # Public demo: FIFO eviction + "clear all" disabled via the API.
+            # (The demo-reset Job uses the CLI, which bypasses demo mode.)
+            - name: API_DEMO_MODE
+              value: "true"
+            # EDGAR identity must be supplied per session — never a shared
+            # process-wide identity in a multi-tenant deployment.
+            - name: API_EDGAR_SESSION_REQUIRED
+              value: "true"
+            - name: DB_PERSIST_PROVIDER_CREDENTIALS
+              value: "true"
+            # Default embedder stays on-prem (here, on-GPU) — queries + filing
+            # text never leave the instance for a third-party embedder.
+            - name: EMBEDDING_PROVIDER
+              value: local
+            - name: LLM_PROVIDER
+              value: anthropic
+            - name: LOG_FORMAT
+              value: json
+            - name: LOG_REDACT_QUERIES
+              value: "true"
+            - name: DB_TASK_HISTORY_PERSIST_TICKERS
+              value: "false"
+            - name: DB_TASK_HISTORY_RETENTION_DAYS
+              value: "1"
+            # --- Secret-bearing knobs: Secret Manager only, never inline -----
+            # secretKeyRef resolves the secret VALUE into the env var at start;
+            # the cleartext is never in the manifest, the image, or git.
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sec-gs-api-key
+                  key: latest
+            - name: API_ADMIN_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sec-gs-admin-key
+                  key: latest
+            - name: API_AUTH_PEPPER
+              valueFrom:
+                secretKeyRef:
+                  name: sec-gs-auth-pepper
+                  key: latest
+            - name: DB_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sec-gs-db-encryption-key
+                  key: latest
+            # Admin-default LLM key (users may still supply their own via the
+            # per-user encrypted vault, which overrides this admin-default tier).
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sec-gs-anthropic-key
+                  key: latest
+          volumeMounts:
+            # Durable Tier-2/3 state: SQLite/SQLCipher + ChromaDB + the HF cache
+            # nest under /app/data (HF_HOME is /app/cache, but the SQLite +
+            # ChromaDB stores are the crash-durable records that need the bucket).
+            - name: data
+              mountPath: /app/data
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            # The local embedder + SQLCipher open can take a while on cold start.
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        # GCS FUSE CSI volume — the durable store for a Cloud Run instance with
+        # no persistent local disk. Bucket is operator-provisioned.
+        - name: data
+          csi:
+            driver: gcsfuse.run.googleapis.com
+            volumeAttributes:
+              bucketName: sec-gs-data-PROJECT_ID

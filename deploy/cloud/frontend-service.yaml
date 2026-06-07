@@ -1,0 +1,85 @@
+# ===========================================================================
+# SEC-GenerativeSearch — Next.js SPA on Cloud Run (Scenario C, cloud)
+# ===========================================================================
+# A Knative `Service` manifest for `gcloud run services replace`. The GCP
+# counterpart of the `frontend` service in deploy/docker-compose.yml.
+#
+# Apply:
+#   gcloud run services replace deploy/cloud/frontend-service.yaml --region REGION
+#
+# Security / correctness posture (statically enforced by tests/ops/
+# test_deployment_artifacts.py — the GCP half of the Phase 15.11 lockers):
+#   - KEYLESS. The image carries NO admin / API key. The operator/admin keys
+#     live only in the Next server-side admin-session Map, minted at run time via
+#     WelcomeGate. The ONLY runtime env knob is SEC_API_BASE_URL (server-side) —
+#     and crucially NO NEXT_PUBLIC_* var (that would ship to the browser bundle).
+#   - GFE TLS. The service is publicly reachable (ingress: all); Google Front
+#     End terminates TLS and serves a managed certificate. The manifest owns NO
+#     TLS / certificate material of its own.
+#   - STATELESS. No volume, no secret, no GPU — safe to scale horizontally.
+#
+# The browser reaches the backend ONLY through this service's /api/admin proxy
+# route (which injects the server-held keys); the API service itself is
+# internal-ingress and unreachable from the public internet.
+# ---------------------------------------------------------------------------
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: sec-gs-frontend
+  labels:
+    app: sec-generative-search
+    component: frontend
+  annotations:
+    # Public ingress: the browser reaches the SPA here. GFE terminates TLS and
+    # provisions the managed certificate — the manifest defines no TLS material.
+    run.googleapis.com/ingress: all
+spec:
+  template:
+    metadata:
+      annotations:
+        # Stateless SPA — scale to zero is fine, and scaling out is safe (it
+        # holds no in-process task state, unlike the API).
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "4"
+    spec:
+      containerConcurrency: 200
+      timeoutSeconds: 300
+      # No Secret Manager access needed — the image is keyless.
+      serviceAccountName: sec-gs-frontend-sa@PROJECT_ID.iam.gserviceaccount.com
+      containers:
+        - name: frontend
+          # Stamped to an immutable @sha256 digest by the Cloud Build step.
+          image: REGION-docker.pkg.dev/PROJECT_ID/sec-gs/frontend:latest
+          ports:
+            # Cloud Run sets PORT to this value; the Next standalone server reads
+            # process.env.PORT.
+            - name: http1
+              containerPort: 3000
+          resources:
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          env:
+            # The ONLY runtime knob: the server-side base URL the Next admin
+            # proxy forwards to. It addresses the internal-ingress API service.
+            # NEVER NEXT_PUBLIC_* — that would reach the browser bundle. This is
+            # a service URL, not a secret, so a plain value: is correct here.
+            - name: SEC_API_BASE_URL
+              value: https://sec-gs-api-PROJECT_ID.REGION.run.app
+          # The SPA has no /api/health route (its only API surface is the
+          # /api/admin proxy); the root path 307-redirects to /dashboard, which
+          # a Knative httpGet probe treats as healthy (3xx = success).
+          startupProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
