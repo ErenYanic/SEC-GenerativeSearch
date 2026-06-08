@@ -32,6 +32,9 @@ on:
     workflows: ["CI"]
     types: [completed]
     branches: [main]
+  # Manual opt-in: lets the operator run a deploy on demand (e.g. the first
+  # deploy once the GCP backend is configured) without waiting for a CI cycle.
+  workflow_dispatch:
 
 # Least privilege. `id-token: write` is REQUIRED for the OIDC → WIF exchange;
 # `contents: read` is the checkout scope. Nothing else.
@@ -54,8 +57,16 @@ jobs:
   deploy:
     name: Build and deploy to Cloud Run
     runs-on: ubuntu-latest
-    # Hard gate: deploy only when the CI run that triggered us succeeded.
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # Two-part gate: deploy only when (a) this run was a manual dispatch OR the
+    # gating CI run concluded success, AND (b) the GCP backend is actually
+    # configured (GCP_PROJECT_ID repo variable is set). Until an operator wires
+    # up Workload Identity + the repo variables, the job is SKIPPED — a neutral,
+    # non-failing outcome — so an unconfigured repo never auto-fires a deploy and
+    # never shows a red "production" deployment. Set GCP_PROJECT_ID to go live.
+    if: >-
+      ${{ (github.event_name == 'workflow_dispatch'
+           || github.event.workflow_run.conclusion == 'success')
+          && vars.GCP_PROJECT_ID != '' }}
     # Optional manual-approval gate via a protected GitHub environment.
     environment: production
     env:
