@@ -46,6 +46,9 @@ _GITIGNORE = _REPO_ROOT / ".gitignore"
 _CLOUD_API = _REPO_ROOT / "deploy" / "cloud" / "api-service.yaml"
 _CLOUD_FRONTEND = _REPO_ROOT / "deploy" / "cloud" / "frontend-service.yaml"
 _CLOUD_JOB = _REPO_ROOT / "deploy" / "cloud" / "demo-reset-job.yaml"
+_DEPLOY_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "deploy.yml"
+_CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
+_CLOUDBUILD = _REPO_ROOT / "deploy" / "cloudbuild.yaml"
 
 _DIGEST_RE = re.compile(r"@sha256:[0-9a-f]{64}\b")
 _ARG_RE = re.compile(r"^ARG\s+([A-Za-z_][A-Za-z0-9_]*)=(.+)$")
@@ -976,3 +979,232 @@ def test_cloud_demo_reset_uses_secret_manager(cloud_job: dict[str, Any]) -> None
         "demo-reset Job DB_ENCRYPTION_KEY must resolve from Secret Manager "
         "(valueFrom.secretKeyRef), never an inline value"
     )
+
+
+# ===========================================================================
+# Phase 15.7 — Cloud Run deploy workflow + Cloud Build config.
+# ===========================================================================
+# `.github/workflows/deploy.yml` builds the two images via Cloud Build and
+# applies the Knative manifests, authenticating to GCP with KEYLESS Workload
+# Identity Federation. Like the manifests it deploys, the workflow is an
+# operator artefact whose security properties must not silently regress. These
+# static lockers pin:
+#
+#   - SUPPLY CHAIN. Every `uses:` Action is pinned by a 40-hex commit SHA
+#     (mirrors ci.yml); the deployed Cloud Run revision references an immutable
+#     @sha256 digest, never a floating `:latest`.
+#   - KEYLESS AUTH. WIF only — no `credentials_json` (no long-lived SA key);
+#     `id-token: write` is granted for the OIDC exchange.
+#   - CI GATE. Deploy fires only after the "CI" workflow concludes successfully.
+#   - COMMAND-INJECTION GUARD. No `${{ github.event.* }}` interpolation inside a
+#     `run:` shell (mirrors ci.yml's stated principle).
+#   - CONTAINMENT. ci.yml carries no GCP credential surface whatsoever — every
+#     GCP touch lives in deploy.yml.
+#   - BUILD HYGIENE. cloudbuild.yaml builds each image with the correct context
+#     (api → `.`, frontend → `frontend/`) and pushes commit-tagged refs.
+#
+# All assertions are on tracked, CI-visible files; nothing here needs gcloud,
+# a network, or a Docker daemon.
+# ---------------------------------------------------------------------------
+
+_USES_RE = re.compile(r"uses:\s*(\S+)")
+# owner/repo[/path…]@<40 hex>  — a fully SHA-pinned Action reference.
+_SHA_PINNED_USES_RE = re.compile(r"^[\w.-]+/[\w.-]+(?:/[\w.-]+)*@[0-9a-f]{40}$")
+_RUN_BLOCK_RE = re.compile(r"^(\s*)run:\s*[|>]")
+
+
+def _run_block_bodies(workflow_text: str) -> list[str]:
+    """Return the shell body of every ``run: |`` / ``run: >`` block.
+
+    A block is delimited by indentation: lines indented deeper than the ``run:``
+    key belong to the script. Used to assert no ``${{ github.event.* }}`` value
+    is interpolated straight into a shell command.
+    """
+    bodies: list[str] = []
+    lines = workflow_text.splitlines()
+    index = 0
+    while index < len(lines):
+        match = _RUN_BLOCK_RE.match(lines[index])
+        if not match:
+            index += 1
+            continue
+        indent = len(match.group(1))
+        index += 1
+        body: list[str] = []
+        while index < len(lines):
+            line = lines[index]
+            if line.strip() == "":
+                body.append(line)
+                index += 1
+                continue
+            if (len(line) - len(line.lstrip())) <= indent:
+                break
+            body.append(line)
+            index += 1
+        bodies.append("\n".join(body))
+    return bodies
+
+
+def _cloudbuild_step(cloudbuild: dict[str, Any], step_id: str) -> dict[str, Any]:
+    for step in cloudbuild.get("steps", []):
+        if step.get("id") == step_id:
+            return step
+    raise AssertionError(f"cloudbuild.yaml has no step id {step_id!r}")
+
+
+@pytest.fixture(scope="module")
+def deploy_workflow() -> str:
+    return _DEPLOY_WORKFLOW.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def ci_workflow() -> str:
+    return _CI_WORKFLOW.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def cloudbuild() -> dict[str, Any]:
+    return yaml.safe_load(_CLOUDBUILD.read_text(encoding="utf-8"))
+
+
+def test_deploy_workflow_artifacts_exist() -> None:
+    assert _DEPLOY_WORKFLOW.is_file(), ".github/workflows/deploy.yml is missing"
+    assert _CLOUDBUILD.is_file(), "deploy/cloudbuild.yaml is missing"
+
+
+@pytest.mark.security
+def test_deploy_workflow_actions_are_sha_pinned(deploy_workflow: str) -> None:
+    refs = _USES_RE.findall(deploy_workflow)
+    assert refs, "deploy.yml declares no `uses:` actions"
+    for ref in refs:
+        assert _SHA_PINNED_USES_RE.match(ref), (
+            f"deploy.yml Action {ref!r} is not pinned by a 40-hex commit SHA — a "
+            "floating tag is a silent-substitution vector (mirror ci.yml)"
+        )
+
+
+@pytest.mark.security
+def test_deploy_workflow_uses_keyless_wif(deploy_workflow: str) -> None:
+    assert "google-github-actions/auth@" in deploy_workflow, (
+        "deploy.yml must authenticate via google-github-actions/auth"
+    )
+    assert "workload_identity_provider:" in deploy_workflow, (
+        "deploy.yml must use Workload Identity Federation (workload_identity_provider)"
+    )
+    assert "service_account:" in deploy_workflow, (
+        "deploy.yml WIF auth must name the service_account to impersonate"
+    )
+    # The entire point of WIF is to NOT store a long-lived SA JSON key.
+    assert "credentials_json" not in deploy_workflow, (
+        "deploy.yml carries a `credentials_json` input — WIF must be keyless; a "
+        "long-lived service-account JSON key is exactly what it eliminates"
+    )
+    assert re.search(r"id-token:\s*write", deploy_workflow), (
+        "deploy.yml must grant `id-token: write` for the OIDC → WIF exchange"
+    )
+
+
+@pytest.mark.security
+def test_deploy_workflow_is_gated_on_ci_success(deploy_workflow: str) -> None:
+    assert "workflow_run:" in deploy_workflow, (
+        "deploy.yml must trigger off the CI workflow (workflow_run), not a raw push"
+    )
+    assert re.search(r'workflows:\s*\[\s*"CI"\s*\]', deploy_workflow), (
+        'deploy.yml workflow_run must key on the "CI" workflow name'
+    )
+    assert "github.event.workflow_run.conclusion == 'success'" in deploy_workflow, (
+        "deploy.yml must deploy ONLY when the gating CI run concluded successfully"
+    )
+
+
+@pytest.mark.security
+def test_deploy_workflow_pins_image_digests(deploy_workflow: str) -> None:
+    # The deployed revision must reference an immutable @sha256 digest resolved at
+    # deploy time — never a floating `:latest` (the supply-chain analogue of the
+    # SHA-pinned Actions and the digest-pinned Dockerfile bases).
+    assert "image_summary.digest" in deploy_workflow, (
+        "deploy.yml must resolve each pushed tag to its immutable @sha256 digest"
+    )
+    assert re.search(r"API_IMAGE=[^\n]*@\$", deploy_workflow), (
+        "deploy.yml must build the API image ref as `…@<digest>`, never `:latest`"
+    )
+    assert re.search(r"FRONTEND_IMAGE=[^\n]*@\$", deploy_workflow), (
+        "deploy.yml must build the frontend image ref as `…@<digest>`, never `:latest`"
+    )
+    assert "gcloud run services replace" in deploy_workflow, (
+        "deploy.yml must apply the api/frontend Services via `gcloud run services replace`"
+    )
+    assert "gcloud run jobs replace" in deploy_workflow, (
+        "deploy.yml must apply the demo-reset Job via `gcloud run jobs replace`"
+    )
+
+
+@pytest.mark.security
+def test_deploy_workflow_no_event_interpolation_in_run(deploy_workflow: str) -> None:
+    for body in _run_block_bodies(deploy_workflow):
+        assert "${{ github.event" not in body, (
+            "deploy.yml interpolates a `github.event.*` value directly into a "
+            "`run:` shell — route it through an env var (command-injection guard)"
+        )
+
+
+@pytest.mark.security
+def test_ci_workflow_stays_gcp_credential_free(ci_workflow: str) -> None:
+    # Phase 15.7: every GCP / deployment credential surface lives in deploy.yml.
+    # ci.yml must stay free of WIF auth, gcloud, and Secret Manager references.
+    lowered = ci_workflow.lower()
+    for needle in (
+        "google-github-actions",
+        "workload_identity_provider",
+        "credentials_json",
+        "id-token",
+        "gcloud",
+        "secretmanager",
+        "secret-manager",
+    ):
+        assert needle not in lowered, (
+            f"ci.yml references {needle!r} — deployment/GCP credentials must live "
+            "only in deploy.yml; ci.yml stays GCP-credential-free (Phase 15.7)"
+        )
+
+
+@pytest.mark.security
+def test_cloudbuild_builds_both_images_with_correct_context(cloudbuild: dict[str, Any]) -> None:
+    api_args = _cloudbuild_step(cloudbuild, "build-api")["args"]
+    frontend_args = _cloudbuild_step(cloudbuild, "build-frontend")["args"]
+    # API: Dockerfile deploy/Dockerfile.api, context the repo root `.` (the root
+    # .dockerignore applies and excludes .env / data / venv / frontend).
+    assert "deploy/Dockerfile.api" in api_args, "api build must use deploy/Dockerfile.api"
+    assert api_args[-1] == ".", f"api build context must be the repo root `.`; got {api_args[-1]!r}"
+    # Frontend: Dockerfile deploy/Dockerfile.frontend, context `frontend/` — the
+    # repo-root .dockerignore excludes frontend/, so `.` would be an empty tree.
+    assert "deploy/Dockerfile.frontend" in frontend_args, (
+        "frontend build must use deploy/Dockerfile.frontend"
+    )
+    assert frontend_args[-1] == "frontend", (
+        f"frontend build context must be `frontend/`, never the repo root; "
+        f"got {frontend_args[-1]!r}"
+    )
+
+
+@pytest.mark.security
+def test_cloudbuild_pushes_commit_tagged_images(cloudbuild: dict[str, Any]) -> None:
+    images = cloudbuild.get("images") or []
+    joined = " ".join(images)
+    assert "/api:${_COMMIT_SHA}" in joined and "/frontend:${_COMMIT_SHA}" in joined, (
+        "cloudbuild.yaml must push api + frontend tagged by ${_COMMIT_SHA} so the "
+        f"deploy step can pin an immutable per-commit digest; got {images}"
+    )
+    # _COMMIT_SHA carries NO default — a missing value must fail the build loudly,
+    # never silently push a mutable `latest`-shaped tag.
+    assert "_COMMIT_SHA" not in (cloudbuild.get("substitutions") or {}), (
+        "cloudbuild.yaml must not default _COMMIT_SHA — require it at submit time"
+    )
+
+
+@pytest.mark.security
+def test_cloudbuild_bakes_no_secret() -> None:
+    text = _CLOUDBUILD.read_text(encoding="utf-8").lower()
+    assert not re.search(r"\bsk-[a-z0-9]{8,}", text), "cloudbuild.yaml contains an sk- token"
+    for needle in ("bearer ", "private key", "begin certificate", "credentials_json"):
+        assert needle not in text, f"cloudbuild.yaml carries secret-shaped material: {needle!r}"

@@ -1,0 +1,63 @@
+# ===========================================================================
+# SEC-GenerativeSearch — Cloud Build config
+# ===========================================================================
+# Builds and pushes BOTH application images to Artifact Registry, tagged by the
+# triggering commit SHA. Invoked by .github/workflows/deploy.yml AFTER the CI
+# workflow ("CI") has passed; the deploy workflow then resolves each pushed
+# `:<commit-sha>` tag to its immutable @sha256 digest and stamps the Cloud Run
+# manifests under deploy/cloud/ before `gcloud run … replace`.
+#
+# Submit (deploy.yml supplies _COMMIT_SHA at run time):
+#   gcloud builds submit --config deploy/cloudbuild.yaml \
+#     --substitutions=_REGION=REGION,_REPO=sec-gs,_COMMIT_SHA=<sha> .
+#
+# Build-context contract (matches the deployment artefacts and Dockerfiles):
+#   - api      → context is the repo root (`.`), Dockerfile deploy/Dockerfile.api
+#                (the root .dockerignore applies; excludes .env / data / venv).
+#   - frontend → context is `frontend/`, Dockerfile deploy/Dockerfile.frontend
+#                (frontend/.dockerignore applies; the repo-root one excludes
+#                 frontend/, so the context MUST be frontend/, never `.`).
+#
+# Security posture (statically pinned by tests/ops/test_deployment_artifacts.py):
+#   - The per-commit `:<sha>` tag is immutable-by-convention; deploy.yml never
+#     deploys a floating `:latest` — it resolves and pins the @sha256 digest.
+#   - No secret material here: build args carry no credentials; the runtime
+#     secrets are injected by the Cloud Run manifests via Secret Manager.
+# ---------------------------------------------------------------------------
+substitutions:
+  _REGION: us-central1
+  _REPO: sec-gs
+  # _COMMIT_SHA is REQUIRED (no default) — supplied by deploy.yml at submit time
+  # so a missing value fails the build loudly rather than pushing a bad tag.
+
+options:
+  # No user-specified logs bucket; stream build logs to Cloud Logging only.
+  logging: CLOUD_LOGGING_ONLY
+
+# Cloud Build pushes every image listed here once the steps succeed.
+images:
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/api:${_COMMIT_SHA}"
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/frontend:${_COMMIT_SHA}"
+
+steps:
+  # --- API image: context = repo root, Dockerfile = deploy/Dockerfile.api -----
+  - id: build-api
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --file
+      - deploy/Dockerfile.api
+      - --tag
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/api:${_COMMIT_SHA}"
+      - .
+
+  # --- Frontend image: context = frontend/, Dockerfile = deploy/Dockerfile.frontend
+  - id: build-frontend
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --file
+      - deploy/Dockerfile.frontend
+      - --tag
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/frontend:${_COMMIT_SHA}"
+      - frontend

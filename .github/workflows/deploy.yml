@@ -1,0 +1,139 @@
+name: Deploy (Cloud Run)
+
+# Keyless deploy of the Scenario C (cloud) stack to Cloud Run.
+#
+# Design principles (mirror ci.yml, plus the deployment posture):
+#   - GATED ON CI. This workflow runs ONLY after the "CI" workflow concludes
+#     successfully on `main` (`workflow_run` + a `conclusion == 'success'`
+#     guard). It deploys the EXACT commit CI validated (head_sha), not HEAD.
+#   - KEYLESS AUTH (Workload Identity Federation). No long-lived service-account
+#     JSON key is ever stored: `google-github-actions/auth` exchanges the GitHub
+#     OIDC token (`id-token: write`) for short-lived GCP credentials. The auth
+#     step takes ONLY the WIF provider + the SA to impersonate — never a key.
+#   - DIGEST-PINNED DEPLOY. Cloud Build builds + pushes both images by commit
+#     SHA; we then resolve each tag to its immutable @sha256 digest and stamp
+#     the manifests with the digest — a Cloud Run revision NEVER references a
+#     floating `:latest` (the supply-chain analogue of the SHA-pinned Actions).
+#   - Actions pinned by full commit SHA.
+#   - No `${{ github.event.* }}` interpolation inside `run:` blocks
+#     (command-injection prevention); data-dependent values ride env vars.
+#   - ci.yml STAYS GCP-credential-free — every GCP touch lives here.
+#
+# Required repo configuration (Settings → Secrets and variables → Actions):
+#   vars.GCP_PROJECT_ID         — target GCP project id
+#   vars.GCP_REGION             — Cloud Run + Artifact Registry region
+#   vars.GCP_WIF_PROVIDER       — full WIF provider resource name
+#                                 (projects/N/locations/global/workloadIdentityPools/POOL/providers/PROVIDER)
+#   vars.GCP_DEPLOY_SERVICE_ACCOUNT — deployer SA email the WIF pool may impersonate
+# None of the above is a secret — they are identifiers. There is no SA key.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+# Least privilege. `id-token: write` is REQUIRED for the OIDC → WIF exchange;
+# `contents: read` is the checkout scope. Nothing else.
+permissions:
+  contents: read
+  id-token: write
+
+# Never cancel an in-flight deploy — a half-applied Cloud Run revision is worse
+# than waiting for the previous run to finish.
+concurrency:
+  group: deploy-cloud-run
+  cancel-in-progress: false
+
+env:
+  # The artefact registry repository the Cloud Run manifests reference
+  # (`…/sec-gs/{api,frontend}`). Keep in lockstep with deploy/cloud/*.yaml.
+  REPO: sec-gs
+
+jobs:
+  deploy:
+    name: Build and deploy to Cloud Run
+    runs-on: ubuntu-latest
+    # Hard gate: deploy only when the CI run that triggered us succeeded.
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # Optional manual-approval gate via a protected GitHub environment.
+    environment: production
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION }}
+      # Deploy the precise commit CI validated — routed through env so it never
+      # interpolates straight into a `run:` shell.
+      DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - name: Check out the CI-validated commit
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - name: Authenticate to Google Cloud (keyless WIF)
+        id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093  # v3.0.0
+        with:
+          # Workload Identity Federation: the OIDC token is exchanged for a
+          # short-lived access token. Provider + SA only — there is no key.
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up the Cloud SDK
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db  # v3.0.1
+
+      - name: Build and push both images via Cloud Build
+        # Cloud Build builds api (context `.`) + frontend (context `frontend/`)
+        # per deploy/cloudbuild.yaml and pushes them tagged by the commit SHA.
+        run: |
+          gcloud builds submit \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --config deploy/cloudbuild.yaml \
+            --substitutions "_REGION=$GCP_REGION,_REPO=$REPO,_COMMIT_SHA=$DEPLOY_SHA" \
+            .
+
+      - name: Resolve immutable @sha256 image digests
+        # The build pushed `:<sha>` tags; resolve each to its content-addressed
+        # digest so the deployed revision can never drift under a moving tag.
+        run: |
+          registry="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$REPO"
+          api_digest="$(gcloud artifacts docker images describe \
+            "$registry/api:$DEPLOY_SHA" \
+            --format='value(image_summary.digest)')"
+          frontend_digest="$(gcloud artifacts docker images describe \
+            "$registry/frontend:$DEPLOY_SHA" \
+            --format='value(image_summary.digest)')"
+          {
+            echo "API_IMAGE=$registry/api@$api_digest"
+            echo "FRONTEND_IMAGE=$registry/frontend@$frontend_digest"
+          } >> "$GITHUB_ENV"
+
+      - name: Stamp manifests (placeholders → digest-pinned images)
+        # Substitute PROJECT_ID / REGION and replace the `:latest` placeholders
+        # with the resolved @sha256 digests, into a scratch dir we then apply.
+        run: |
+          stamped="$(mktemp -d)"
+          registry="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$REPO"
+          for manifest in api-service frontend-service demo-reset-job; do
+            sed \
+              -e "s|PROJECT_ID|$GCP_PROJECT_ID|g" \
+              -e "s|REGION|$GCP_REGION|g" \
+              "deploy/cloud/$manifest.yaml" > "$stamped/$manifest.yaml"
+          done
+          # api + demo-reset Job share the api image; frontend has its own.
+          sed -i "s|$registry/api:latest|$API_IMAGE|g" \
+            "$stamped/api-service.yaml" "$stamped/demo-reset-job.yaml"
+          sed -i "s|$registry/frontend:latest|$FRONTEND_IMAGE|g" \
+            "$stamped/frontend-service.yaml"
+          echo "STAMPED_DIR=$stamped" >> "$GITHUB_ENV"
+
+      - name: Apply the Knative manifests to Cloud Run
+        run: |
+          gcloud run services replace "$STAMPED_DIR/api-service.yaml" \
+            --project "$GCP_PROJECT_ID" --region "$GCP_REGION"
+          gcloud run services replace "$STAMPED_DIR/frontend-service.yaml" \
+            --project "$GCP_PROJECT_ID" --region "$GCP_REGION"
+          gcloud run jobs replace "$STAMPED_DIR/demo-reset-job.yaml" \
+            --project "$GCP_PROJECT_ID" --region "$GCP_REGION"
