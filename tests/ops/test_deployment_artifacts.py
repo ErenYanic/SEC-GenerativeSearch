@@ -982,7 +982,7 @@ def test_cloud_demo_reset_uses_secret_manager(cloud_job: dict[str, Any]) -> None
 
 
 # ===========================================================================
-# Phase 15.7 — Cloud Run deploy workflow + Cloud Build config.
+# Cloud Run deploy workflow + Cloud Build config.
 # ===========================================================================
 # `.github/workflows/deploy.yml` builds the two images via Cloud Build and
 # applies the Knative manifests, authenticating to GCP with KEYLESS Workload
@@ -1150,7 +1150,6 @@ def test_deploy_workflow_no_event_interpolation_in_run(deploy_workflow: str) -> 
 
 @pytest.mark.security
 def test_ci_workflow_stays_gcp_credential_free(ci_workflow: str) -> None:
-    # Phase 15.7: every GCP / deployment credential surface lives in deploy.yml.
     # ci.yml must stay free of WIF auth, gcloud, and Secret Manager references.
     lowered = ci_workflow.lower()
     for needle in (
@@ -1164,7 +1163,7 @@ def test_ci_workflow_stays_gcp_credential_free(ci_workflow: str) -> None:
     ):
         assert needle not in lowered, (
             f"ci.yml references {needle!r} — deployment/GCP credentials must live "
-            "only in deploy.yml; ci.yml stays GCP-credential-free (Phase 15.7)"
+            "only in deploy.yml; ci.yml stays GCP-credential-free"
         )
 
 
@@ -1208,3 +1207,86 @@ def test_cloudbuild_bakes_no_secret() -> None:
     assert not re.search(r"\bsk-[a-z0-9]{8,}", text), "cloudbuild.yaml contains an sk- token"
     for needle in ("bearer ", "private key", "begin certificate", "credentials_json"):
         assert needle not in text, f"cloudbuild.yaml carries secret-shaped material: {needle!r}"
+
+
+# ===========================================================================
+# CI workflow supply-chain checks.
+# ===========================================================================
+# `deploy.yml` already has its supply-chain posture locked above (SHA-pinned
+# Actions, digest-pinned deploy, command-injection guard). `ci.yml` carries the
+# *other* half of the supply chain — the dependency/secret scan gates and the
+# CPU-torch posture — yet, before this phase, only one ci.yml invariant was
+# pinned (`test_ci_workflow_stays_gcp_credential_free`). Several lockers above
+# claim to "mirror ci.yml" without a test that actually holds ci.yml to it.
+# These lockers close that gap and consolidate the CI supply-chain surface:
+#
+#   - ACTION SHA-PINNING. Every `uses:` in ci.yml is a 40-hex commit SHA — a
+#     floating `@v5` tag is a silent-substitution vector (mirrors deploy.yml).
+#   - SCAN GATES. The three dependency/secret scanners (pip-audit,
+#     detect-secrets, pnpm audit) are non-negotiable PR blockers and must not
+#     silently vanish from CI.
+#   - CPU-ONLY TORCH. The CUDA torch wheel (~2 GB, GPU runtime) is a Docker
+#     build-arg opt-in only (deploy/Dockerfile.api `TORCH_INDEX_URL`, default
+#     …/whl/cpu); it must never enter the CI dependency set.
+#   - COMMAND-INJECTION GUARD. No `${{ github.event.* }}` interpolation inside a
+#     `run:` shell — ci.yml states this design principle in its own header
+#     comment; this test enforces it (mirrors the deploy.yml guard).
+#
+# All assertions are on the tracked `.github/workflows/ci.yml`; no network,
+# gcloud, or Docker daemon needed.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.security
+def test_ci_workflow_actions_are_sha_pinned(ci_workflow: str) -> None:
+    refs = _USES_RE.findall(ci_workflow)
+    assert refs, "ci.yml declares no `uses:` actions"
+    for ref in refs:
+        assert _SHA_PINNED_USES_RE.match(ref), (
+            f"ci.yml Action {ref!r} is not pinned by a 40-hex commit SHA — a "
+            "floating tag is a silent-substitution / supply-chain vector"
+        )
+
+
+@pytest.mark.security
+def test_ci_workflow_carries_supply_chain_scan_gates(ci_workflow: str) -> None:
+    # The three dependency/secret scan gates are load-bearing PR blockers; a
+    # silent removal would reopen the known-CVE / committed-secret surface.
+    for needle, gate in (
+        ("pip_audit", "pip-audit (Python dependency CVE scan)"),
+        ("detect-secrets-hook", "detect-secrets (committed-secret scan)"),
+        ("audit:ci", "pnpm audit (frontend runtime-dependency CVE scan)"),
+    ):
+        assert needle in ci_workflow, (
+            f"ci.yml no longer runs the {gate} gate ({needle!r} missing) — the "
+            "supply-chain scan gates are non-negotiable PR blockers"
+        )
+
+
+@pytest.mark.security
+def test_ci_workflow_torch_is_cpu_only(ci_workflow: str) -> None:
+    # A CUDA torch wheel index has no place in CI: the test job never exercises a
+    # real model load, and the GPU build is a deploy/Dockerfile.api build-arg
+    # opt-in (`TORCH_INDEX_URL`, default …/whl/cpu). Pin CPU-only directly.
+    assert "download.pytorch.org/whl/cu" not in ci_workflow, (
+        "ci.yml references a CUDA torch wheel index (…/whl/cu…) — CI must stay "
+        "CPU-only; the GPU wheel is a Docker build-arg opt-in, never a CI dependency"
+    )
+    # Forward guard: plain `pip install torch` on Linux resolves the default-index
+    # CUDA build. If a future change installs the heavy [local-embeddings] extra
+    # in CI, it MUST force the explicit CPU wheel index.
+    if "local-embeddings" in ci_workflow:
+        assert "download.pytorch.org/whl/cpu" in ci_workflow, (
+            "ci.yml installs the [local-embeddings] extra (torch) without forcing "
+            "the CPU wheel index (…/whl/cpu) — the default PyPI torch wheel is the "
+            "CUDA build; pin --index-url …/whl/cpu to keep CI CPU-only"
+        )
+
+
+@pytest.mark.security
+def test_ci_workflow_no_event_interpolation_in_run(ci_workflow: str) -> None:
+    for body in _run_block_bodies(ci_workflow):
+        assert "${{ github.event" not in body, (
+            "ci.yml interpolates a `github.event.*` value directly into a `run:` "
+            "shell — route it through an env var (command-injection guard)"
+        )
