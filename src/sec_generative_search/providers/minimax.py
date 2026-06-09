@@ -42,6 +42,19 @@ class MiniMaxProvider(OpenAICompatibleLLMProvider):
     # (``minimax-m2.7`` rather than a normalised lower-case form) —
     # the API is case-sensitive and rejects renamed aliases.
     MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
+        "minimax-m3": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                vision=True,
+                context_window_tokens=1_048_576,
+                max_output_tokens=512_000,
+                pricing_tier=PricingTier.STANDARD,
+            ),
+        ),
         "minimax-m2.7": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
