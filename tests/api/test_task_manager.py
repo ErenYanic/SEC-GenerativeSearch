@@ -1,4 +1,4 @@
-"""Tests for the Phase-11.1 background ``TaskManager``.
+"""Tests for the background ``TaskManager``.
 
 Strategy
 --------
@@ -598,6 +598,227 @@ class TestFilingLimit:
         info = _wait_for_state(manager, task_id, target=TaskState.FAILED)
         assert info.error is not None
         assert info.error == FilingLimitExceededError(1, 1).message
+
+
+# ---------------------------------------------------------------------------
+# Demo-mode FIFO eviction (Scenario C)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _EvictingRegistry(_StubRegistry):
+    """A registry whose ``count`` shrinks as filings are evicted.
+
+    The base :class:`_StubRegistry` returns a static ``filing_count``;
+    the real ``MetadataRegistry.count()`` falls as the FIFO sweep
+    deletes rows.  Modelling that decrement is load-bearing: without it
+    the in-loop ceiling check (``cached_count >= max_filings``) would
+    never clear and a demo ingest could never make progress.
+    """
+
+    def drop(self, accessions: list[str]) -> None:
+        keep = [f for f in self.oldest if f.accession_number not in accessions]
+        self.filing_count -= len(self.oldest) - len(keep)
+        self.oldest = keep
+
+
+@dataclass
+class _EvictingStore(_StubFilingStore):
+    """A filing store that reflects FIFO deletes back onto its registry."""
+
+    linked_registry: _EvictingRegistry | None = None
+
+    def delete_filings_batch(self, accessions: list[str]) -> int:
+        deleted = super().delete_filings_batch(accessions)
+        if self.linked_registry is not None:
+            self.linked_registry.drop(accessions)
+        return deleted
+
+
+@pytest.mark.security
+class TestDemoModeFifoEviction:
+    """FIFO eviction is the Scenario C resource-exhaustion control.
+
+    Demo mode caps the corpus at ``DB_MAX_FILINGS`` by silently dropping
+    the *oldest* filings to admit new ones.  Two invariants are
+    security-load-bearing:
+
+    1. The eviction count is bounded by the live filing count — the
+       ``API_DEMO_EVICTION_BUFFER`` can never drive a delete larger than
+       the corpus (a self-inflicted data-loss / churn amplifier).
+    2. FIFO eviction fires **only** in demo mode.  A team / cloud
+       deployment (``API_DEMO_MODE`` unset) must surface
+       ``FilingLimitExceededError`` and NEVER silently delete a user's
+       filings.
+    """
+
+    @staticmethod
+    def _drain(info: TaskInfo) -> list[dict]:
+        assert info._message_queue is not None
+        out: list[dict] = []
+        while True:
+            try:
+                out.append(info._message_queue.get_nowait())
+            except Exception:
+                break
+        return out
+
+    def _run_demo_ingest(
+        self,
+        monkeypatch,
+        *,
+        max_filings: int,
+        buffer: int,
+        start_count: int,
+        oldest: list[FilingInfo],
+        new: FilingInfo,
+        target: TaskState = TaskState.COMPLETED,
+    ) -> tuple[TaskInfo, _EvictingStore, _EvictingRegistry]:
+        monkeypatch.setenv("API_DEMO_MODE", "true")
+        monkeypatch.setenv("DB_MAX_FILINGS", str(max_filings))
+        monkeypatch.setenv("API_DEMO_EVICTION_BUFFER", str(buffer))
+        reload_settings()
+
+        registry = _EvictingRegistry(filing_count=start_count, oldest=list(oldest))
+        store = _EvictingStore(linked_registry=registry)
+        manager, _, _, _, _ = _build_manager(
+            registry=registry,
+            filing_store=store,
+            fetcher=_StubFetcher(work_lists={(new.ticker, new.form_type): [new]}),
+            orchestrator=_StubOrchestrator(
+                by_accession={new.accession_number: _make_processed_filing(new)},
+            ),
+        )
+        task_id = manager.create_task(tickers=[new.ticker], form_types=[new.form_type])
+        info = _wait_for_state(manager, task_id, target=target)
+        return info, store, registry
+
+    def test_overflow_evicts_oldest_filing(self, monkeypatch) -> None:
+        """At the ceiling, the oldest filing is dropped to admit the new one."""
+        old1 = _make_filing_info("OLD1", "0000000001-23-000001")
+        old2 = _make_filing_info("OLD2", "0000000002-23-000002")
+        new = _make_filing_info("AAPL", "0000320193-23-000077")
+
+        info, store, _ = self._run_demo_ingest(
+            monkeypatch,
+            max_filings=2,
+            buffer=0,
+            start_count=2,
+            oldest=[old1, old2],
+            new=new,
+        )
+
+        # Exactly the single oldest filing was evicted, and the new one stored.
+        assert store.deleted == [[old1.accession_number]]
+        assert store.stored == [new.accession_number]
+        assert info.state == TaskState.COMPLETED
+
+    def test_eviction_buffer_widens_the_delete(self, monkeypatch) -> None:
+        """``API_DEMO_EVICTION_BUFFER`` is added on top of the slots needed."""
+        oldest = [
+            _make_filing_info(f"OLD{i}", f"00000000{i:02d}-23-0000{i:02d}") for i in range(10)
+        ]
+        new = _make_filing_info("AAPL", "0000320193-23-000077")
+
+        # slots_needed = 1; buffer = 3 → 4 filings evicted in one sweep.
+        _, store, _ = self._run_demo_ingest(
+            monkeypatch,
+            max_filings=10,
+            buffer=3,
+            start_count=10,
+            oldest=oldest,
+            new=new,
+        )
+
+        assert len(store.deleted) == 1
+        assert len(store.deleted[0]) == 4
+
+    def test_eviction_count_bounded_by_corpus_size(self, monkeypatch) -> None:
+        """A huge buffer can never delete more filings than exist (DoS guard)."""
+        old1 = _make_filing_info("OLD1", "0000000001-23-000001")
+        old2 = _make_filing_info("OLD2", "0000000002-23-000002")
+        new = _make_filing_info("AAPL", "0000320193-23-000077")
+
+        # buffer 1000 ≫ corpus (2): the sweep is clamped to current_count.
+        _, store, _ = self._run_demo_ingest(
+            monkeypatch,
+            max_filings=2,
+            buffer=1000,
+            start_count=2,
+            oldest=[old1, old2],
+            new=new,
+        )
+
+        assert len(store.deleted[0]) == 2
+
+    def test_no_eviction_when_room_available(self, monkeypatch) -> None:
+        """Demo mode with spare capacity ingests without deleting anything."""
+        oldest = [_make_filing_info("OLD1", "0000000001-23-000001")]
+        new = _make_filing_info("AAPL", "0000320193-23-000077")
+
+        _, store, _ = self._run_demo_ingest(
+            monkeypatch,
+            max_filings=10,
+            buffer=0,
+            start_count=5,
+            oldest=oldest,
+            new=new,
+        )
+
+        assert store.deleted == []
+        assert store.stored == [new.accession_number]
+
+    def test_eviction_emits_event_with_affected_tickers(self, monkeypatch) -> None:
+        """The FIFO sweep pushes an ``eviction`` envelope for the UI."""
+        old1 = _make_filing_info("OLD1", "0000000001-23-000001")
+        old2 = _make_filing_info("OLD2", "0000000002-23-000002")
+        new = _make_filing_info("AAPL", "0000320193-23-000077")
+
+        info, _, _ = self._run_demo_ingest(
+            monkeypatch,
+            max_filings=2,
+            buffer=0,
+            start_count=2,
+            oldest=[old1, old2],
+            new=new,
+        )
+
+        eviction_events = [e for e in self._drain(info) if e.get("type") == "eviction"]
+        assert len(eviction_events) == 1
+        event = eviction_events[0]
+        assert event["filings_evicted"] == 1
+        assert event["tickers_affected"] == ["OLD1"]
+
+    def test_non_demo_overflow_fails_without_eviction(self, monkeypatch) -> None:
+        """Outside demo mode, a full corpus FAILS — it is never silently pruned.
+
+        This is the load-bearing gate: silent FIFO data-loss is a
+        demo-only behaviour.  A team / cloud deployment must refuse the
+        ingest, not delete a user's existing filings to make room.
+        """
+        monkeypatch.delenv("API_DEMO_MODE", raising=False)
+        monkeypatch.setenv("DB_MAX_FILINGS", "1")
+        reload_settings()
+
+        old1 = _make_filing_info("OLD1", "0000000001-23-000001")
+        new = _make_filing_info("AAPL", "0000320193-23-000077")
+        registry = _EvictingRegistry(filing_count=1, oldest=[old1])
+        store = _EvictingStore(linked_registry=registry)
+        manager, _, _, _, _ = _build_manager(
+            registry=registry,
+            filing_store=store,
+            fetcher=_StubFetcher(work_lists={("AAPL", "10-K"): [new]}),
+            orchestrator=_StubOrchestrator(
+                by_accession={new.accession_number: _make_processed_filing(new)},
+            ),
+        )
+        task_id = manager.create_task(tickers=["AAPL"], form_types=["10-K"])
+        info = _wait_for_state(manager, task_id, target=TaskState.FAILED)
+
+        assert info.error == FilingLimitExceededError(1, 1).message
+        # Nothing was evicted and nothing was stored.
+        assert store.deleted == []
+        assert store.stored == []
 
 
 # ---------------------------------------------------------------------------

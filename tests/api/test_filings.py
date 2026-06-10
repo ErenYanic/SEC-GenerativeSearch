@@ -608,12 +608,23 @@ class TestClearAll:
         assert "?confirm=true" in body["hint"]
         assert store.cleared_calls == 0
 
+    @pytest.mark.security
     def test_demo_mode_blocks_even_with_confirm(self, filings_app_factory) -> None:
+        """Demo mode (Scenario C) disables operator clear-all unconditionally.
+
+        On a public demo the corpus is reset by the nightly Cloud Run
+        ``Job`` (which drives the operator-only CLI, bypassing demo
+        mode). A human-driven ``DELETE /api/filings/?confirm=true`` MUST
+        be refused with ``403 demo_mode`` even with the confirm flag, so
+        a leaked admin key cannot wipe the shared demo corpus out of band.
+        """
         app, _registry, store = filings_app_factory(env={"API_DEMO_MODE": "true"})
         client = TestClient(app, base_url="https://testserver")
         response = client.delete("/api/filings/?confirm=true")
         assert response.status_code == 403
-        assert response.json()["error"] == "demo_mode"
+        body = response.json()
+        assert body["error"] == "demo_mode"
+        # The store is never reached — the gate fires before any write.
         assert store.cleared_calls == 0
 
     def test_clears_through_filing_store(self, filings_app_factory) -> None:
