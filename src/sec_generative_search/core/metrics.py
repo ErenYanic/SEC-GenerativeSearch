@@ -1,4 +1,4 @@
-"""In-process metrics registry (Phase 14.2).
+"""In-process metrics registry.
 
 A tiny facade over `prometheus-client` that records the three metric
 families the operator dashboards consume:
@@ -23,7 +23,7 @@ call sites:
       :func:`reset_metrics`, and the exposition endpoint renders exactly
       this registry — never whatever a stray library registered globally.
 
-Security contract (load-bearing — see ``AGENT.md`` §Observability):
+Security contract (load-bearing):
 
     - **Every label value is content-free and low-cardinality.** The
       only labels in use are ``provider`` (curated registry name),

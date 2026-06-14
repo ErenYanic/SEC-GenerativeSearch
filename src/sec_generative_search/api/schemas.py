@@ -597,17 +597,34 @@ class SearchRequest(_BaseModel):
         pattern=_ISO_DATE_PATTERN,
         description="Inclusive upper bound, YYYY-MM-DD.",
     )
-    max_per_section: int = Field(
-        default=0,
+    max_per_section: int | None = Field(
+        default=None,
         ge=0,
         le=50,
-        description="Maximum chunks per section path; 0 disables the cap.",
+        description=(
+            "Maximum chunks per section path; 0 disables the cap.  Defaults "
+            "to ``settings.search.max_per_section`` when omitted."
+        ),
     )
-    max_per_filing: int = Field(
-        default=0,
+    max_per_filing: int | None = Field(
+        default=None,
         ge=0,
         le=50,
-        description="Maximum chunks per accession number; 0 disables the cap.",
+        description=(
+            "Maximum chunks per accession number; 0 disables the cap.  "
+            "Defaults to ``settings.search.max_per_filing`` when omitted."
+        ),
+    )
+    rerank_over_fetch_factor: int | None = Field(
+        default=None,
+        ge=1,
+        le=10,
+        description=(
+            "Reranker over-fetch multiplier (top_k * factor); 1 disables.  "
+            "Only active when a reranker is bound.  Bounded at 10 so a "
+            "single request cannot explode the candidate fetch.  Defaults "
+            "to ``settings.search.rerank_over_fetch_factor`` when omitted."
+        ),
     )
     context_token_budget: int | None = Field(
         default=None,
@@ -1018,6 +1035,34 @@ class RagQueryRequest(_BaseModel):
             "Optional cap on the answer slice.  Defaults to "
             "``settings.llm.max_output_tokens``.  Bounded at 8192 to "
             "keep a single request from burning a giant generation budget."
+        ),
+    )
+    max_per_section: int | None = Field(
+        default=None,
+        ge=0,
+        le=50,
+        description=(
+            "Retrieval diversity cap: maximum chunks per section path; 0 "
+            "disables.  Defaults to ``settings.search.max_per_section``."
+        ),
+    )
+    max_per_filing: int | None = Field(
+        default=None,
+        ge=0,
+        le=50,
+        description=(
+            "Retrieval diversity cap: maximum chunks per filing; 0 "
+            "disables.  Defaults to ``settings.search.max_per_filing``."
+        ),
+    )
+    rerank_over_fetch_factor: int | None = Field(
+        default=None,
+        ge=1,
+        le=10,
+        description=(
+            "Reranker over-fetch multiplier (top_k * factor); 1 disables.  "
+            "Only active when a reranker is bound.  Bounded at 10.  "
+            "Defaults to ``settings.search.rerank_over_fetch_factor``."
         ),
     )
     history: list[ConversationTurnSchema] = Field(

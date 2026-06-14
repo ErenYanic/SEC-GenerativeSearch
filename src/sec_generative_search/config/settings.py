@@ -17,7 +17,7 @@ Environment variable mapping (examples):
 from pathlib import Path
 
 from dotenv import load_dotenv
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from sec_generative_search.core.types import DeploymentProfile
@@ -568,7 +568,46 @@ class SearchSettings(BaseSettings):
     top_k: int = 5
     min_similarity: float = 0.0
 
+    # Diversity caps bound how many chunks sharing a ``section_path`` /
+    # ``accession_number`` may appear in one result set, so a single
+    # verbose section or filing cannot crowd out corpus coverage.
+    # ``0`` disables a cap. These are the operator *defaults*;
+    # :meth:`RetrievalService.retrieve` accepts a per-call override and
+    # the ``POST /api/search`` wire re-bounds the untrusted per-request
+    # value at ``<= 50``.
+    max_per_section: int = 0
+    max_per_filing: int = 0
+
+    # Rerank over-fetch multiplier: when a reranker is bound, retrieval
+    # fetches ``top_k * factor`` candidates so the reranker has a pool
+    # to re-order, then slices back to ``top_k``. ``1`` disables
+    # over-fetch. Inert until a concrete reranker is wired — no
+    # reranker ships today — so this knob is forward-looking but
+    # validated now so a deployment can pre-set it.
+    rerank_over_fetch_factor: int = 4
+
     model_config = SettingsConfigDict(env_prefix="SEARCH_")
+
+    @field_validator("max_per_section", "max_per_filing")
+    @classmethod
+    def _validate_diversity_cap(cls, value: int, info: ValidationInfo) -> int:
+        """Reject negative caps — only ``0`` (disabled) or a positive cap."""
+        if value < 0:
+            env_var = f"SEARCH_{info.field_name.upper()}"
+            raise ValueError(f"{env_var} must be >= 0; got {value}. Use 0 to disable the cap.")
+        return value
+
+    @field_validator("rerank_over_fetch_factor")
+    @classmethod
+    def _validate_over_fetch_factor(cls, value: int) -> int:
+        """Reject factors below 1 — a 0/negative multiplier would zero out
+        the candidate fetch and starve retrieval. ``1`` disables over-fetch."""
+        if value < 1:
+            raise ValueError(
+                f"SEARCH_RERANK_OVER_FETCH_FACTOR must be >= 1; got {value}. "
+                f"Use 1 to disable over-fetch."
+            )
+        return value
 
 
 class LoggingSettings(BaseSettings):

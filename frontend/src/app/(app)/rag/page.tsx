@@ -37,7 +37,13 @@ import {
   type JSX,
 } from "react";
 
-import { ApiError, listProviders, planRagQuery, streamRagAnswer } from "@/lib/api";
+import {
+  ApiError,
+  listProviders,
+  planRagQuery,
+  streamRagAnswer,
+  type RagStreamRequestBody,
+} from "@/lib/api";
 import type {
   AnswerMode,
   CitationSchema,
@@ -53,6 +59,45 @@ const ANSWER_MODES: AnswerMode[] = [
   "extractive",
   "comparative",
 ];
+
+// Advanced retrieval-tuning knobs. Held as raw input strings so an
+// empty field means "use the deployment default" — only a non-empty,
+// finitely-parsed value rides the request. Bounds are re-enforced by
+// the backend (caps 0..50, over-fetch 1..10), so the inputs are UX
+// convenience, not a trust boundary.
+interface RetrievalTuning {
+  maxPerSection: string;
+  maxPerFiling: string;
+  rerankOverFetch: string;
+}
+
+const EMPTY_TUNING: RetrievalTuning = {
+  maxPerSection: "",
+  maxPerFiling: "",
+  rerankOverFetch: "",
+};
+
+type RetrievalTuningBody = Pick<
+  RagStreamRequestBody,
+  "max_per_section" | "max_per_filing" | "rerank_over_fetch_factor"
+>;
+
+function parseTuning(value: RetrievalTuning): RetrievalTuningBody {
+  const out: RetrievalTuningBody = {};
+  const section = Number.parseInt(value.maxPerSection, 10);
+  if (value.maxPerSection.trim() !== "" && Number.isFinite(section)) {
+    out.max_per_section = section;
+  }
+  const filing = Number.parseInt(value.maxPerFiling, 10);
+  if (value.maxPerFiling.trim() !== "" && Number.isFinite(filing)) {
+    out.max_per_filing = filing;
+  }
+  const factor = Number.parseInt(value.rerankOverFetch, 10);
+  if (value.rerankOverFetch.trim() !== "" && Number.isFinite(factor)) {
+    out.rerank_over_fetch_factor = factor;
+  }
+  return out;
+}
 
 type GenerationStreamState =
   | { kind: "idle" }
@@ -93,6 +138,7 @@ export default function RagPage(): JSX.Element {
     provider: "",
     model: "",
   });
+  const [tuning, setTuning] = useState<RetrievalTuning>(EMPTY_TUNING);
   const abortRef = useRef<AbortController | null>(null);
 
   const queryId = useId();
@@ -193,6 +239,7 @@ export default function RagPage(): JSX.Element {
           ...(pickerValue.routing_hints !== undefined
             ? { routing_hints: pickerValue.routing_hints }
             : {}),
+          ...parseTuning(tuning),
         },
         {
           onDelta: (text) => {
@@ -261,7 +308,7 @@ export default function RagPage(): JSX.Element {
         retryable: true,
       });
     }
-  }, [plan, modeOverride, pickerValue]);
+  }, [plan, modeOverride, pickerValue, tuning]);
 
   const handleCancel = useCallback(() => {
     abortRef.current?.abort();
@@ -313,6 +360,11 @@ export default function RagPage(): JSX.Element {
           onChange={setPickerValue}
           disabled={planning || generating}
         />
+        <RetrievalTuningControls
+          value={tuning}
+          onChange={setTuning}
+          disabled={planning || generating}
+        />
         {planError !== null ? (
           <p
             className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
@@ -358,6 +410,115 @@ export default function RagPage(): JSX.Element {
       ) : null}
 
       {citations.length > 0 ? <SourcePanel citations={citations} /> : null}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Retrieval tuning — advanced diversity + over-fetch controls (7.5.bis)
+// ---------------------------------------------------------------------------
+
+// Collapsed by default so the common path stays uncluttered. Each input
+// is blank → "use deployment default"; a value rides the stream body and
+// is re-bounded by the backend. The over-fetch knob is only meaningful
+// once a reranker is wired on the backend, which the note calls out.
+function RetrievalTuningControls({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: RetrievalTuning;
+  onChange: (next: RetrievalTuning) => void;
+  disabled: boolean;
+}): JSX.Element {
+  return (
+    <details className="rounded border border-slate-200 bg-slate-50 p-3">
+      <summary className="cursor-pointer text-xs font-medium uppercase tracking-wide text-slate-500">
+        Retrieval tuning (advanced)
+      </summary>
+      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <TuningField
+          label="Max per section"
+          hint="0 disables"
+          min={0}
+          max={50}
+          value={value.maxPerSection}
+          disabled={disabled}
+          onChange={(next) => {
+            onChange({ ...value, maxPerSection: next });
+          }}
+        />
+        <TuningField
+          label="Max per filing"
+          hint="0 disables"
+          min={0}
+          max={50}
+          value={value.maxPerFiling}
+          disabled={disabled}
+          onChange={(next) => {
+            onChange({ ...value, maxPerFiling: next });
+          }}
+        />
+        <TuningField
+          label="Rerank over-fetch"
+          hint="1 disables"
+          min={1}
+          max={10}
+          value={value.rerankOverFetch}
+          disabled={disabled}
+          onChange={(next) => {
+            onChange({ ...value, rerankOverFetch: next });
+          }}
+        />
+      </div>
+      <p className="mt-2 text-xs text-slate-500">
+        Leave blank to use the deployment defaults. Diversity caps bound
+        how many chunks from one section or filing may appear; over-fetch
+        only applies when a reranker is configured.
+      </p>
+    </details>
+  );
+}
+
+function TuningField({
+  label,
+  hint,
+  min,
+  max,
+  value,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  hint: string;
+  min: number;
+  max: number;
+  value: string;
+  disabled: boolean;
+  onChange: (next: string) => void;
+}): JSX.Element {
+  const id = useId();
+  return (
+    <div className="flex flex-col gap-1">
+      <label htmlFor={id} className="text-xs font-medium text-slate-600">
+        {label}
+      </label>
+      <input
+        id={id}
+        type="number"
+        inputMode="numeric"
+        min={min}
+        max={max}
+        step={1}
+        value={value}
+        disabled={disabled}
+        placeholder="default"
+        onChange={(event) => {
+          onChange(event.target.value);
+        }}
+        className="w-full rounded border border-slate-300 px-2 py-1 text-sm focus:border-slate-500 focus:outline-none disabled:opacity-50"
+      />
+      <span className="text-[11px] text-slate-400">{hint}</span>
     </div>
   );
 }

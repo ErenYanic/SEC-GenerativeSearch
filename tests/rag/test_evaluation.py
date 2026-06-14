@@ -1,4 +1,4 @@
-"""Tests for :mod:`sec_generative_search.rag.evaluation` (Phase 16.6).
+"""Tests for :mod:`sec_generative_search.rag.evaluation`.
 
 Exercises the offline answer-quality harness — faithfulness proxy,
 citation accuracy + integrity, and latency aggregation — entirely with

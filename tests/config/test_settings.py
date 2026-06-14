@@ -19,6 +19,7 @@ from sec_generative_search.config.settings import (
     LLMSettings,
     ProviderSettings,
     RAGSettings,
+    SearchSettings,
     Settings,
     reload_settings,
     resolve_auth_pepper_from_values,
@@ -108,6 +109,56 @@ class TestRAGSettings:
         assert s.citation_mode == "footnote"
         assert s.default_answer_mode == "analytical"
         assert s.refusal_enabled is False
+
+
+# ---------------------------------------------------------------------------
+# SearchSettings — retrieval-layer knobs.
+# ---------------------------------------------------------------------------
+
+
+class TestSearchSettings:
+    def test_defaults(self, clean_env: pytest.MonkeyPatch) -> None:
+        s = SearchSettings()
+        assert s.top_k == 5
+        assert s.min_similarity == 0.0
+        # Diversity caps + over-fetch default to behaviour-preserving
+        # values: caps disabled, factor 4.
+        assert s.max_per_section == 0
+        assert s.max_per_filing == 0
+        assert s.rerank_over_fetch_factor == 4
+
+    def test_env_override(self, clean_env: pytest.MonkeyPatch) -> None:
+        clean_env.setenv("SEARCH_TOP_K", "8")
+        clean_env.setenv("SEARCH_MAX_PER_SECTION", "3")
+        clean_env.setenv("SEARCH_MAX_PER_FILING", "2")
+        clean_env.setenv("SEARCH_RERANK_OVER_FETCH_FACTOR", "6")
+
+        s = SearchSettings()
+        assert s.top_k == 8
+        assert s.max_per_section == 3
+        assert s.max_per_filing == 2
+        assert s.rerank_over_fetch_factor == 6
+
+    @pytest.mark.security
+    def test_negative_diversity_cap_rejected(self, clean_env: pytest.MonkeyPatch) -> None:
+        # A negative cap is a configuration error, not a sentinel — only
+        # 0 (disabled) or a positive cap is permitted.
+        clean_env.setenv("SEARCH_MAX_PER_SECTION", "-1")
+        with pytest.raises(ValidationError, match="SEARCH_MAX_PER_SECTION"):
+            SearchSettings()
+
+        clean_env.delenv("SEARCH_MAX_PER_SECTION", raising=False)
+        clean_env.setenv("SEARCH_MAX_PER_FILING", "-5")
+        with pytest.raises(ValidationError, match="SEARCH_MAX_PER_FILING"):
+            SearchSettings()
+
+    @pytest.mark.security
+    def test_over_fetch_factor_below_one_rejected(self, clean_env: pytest.MonkeyPatch) -> None:
+        # A 0/negative multiplier would zero the candidate fetch and
+        # starve retrieval. 1 is the floor (disables over-fetch).
+        clean_env.setenv("SEARCH_RERANK_OVER_FETCH_FACTOR", "0")
+        with pytest.raises(ValidationError, match=">= 1"):
+            SearchSettings()
 
 
 # ---------------------------------------------------------------------------

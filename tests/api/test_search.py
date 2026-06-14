@@ -183,6 +183,7 @@ class TestSearchDelegation:
                 "end_date": "2024-01-01",
                 "max_per_section": 2,
                 "max_per_filing": 3,
+                "rerank_over_fetch_factor": 6,
                 "context_token_budget": 4000,
             },
         )
@@ -198,6 +199,7 @@ class TestSearchDelegation:
         assert call["end_date"] == "2024-01-01"
         assert call["max_per_section"] == 2
         assert call["max_per_filing"] == 3
+        assert call["rerank_over_fetch_factor"] == 6
         assert call["context_token_budget"] == 4000
 
     def test_omitted_optional_fields_pass_none(self, search_app_factory) -> None:
@@ -213,6 +215,12 @@ class TestSearchDelegation:
         assert call["min_similarity"] is None
         assert call["ticker"] is None
         assert call["context_token_budget"] is None
+        # The diversity caps + over-fetch also default to None so the
+        # service resolves them from settings.search rather than the
+        # route hardcoding 0/0/4.
+        assert call["max_per_section"] is None
+        assert call["max_per_filing"] is None
+        assert call["rerank_over_fetch_factor"] is None
 
     def test_response_strips_internal_only_fields(self, search_app_factory) -> None:
         app, _service = search_app_factory(results=[_result(chunk_id="chunk-1", rerank_score=0.91)])
@@ -280,6 +288,38 @@ class TestSearchSchemaGuards:
         client = TestClient(app, base_url="https://testserver")
         response = client.post("/api/search", json={"query": "any", "top_k": 0})
         assert response.status_code == 422
+
+    @pytest.mark.security
+    def test_diversity_cap_upper_bound_rejected(self, search_app_factory) -> None:
+        # A cap above 50 is refused so a request cannot ask the service
+        # to retain an unbounded slice per section/filing.
+        app, service = search_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        for cap_field in ("max_per_section", "max_per_filing"):
+            response = client.post("/api/search", json={"query": "any", cap_field: 51})
+            assert response.status_code == 422
+        assert service.calls == []
+
+    def test_diversity_cap_negative_rejected(self, search_app_factory) -> None:
+        app, _service = search_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        response = client.post("/api/search", json={"query": "any", "max_per_section": -1})
+        assert response.status_code == 422
+
+    @pytest.mark.security
+    def test_rerank_over_fetch_factor_bounds_rejected(self, search_app_factory) -> None:
+        # The over-fetch multiplier is bounded 1..10. The upper bound is
+        # the candidate-explosion guard: top_k (<=50) * factor (<=10)
+        # caps the fetch at 500, so a single request cannot pin Chroma.
+        app, service = search_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        for value in (0, 11):
+            response = client.post(
+                "/api/search",
+                json={"query": "any", "rerank_over_fetch_factor": value},
+            )
+            assert response.status_code == 422
+        assert service.calls == []
 
     def test_min_similarity_out_of_range_rejected(self, search_app_factory) -> None:
         app, _service = search_app_factory()

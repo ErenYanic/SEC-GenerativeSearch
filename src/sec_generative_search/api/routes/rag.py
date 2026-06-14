@@ -704,6 +704,9 @@ async def generate_answer(
             max_output_tokens=body.max_output_tokens,
             history=history,
             prefer_structured_output=capability.structured_output,
+            max_per_section=body.max_per_section,
+            max_per_filing=body.max_per_filing,
+            rerank_over_fetch_factor=body.rerank_over_fetch_factor,
             routing_hints=routing_hints,
         )
     except ProviderAuthError as exc:
@@ -892,6 +895,9 @@ def _run_orchestrator_in_thread(
     max_output_tokens: int | None,
     history: list[ConversationTurn] | None,
     prefer_structured_output: bool,
+    max_per_section: int | None,
+    max_per_filing: int | None,
+    rerank_over_fetch_factor: int | None,
     routing_hints: OpenRouterRoutingHints | None,
     queue: asyncio.Queue,
     loop: asyncio.AbstractEventLoop,
@@ -926,6 +932,9 @@ def _run_orchestrator_in_thread(
                 max_output_tokens=max_output_tokens,
                 history=history,
                 prefer_structured_output=prefer_structured_output,
+                max_per_section=max_per_section,
+                max_per_filing=max_per_filing,
+                rerank_over_fetch_factor=rerank_over_fetch_factor,
                 routing_hints=routing_hints,
             ):
                 loop.call_soon_threadsafe(queue.put_nowait, event)
@@ -1069,6 +1078,9 @@ async def stream_answer(
             max_output_tokens=body.max_output_tokens,
             history=history,
             prefer_structured_output=capability.structured_output,
+            max_per_section=body.max_per_section,
+            max_per_filing=body.max_per_filing,
+            rerank_over_fetch_factor=body.rerank_over_fetch_factor,
             routing_hints=routing_hints,
             queue=queue,
             loop=loop,

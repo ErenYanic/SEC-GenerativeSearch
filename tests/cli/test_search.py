@@ -415,6 +415,49 @@ class TestFilterNormalisation:
         assert call["start_date"] == "2023-01-01"
         assert call["end_date"] == "2023-12-31"
 
+    def test_retrieval_tuning_flags_propagate(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        # The diversity-cap + over-fetch flags reach the service
+        # verbatim. Omitted flags pass None so the service falls back to
+        # settings.search.
+        _arm_returns([])
+        result = runner.invoke(
+            app,
+            [
+                "search",
+                "liquidity",
+                "--max-per-section",
+                "3",
+                "--max-per-filing",
+                "2",
+                "--rerank-over-fetch",
+                "6",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        call = patched["services"][-1].calls[-1]
+        assert call["max_per_section"] == 3
+        assert call["max_per_filing"] == 2
+        assert call["rerank_over_fetch_factor"] == 6
+
+    def test_retrieval_tuning_flags_default_to_none(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        _arm_returns([])
+        result = runner.invoke(app, ["search", "liquidity"])
+        assert result.exit_code == 0, result.output
+        call = patched["services"][-1].calls[-1]
+        assert call["max_per_section"] is None
+        assert call["max_per_filing"] is None
+        assert call["rerank_over_fetch_factor"] is None
+
 
 # ---------------------------------------------------------------------------
 # Boundary validation
@@ -464,6 +507,29 @@ class TestBoundaryValidation:
         )
         assert result.exit_code == 2
         assert "Invalid date format" in result.output
+
+    def test_negative_diversity_cap_exits_2(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        # Typer's ``min=0`` rejects a negative cap with the standard
+        # Click error envelope (exit 2) before any storage is opened.
+        result = runner.invoke(app, ["search", "query", "--max-per-section", "-1"])
+        assert result.exit_code == 2
+        assert patched["embedders"] == []
+
+    def test_over_fetch_below_one_exits_2(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        # ``min=1`` on --rerank-over-fetch rejects a 0 multiplier.
+        result = runner.invoke(app, ["search", "query", "--rerank-over-fetch", "0"])
+        assert result.exit_code == 2
+        assert patched["embedders"] == []
 
 
 # ---------------------------------------------------------------------------

@@ -223,6 +223,64 @@ describe("RagPage — generation streaming", () => {
     expect(streamInit.method).toBe("POST");
   });
 
+  it("forwards the advanced retrieval-tuning inputs on the stream body and omits blank ones", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/api/admin/rag/plan") {
+        return new Response(
+          JSON.stringify({
+            plan: SAMPLE_PLAN,
+            provider: "openai",
+            model: "gpt-test",
+          }),
+          { status: 200 },
+        );
+      }
+      return streamingResponse([
+        sseFrame("final", {
+          answer: "ok",
+          provider: "openai",
+          model: "gpt-test",
+          prompt_version: "v1",
+          token_usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+          latency_seconds: 0.1,
+          streamed: true,
+          refused: false,
+        }),
+      ]);
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    render(<RagPage />);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText(/question/i), "Apple AI risk");
+    await user.click(screen.getByRole("button", { name: /^Plan$/i }));
+    await screen.findByText("AAPL");
+
+    // Open the advanced disclosure and set two of the three knobs; leave
+    // "Max per filing" blank so it must be omitted from the wire.
+    await user.click(
+      screen.getByText(/retrieval tuning \(advanced\)/i),
+    );
+    await user.type(screen.getByLabelText(/max per section/i), "3");
+    await user.type(screen.getByLabelText(/rerank over-fetch/i), "5");
+
+    await user.click(screen.getByRole("button", { name: /generate answer/i }));
+
+    const streamCall = await waitFor(() => {
+      const call = fetchMock.mock.calls.find(
+        (c) => (c[0] as string) === "/api/admin/rag/stream",
+      );
+      expect(call).toBeDefined();
+      return call as unknown as [string, RequestInit];
+    });
+    const body = JSON.parse((streamCall[1].body as string) ?? "{}");
+    expect(body.max_per_section).toBe(3);
+    expect(body.rerank_over_fetch_factor).toBe(5);
+    // A blank input is omitted entirely (backend falls back to settings).
+    expect(body).not.toHaveProperty("max_per_filing");
+  });
+
   it("surfaces an in-stream error event with a retry affordance and preserves the partial answer", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();

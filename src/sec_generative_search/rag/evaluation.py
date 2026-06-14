@@ -1,4 +1,4 @@
-"""Offline answer-quality evaluation harness (Phase 16.6).
+"""Offline answer-quality evaluation harness.
 
 The companion to :mod:`sec_generative_search.search.evaluation`. Where the
 retrieval harness scores *which chunks were surfaced*, this module scores

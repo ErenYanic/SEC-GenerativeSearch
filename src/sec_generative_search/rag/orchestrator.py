@@ -216,6 +216,9 @@ class RAGOrchestrator:
         history: list[ConversationTurn] | None = None,
         prefer_structured_output: bool = False,
         extra_filters: dict | None = None,
+        max_per_section: int | None = None,
+        max_per_filing: int | None = None,
+        rerank_over_fetch_factor: int | None = None,
         routing_hints: OpenRouterRoutingHints | None = None,
     ) -> GenerationResult:
         """Run the full pipeline non-streaming and return the final result.
@@ -241,6 +244,15 @@ class RAGOrchestrator:
                 on top of the plan's filters (e.g. UI-edited chips
                 that the user wants to take effect even though
                 ``plan`` was generated before the edit).
+            max_per_section: Optional retrieval diversity cap (chunks per
+                section path). ``None`` uses
+                ``settings.search.max_per_section``.
+            max_per_filing: Optional retrieval diversity cap (chunks per
+                filing). ``None`` uses ``settings.search.max_per_filing``.
+            rerank_over_fetch_factor: Optional reranker over-fetch
+                multiplier. ``None`` uses
+                ``settings.search.rerank_over_fetch_factor``. Inert until
+                a reranker is bound.
             routing_hints: Optional :class:`OpenRouterRoutingHints` for
                 upstream-provider routing.  Forwarded verbatim into the
                 :class:`GenerationRequest` and consumed only when the
@@ -281,6 +293,9 @@ class RAGOrchestrator:
             mode=effective_mode,
             chunks_token_budget=allocation.chunks_tokens,
             extra_filters=extra_filters,
+            max_per_section=max_per_section,
+            max_per_filing=max_per_filing,
+            rerank_over_fetch_factor=rerank_over_fetch_factor,
         )
 
         if not retrieved and self._rag_settings.refusal_enabled:
@@ -368,6 +383,9 @@ class RAGOrchestrator:
         history: list[ConversationTurn] | None = None,
         prefer_structured_output: bool = False,
         extra_filters: dict | None = None,
+        max_per_section: int | None = None,
+        max_per_filing: int | None = None,
+        rerank_over_fetch_factor: int | None = None,
         routing_hints: OpenRouterRoutingHints | None = None,
     ) -> Iterator[StreamEvent]:
         """Stream the answer and yield :class:`StreamEvent` deltas.
@@ -406,6 +424,9 @@ class RAGOrchestrator:
             mode=effective_mode,
             chunks_token_budget=allocation.chunks_tokens,
             extra_filters=extra_filters,
+            max_per_section=max_per_section,
+            max_per_filing=max_per_filing,
+            rerank_over_fetch_factor=rerank_over_fetch_factor,
         )
 
         if not retrieved and self._rag_settings.refusal_enabled:
@@ -599,6 +620,9 @@ class RAGOrchestrator:
         mode: AnswerMode,
         chunks_token_budget: int,
         extra_filters: dict | None,
+        max_per_section: int | None = None,
+        max_per_filing: int | None = None,
+        rerank_over_fetch_factor: int | None = None,
     ) -> list[RetrievalResult]:
         """Run retrieval — single call, or comparative fan-out.
 
@@ -606,14 +630,29 @@ class RAGOrchestrator:
         when more than one is implied (v1 takes the plan's
         ``date_range`` as a single bucket; multi-range comparison is
         still out of scope here).
+
+        The retrieval-tuning knobs (``max_per_section`` / ``max_per_filing``
+        / ``rerank_over_fetch_factor``) are forwarded verbatim to every
+        :meth:`RetrievalService.retrieve` call (including each comparative
+        fan-out leg). ``None`` lets the service fall back to its
+        ``settings.search`` defaults — so an operator can set the env vars
+        once and have them apply to both the search route and RAG.
         """
         merged_filters = self._merge_filters(plan, extra_filters)
+        # Pass the tuning knobs as ``None``-tolerant kwargs; the retrieval
+        # primitive resolves ``None`` against ``settings.search``.
+        tuning = {
+            "max_per_section": max_per_section,
+            "max_per_filing": max_per_filing,
+            "rerank_over_fetch_factor": rerank_over_fetch_factor,
+        }
 
         if mode != AnswerMode.COMPARATIVE or len(plan.tickers) <= 1:
             # Single-query path — the common case.
             return self._retrieval.retrieve(
                 plan.query_en,
                 context_token_budget=chunks_token_budget,
+                **tuning,
                 **merged_filters,
             )
 
@@ -629,6 +668,7 @@ class RAGOrchestrator:
             results = self._retrieval.retrieve(
                 plan.query_en,
                 context_token_budget=per_ticker_budget,
+                **tuning,
                 **per_filters,
             )
             for hit in results:

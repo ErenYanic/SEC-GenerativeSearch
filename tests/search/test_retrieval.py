@@ -454,6 +454,88 @@ class TestReranker:
 
 
 # ---------------------------------------------------------------------------
+# Settings-driven defaults.
+# ---------------------------------------------------------------------------
+
+
+class TestSettingsDrivenDefaults:
+    """The diversity caps + rerank over-fetch resolve from
+    ``settings.search`` when the caller omits them — the mechanism that
+    lets ``SEARCH_*`` env vars (and the deployment profile) drive both
+    the search route and RAG retrieval without per-call wiring.
+    """
+
+    @staticmethod
+    def _reset(monkeypatch: pytest.MonkeyPatch, *names: str) -> None:
+        from sec_generative_search.config.settings import reload_settings
+
+        for name in names:
+            monkeypatch.delenv(name, raising=False)
+        reload_settings()
+
+    def test_diversity_cap_resolved_from_settings(self, clean_env: pytest.MonkeyPatch) -> None:
+        from sec_generative_search.config.settings import reload_settings
+
+        clean_env.setenv("SEARCH_MAX_PER_SECTION", "1")
+        reload_settings()
+        try:
+            results = [
+                _make_search_result(chunk_id="a", path="P1"),
+                _make_search_result(chunk_id="b", path="P1"),
+                _make_search_result(chunk_id="c", path="P2"),
+            ]
+            svc = RetrievalService(
+                _FakeEmbedder("k"), _FakeChroma(results), token_counter=lambda _t: 1
+            )
+            # Caller omits max_per_section → settings value (1) applies:
+            # one chunk per section path survives.
+            out = svc.retrieve("x", top_k=10)
+            assert [r.chunk_id for r in out] == ["a", "c"]
+        finally:
+            self._reset(clean_env, "SEARCH_MAX_PER_SECTION")
+
+    def test_explicit_arg_overrides_settings_default(self, clean_env: pytest.MonkeyPatch) -> None:
+        from sec_generative_search.config.settings import reload_settings
+
+        clean_env.setenv("SEARCH_MAX_PER_SECTION", "1")
+        reload_settings()
+        try:
+            results = [
+                _make_search_result(chunk_id="a", path="P1"),
+                _make_search_result(chunk_id="b", path="P1"),
+                _make_search_result(chunk_id="c", path="P2"),
+            ]
+            svc = RetrievalService(
+                _FakeEmbedder("k"), _FakeChroma(results), token_counter=lambda _t: 1
+            )
+            # Explicit 0 disables the cap even though settings set it to 1.
+            out = svc.retrieve("x", top_k=10, max_per_section=0)
+            assert [r.chunk_id for r in out] == ["a", "b", "c"]
+        finally:
+            self._reset(clean_env, "SEARCH_MAX_PER_SECTION")
+
+    def test_over_fetch_factor_resolved_from_settings(self, clean_env: pytest.MonkeyPatch) -> None:
+        from sec_generative_search.config.settings import reload_settings
+
+        clean_env.setenv("SEARCH_RERANK_OVER_FETCH_FACTOR", "5")
+        reload_settings()
+        try:
+            chroma = _FakeChroma([_make_search_result(chunk_id=f"c{i}") for i in range(40)])
+            svc = RetrievalService(
+                _FakeEmbedder("k"),
+                chroma,
+                reranker=_IdentityReranker("k"),
+                token_counter=lambda _t: 1,
+            )
+            # Caller omits the factor → settings value (5) drives the fetch.
+            svc.retrieve("x", top_k=3)
+            assert chroma.last_kwargs is not None
+            assert chroma.last_kwargs["n_results"] == 15  # 3 * 5
+        finally:
+            self._reset(clean_env, "SEARCH_RERANK_OVER_FETCH_FACTOR")
+
+
+# ---------------------------------------------------------------------------
 # Citation conversion
 # ---------------------------------------------------------------------------
 

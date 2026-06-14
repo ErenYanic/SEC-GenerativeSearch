@@ -135,6 +135,9 @@ class _StubOrchestrator:
                 "history": history,
                 "prefer_structured_output": prefer_structured_output,
                 "routing_hints": kwargs.get("routing_hints"),
+                "max_per_section": kwargs.get("max_per_section"),
+                "max_per_filing": kwargs.get("max_per_filing"),
+                "rerank_over_fetch_factor": kwargs.get("rerank_over_fetch_factor"),
                 "llm_provider_name": getattr(self.llm, "provider_name", None),
             }
         )
@@ -381,6 +384,61 @@ class TestRagQueryDelegation:
         )
         assert response.status_code == 200
         assert orch.calls[0]["max_output_tokens"] == 256
+
+    def test_retrieval_tuning_forwarded(self, rag_query_app_factory) -> None:
+        # The diversity caps + over-fetch ride the RAG query wire into
+        # the orchestrator's retrieval step.
+        app, _build, orch = rag_query_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        response = client.post(
+            "/api/rag/query",
+            json={
+                "plan": _sample_plan_payload(),
+                "max_per_section": 2,
+                "max_per_filing": 1,
+                "rerank_over_fetch_factor": 3,
+            },
+            headers={"X-Provider-Key-openai": "sk-1234"},  # pragma: allowlist secret
+        )
+        assert response.status_code == 200
+        assert orch.calls[0]["max_per_section"] == 2
+        assert orch.calls[0]["max_per_filing"] == 1
+        assert orch.calls[0]["rerank_over_fetch_factor"] == 3
+
+    def test_retrieval_tuning_defaults_to_none(self, rag_query_app_factory) -> None:
+        app, _build, orch = rag_query_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        response = client.post(
+            "/api/rag/query",
+            json={"plan": _sample_plan_payload()},
+            headers={"X-Provider-Key-openai": "sk-1234"},  # pragma: allowlist secret
+        )
+        assert response.status_code == 200
+        assert orch.calls[0]["max_per_section"] is None
+        assert orch.calls[0]["max_per_filing"] is None
+        assert orch.calls[0]["rerank_over_fetch_factor"] is None
+
+    @pytest.mark.security
+    def test_oversize_retrieval_tuning_rejected(self, rag_query_app_factory) -> None:
+        # The same bounds as POST /api/search apply on the RAG wire so a
+        # caller cannot widen the diversity cap or explode the over-fetch.
+        app, _build, orch = rag_query_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        for tuning_field, value in (
+            ("max_per_section", 51),
+            ("max_per_filing", 51),
+            ("rerank_over_fetch_factor", 11),
+            ("rerank_over_fetch_factor", 0),
+        ):
+            response = client.post(
+                "/api/rag/query",
+                json={"plan": _sample_plan_payload(), tuning_field: value},
+                headers={
+                    "X-Provider-Key-openai": "sk-1234"  # pragma: allowlist secret
+                },
+            )
+            assert response.status_code == 422, (tuning_field, value)
+        assert orch.calls == []
 
     def test_header_resolver_forwards_user_key(self, rag_query_app_factory) -> None:
         app, build, _orch = rag_query_app_factory()

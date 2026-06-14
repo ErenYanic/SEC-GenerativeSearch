@@ -507,6 +507,24 @@ export interface RagStreamRequestBody {
   mode?: AnswerMode;
   max_output_tokens?: number;
   /**
+   * Retrieval diversity cap: maximum chunks per section path; 0 disables.
+   * Omitted → backend uses `settings.search.max_per_section`. Bounded
+   * 0..50 at the API boundary.
+   */
+  max_per_section?: number;
+  /**
+   * Retrieval diversity cap: maximum chunks per filing; 0 disables.
+   * Omitted → backend uses `settings.search.max_per_filing`. Bounded
+   * 0..50 at the API boundary.
+   */
+  max_per_filing?: number;
+  /**
+   * Reranker over-fetch multiplier (top_k * factor); 1 disables. Only
+   * active when a reranker is bound on the backend. Omitted → backend
+   * uses `settings.search.rerank_over_fetch_factor`. Bounded 1..10.
+   */
+  rerank_over_fetch_factor?: number;
+  /**
    * Prior `Q:/A:` turns from the browser-tab chat surface.
    * The orchestrator renders these as a history block before retrieval
    * and generation; retrieved chunks and citations from prior turns are

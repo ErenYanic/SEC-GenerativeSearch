@@ -113,6 +113,7 @@ async def search_filings(
             min_similarity=body.min_similarity,
             max_per_section=body.max_per_section,
             max_per_filing=body.max_per_filing,
+            rerank_over_fetch_factor=body.rerank_over_fetch_factor,
             context_token_budget=body.context_token_budget,
         )
     except SearchError as exc:

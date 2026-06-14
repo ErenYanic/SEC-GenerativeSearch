@@ -130,6 +130,9 @@ class _StubOrchestrator:
                 "history": history,
                 "prefer_structured_output": prefer_structured_output,
                 "routing_hints": kwargs.get("routing_hints"),
+                "max_per_section": kwargs.get("max_per_section"),
+                "max_per_filing": kwargs.get("max_per_filing"),
+                "rerank_over_fetch_factor": kwargs.get("rerank_over_fetch_factor"),
                 "llm_provider_name": getattr(self.llm, "provider_name", None),
             }
         )
@@ -347,6 +350,27 @@ class TestRagStreamHappyPath:
         assert call["plan_tickers"] == ["AAPL"]
         # Mode override absent in body → orchestrator decides from plan.
         assert call["mode"] is None
+
+    def test_retrieval_tuning_forwarded(self, rag_stream_app_factory) -> None:
+        # The diversity caps + over-fetch ride the stream wire through
+        # the worker-thread helper into generate_stream.
+        events = [StreamEvent(final=_default_final_result(citations=[]))]
+        app, _build, orch = rag_stream_app_factory(events=events)
+        client = TestClient(app, base_url="https://testserver")
+        client.post(
+            "/api/rag/stream",
+            json={
+                "plan": _sample_plan_payload(),
+                "max_per_section": 4,
+                "max_per_filing": 2,
+                "rerank_over_fetch_factor": 5,
+            },
+            headers={"X-Provider-Key-openai": "sk-key-123"},  # pragma: allowlist secret
+        )
+        call = orch.calls[0]
+        assert call["max_per_section"] == 4
+        assert call["max_per_filing"] == 2
+        assert call["rerank_over_fetch_factor"] == 5
 
     def test_body_mode_overrides_plan(self, rag_stream_app_factory) -> None:
         events = [StreamEvent(final=_default_final_result(citations=[]))]

@@ -362,6 +362,37 @@ def search(
             help="Filter results to filings on or before this date (YYYY-MM-DD).",
         ),
     ] = None,
+    max_per_section: Annotated[
+        int | None,
+        typer.Option(
+            "--max-per-section",
+            help=("Cap chunks per section path; 0 disables. Omit to use SEARCH_MAX_PER_SECTION."),
+            min=0,
+        ),
+    ] = None,
+    max_per_filing: Annotated[
+        int | None,
+        typer.Option(
+            "--max-per-filing",
+            help=(
+                "Cap chunks per filing (accession number); 0 disables. "
+                "Omit to use SEARCH_MAX_PER_FILING."
+            ),
+            min=0,
+        ),
+    ] = None,
+    rerank_over_fetch: Annotated[
+        int | None,
+        typer.Option(
+            "--rerank-over-fetch",
+            help=(
+                "Reranker over-fetch multiplier (top_k * factor); 1 disables. "
+                "Only active when a reranker is bound. "
+                "Omit to use SEARCH_RERANK_OVER_FETCH_FACTOR."
+            ),
+            min=1,
+        ),
+    ] = None,
     output: Annotated[
         str,
         typer.Option(
@@ -432,6 +463,9 @@ def search(
             accession_number=accession_filter,
             start_date=start_date,
             end_date=end_date,
+            max_per_section=max_per_section,
+            max_per_filing=max_per_filing,
+            rerank_over_fetch_factor=rerank_over_fetch,
         )
 
     try:

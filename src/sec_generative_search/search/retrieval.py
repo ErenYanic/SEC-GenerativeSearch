@@ -165,6 +165,12 @@ class RetrievalService:
         self._default_top_k = settings.search.top_k
         self._default_min_similarity = settings.search.min_similarity
         self._default_context_budget = settings.rag.context_token_budget
+        # Diversity caps and rerank over-fetch are operator defaults
+        # resolved here, overridable per-call. ``None`` at the call
+        # boundary means "use the configured default".
+        self._default_max_per_section = settings.search.max_per_section
+        self._default_max_per_filing = settings.search.max_per_filing
+        self._default_rerank_over_fetch_factor = settings.search.rerank_over_fetch_factor
 
         logger.debug(
             "RetrievalService ready: top_k=%d, min_similarity=%.2f, context_budget=%d, reranker=%s",
@@ -189,9 +195,9 @@ class RetrievalService:
         start_date: str | None = None,
         end_date: str | None = None,
         min_similarity: float | None = None,
-        max_per_section: int = 0,
-        max_per_filing: int = 0,
-        rerank_over_fetch_factor: int = 4,
+        max_per_section: int | None = None,
+        max_per_filing: int | None = None,
+        rerank_over_fetch_factor: int | None = None,
         context_token_budget: int | None = None,
     ) -> list[RetrievalResult]:
         """Retrieve up to ``top_k`` chunks ranked for the given query.
@@ -232,12 +238,15 @@ class RetrievalService:
                 before any further processing.  Defaults to
                 ``settings.search.min_similarity``.
             max_per_section: Maximum chunks per ``section_path``.  ``0``
-                disables the cap.
+                disables the cap.  ``None`` uses
+                ``settings.search.max_per_section``.
             max_per_filing: Maximum chunks per ``accession_number``.
-                ``0`` disables the cap.
+                ``0`` disables the cap.  ``None`` uses
+                ``settings.search.max_per_filing``.
             rerank_over_fetch_factor: When a reranker is bound, fetch
                 ``top_k * factor`` candidates so the reranker has a
                 pool to re-order.  Ignored when no reranker is bound.
+                ``None`` uses ``settings.search.rerank_over_fetch_factor``.
             context_token_budget: Token budget the returned list must
                 fit under.  Defaults to ``settings.rag.context_token_budget``.
 
@@ -278,10 +287,21 @@ class RetrievalService:
             if context_token_budget is not None
             else self._default_context_budget
         )
+        effective_max_per_section = (
+            max_per_section if max_per_section is not None else self._default_max_per_section
+        )
+        effective_max_per_filing = (
+            max_per_filing if max_per_filing is not None else self._default_max_per_filing
+        )
+        effective_over_fetch = (
+            rerank_over_fetch_factor
+            if rerank_over_fetch_factor is not None
+            else self._default_rerank_over_fetch_factor
+        )
 
         fetch_count = effective_top_k
-        if self._reranker is not None and rerank_over_fetch_factor > 1:
-            fetch_count = effective_top_k * rerank_over_fetch_factor
+        if self._reranker is not None and effective_over_fetch > 1:
+            fetch_count = effective_top_k * effective_over_fetch
 
         logger.info(
             "Retrieving: query=%r top_k=%d fetch=%d min_sim=%.2f ticker=%s form_type=%s rerank=%s",
@@ -321,11 +341,11 @@ class RetrievalService:
             if self._reranker is not None and candidates:
                 candidates = self._apply_reranker(query, candidates)
 
-            if max_per_section > 0 or max_per_filing > 0:
+            if effective_max_per_section > 0 or effective_max_per_filing > 0:
                 candidates = _apply_diversity_caps(
                     candidates,
-                    max_per_section=max_per_section,
-                    max_per_filing=max_per_filing,
+                    max_per_section=effective_max_per_section,
+                    max_per_filing=effective_max_per_filing,
                 )
 
             if effective_budget > 0:
