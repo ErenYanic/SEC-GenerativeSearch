@@ -321,8 +321,8 @@ class TestEvaluateAnswers:
     def test_report_is_content_free(self) -> None:
         # The report (and its per_case rows) must carry case_id + numbers
         # only — never the answer text, the query, or chunk content.
-        secret_answer = "CONFIDENTIAL revenue figure 4.2 billion [1]."
-        secret_query = "SENSITIVE-QUERY-STRING"
+        secret_answer = "CONFIDENTIAL revenue figure 4.2 billion [1]."  # pragma: allowlist secret
+        secret_query = "SENSITIVE-QUERY-STRING" # pragma: allowlist secret
 
         def answer_for(query: str) -> GenerationResult:
             c1 = _make_chunk(index=1, content="CHUNK-BODY-TEXT")
