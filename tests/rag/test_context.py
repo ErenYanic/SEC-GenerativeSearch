@@ -95,6 +95,23 @@ class TestContextBudgetUnknownWindow:
         # Total is computed sum on the unknown-window path.
         assert allocation.total_window == 100 + 900 + 6_000 + 2_000
 
+    def test_operator_history_override_wins_on_unknown_window(self) -> None:
+        """An explicit history budget is honoured even when the window is unknown."""
+        budget = ContextBudget(
+            total_window=0,
+            max_output_tokens=2_000,
+            history_token_budget=750,
+            default_chunks_budget_fallback=6_000,
+        )
+        allocation = budget.allocate(
+            system_prompt="x" * 400,
+            token_counter=_length_token_counter,
+        )
+        # Override wins over the default 15%-of-chunks fraction.
+        assert allocation.history_tokens == 750
+        assert allocation.chunks_tokens == 6_000
+        assert allocation.total_window == 100 + 750 + 6_000 + 2_000
+
 
 class TestBuildContextBlock:
     def test_wraps_in_untrusted_delimiters(self, sample_chunks) -> None:
@@ -194,6 +211,21 @@ class TestRenderHistoryBlock:
         )
         assert "Newest Q?" in block
         assert "Old Q?" not in block
+
+    def test_returns_empty_when_newest_turn_alone_exceeds_budget(self) -> None:
+        """If even the single newest turn does not fit, render nothing.
+
+        The greedy packer breaks on the first over-budget turn; with one
+        turn that is itself larger than the budget, no turn is rendered
+        and the history splice collapses to the empty string.
+        """
+        history = [self._make_turn("A long question?", "A long answer.")]
+        block = render_history_block(
+            history,
+            max_tokens=1,  # the rendered turn costs far more than 1 token
+            token_counter=_length_token_counter,
+        )
+        assert block == ""
 
     @pytest.mark.security
     def test_does_not_render_retrieval_results(self) -> None:

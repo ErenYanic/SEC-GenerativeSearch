@@ -53,6 +53,40 @@ class TestInlineMarkerExtraction:
         result = extract_from_inline_markers("Answer [1].", [])
         assert result.citations == []
 
+    @pytest.mark.security
+    def test_inline_path_caps_at_max_citations(self, make_chunk) -> None:
+        """>50 in-range markers must still yield at most 50 citations."""
+        chunks = [make_chunk(index=i) for i in range(1, 61)]
+        text = " ".join(f"[{i}]" for i in range(1, 61))
+        result = extract_from_inline_markers(text, chunks)
+        assert len(result.citations) == 50
+
+    def test_drops_chunk_whose_to_citation_fails(self, make_chunk) -> None:
+        """A retrieved chunk missing required citation metadata is dropped, not raised.
+
+        ``_build_citations`` delegates to ``RetrievalResult.to_citation``,
+        which raises ``CitationError`` when ``accession_number`` /
+        ``filing_date`` are absent. That signals an upstream bug, not
+        adversarial input, so the citation is logged-and-dropped — the
+        answer must still come back.
+        """
+        from sec_generative_search.core.types import ContentType, RetrievalResult
+
+        malformed = RetrievalResult(
+            content="text",
+            path="X",
+            content_type=ContentType.TEXT,
+            ticker="AAPL",
+            form_type="10-K",
+            similarity=0.9,
+            chunk_id="AAPL_001",
+            # accession_number / filing_date deliberately omitted.
+        )
+        good = make_chunk(index=2)
+        result = extract_from_inline_markers("[1] then [2]", [malformed, good])
+        # The malformed chunk is dropped; the well-formed one survives.
+        assert [c.chunk_id for c in result.citations] == [good.chunk_id]
+
 
 class TestJsonEnvelopeExtraction:
     def test_parses_minimal_envelope(self, sample_chunks) -> None:
@@ -118,6 +152,103 @@ class TestJsonEnvelopeExtraction:
 
         with pytest.raises(CitationError):
             extract_from_json_envelope("plain text no json", sample_chunks)
+
+    def test_raises_on_malformed_json_object(self, sample_chunks) -> None:
+        """An isolated ``{...}`` that is not valid JSON raises CitationError.
+
+        Distinct from "no object": here a brace-balanced span *is* found
+        but :func:`json.loads` rejects it (the model emitted broken JSON).
+        """
+        from sec_generative_search.core.exceptions import CitationError
+
+        with pytest.raises(CitationError):
+            # Two adjacent strings with no separator — JSONDecodeError.
+            extract_from_json_envelope('{"answer": "x" "oops"}', sample_chunks)
+
+    def test_raises_on_unbalanced_object(self, sample_chunks) -> None:
+        """An opening brace with no matching close yields no object → CitationError."""
+        from sec_generative_search.core.exceptions import CitationError
+
+        with pytest.raises(CitationError):
+            extract_from_json_envelope('{"answer": "x"', sample_chunks)
+
+    def test_raises_when_cited_ids_not_a_list(self, sample_chunks) -> None:
+        """``cited_chunk_ids`` of the wrong type is a parse failure, not silent drop."""
+        from sec_generative_search.core.exceptions import CitationError
+
+        payload = json.dumps({"answer": "x", "cited_chunk_ids": "not-a-list"})
+        with pytest.raises(CitationError):
+            extract_from_json_envelope(payload, sample_chunks)
+
+    def test_dedupes_and_ignores_non_string_ids(self, sample_chunks) -> None:
+        """Duplicate ids collapse; a non-string id is skipped, never crashes."""
+        payload = json.dumps(
+            {
+                "answer": "x",
+                "cited_chunk_ids": [
+                    sample_chunks[0].chunk_id,
+                    sample_chunks[0].chunk_id,  # duplicate → dropped
+                    12345,  # non-string → skipped
+                    sample_chunks[1].chunk_id,
+                ],
+            }
+        )
+        result = extract_from_json_envelope(payload, sample_chunks)
+        assert [c.chunk_id for c in result.citations] == [
+            sample_chunks[0].chunk_id,
+            sample_chunks[1].chunk_id,
+        ]
+
+    @pytest.mark.security
+    def test_json_path_caps_at_max_citations(self, make_chunk) -> None:
+        """A pathological model emitting >50 ids must yield at most 50 citations."""
+        chunks = [make_chunk(index=i) for i in range(1, 61)]
+        payload = json.dumps({"answer": "x", "cited_chunk_ids": [c.chunk_id for c in chunks]})
+        result = extract_from_json_envelope(payload, chunks)
+        assert len(result.citations) == 50
+
+    def test_isolates_object_with_nested_braces(self, sample_chunks) -> None:
+        """A nested object inside the envelope must not confuse brace-matching."""
+        payload = (
+            '{"answer": "x", "meta": {"k": "v"}, '
+            f'"cited_chunk_ids": ["{sample_chunks[0].chunk_id}"]}}'
+        )
+        result = extract_from_json_envelope(payload, sample_chunks)
+        assert result.answer == "x"
+        assert result.citations[0].chunk_id == sample_chunks[0].chunk_id
+
+    def test_isolates_object_with_escaped_quote_and_brace_in_string(self, sample_chunks) -> None:
+        """Braces/quotes inside a JSON string literal must not terminate the scan."""
+        # answer holds an escaped quote AND a brace — both must be treated
+        # as string content, not structural tokens.
+        payload = json.dumps(
+            {
+                "answer": 'he said "hi" and wrote {x}',
+                "cited_chunk_ids": [sample_chunks[0].chunk_id],
+            }
+        )
+        result = extract_from_json_envelope(payload, sample_chunks)
+        assert result.answer == 'he said "hi" and wrote {x}'
+        assert result.citations[0].chunk_id == sample_chunks[0].chunk_id
+
+    def test_strips_fence_without_newline(self, sample_chunks) -> None:
+        """A single-line ```...``` wrapper (no newline) is still unwrapped."""
+        payload = (
+            "```"
+            + json.dumps({"answer": "y", "cited_chunk_ids": [sample_chunks[0].chunk_id]})
+            + "```"
+        )
+        result = extract_from_json_envelope(payload, sample_chunks)
+        assert result.answer == "y"
+
+    def test_handles_unterminated_fence(self, sample_chunks) -> None:
+        """An opening ```json fence with no closing fence still parses."""
+        payload = "```json\n" + json.dumps(
+            {"answer": "z", "cited_chunk_ids": [sample_chunks[1].chunk_id]}
+        )
+        result = extract_from_json_envelope(payload, sample_chunks)
+        assert result.answer == "z"
+        assert result.citations[0].chunk_id == sample_chunks[1].chunk_id
 
 
 class TestHybridDispatcher:

@@ -260,6 +260,26 @@ class TestConversationHistory:
         assert "Prior Q?" in fake_llm.last_request.prompt
         assert "Prior A." in fake_llm.last_request.prompt
 
+    def test_history_trimmed_to_max_turns(self, fake_retrieval, fake_llm) -> None:
+        """Turns beyond ``chat_history_max_turns`` are dropped before rendering.
+
+        The budget is generous (8000-token window → ~1200-token history
+        slice) so the token packer would keep both turns; only the
+        ``max_turns`` cap removes the oldest, isolating that trim path.
+        """
+        orch = _build_orchestrator(retrieval=fake_retrieval, llm=fake_llm)
+        orch._rag_settings.chat_history_enabled = True  # type: ignore[attr-defined]
+        orch._rag_settings.chat_history_max_turns = 1  # type: ignore[attr-defined]
+
+        history = [
+            self._make_turn("Oldest Q?", "Oldest A."),
+            self._make_turn("Newest Q?", "Newest A."),
+        ]
+        orch.generate(QueryPlan(raw_query="Q"), history=history)
+        prompt = fake_llm.last_request.prompt
+        assert "Newest Q?" in prompt
+        assert "Oldest Q?" not in prompt
+
     @pytest.mark.security
     def test_history_does_not_leak_prior_chunks(self, fake_retrieval, fake_llm, make_chunk) -> None:
         """Prior chunks must never be carried into a follow-up prompt."""
@@ -368,3 +388,25 @@ class TestBudgetIntegration:
         orch._rag_settings.context_token_budget = 1234  # type: ignore[attr-defined]
         orch.generate(QueryPlan(raw_query="Q"))
         assert fake_retrieval.calls[0]["context_token_budget"] == 1234
+
+    def test_capability_discovery_failure_degrades_to_fallback_budget(self, fake_retrieval) -> None:
+        """A provider whose ``get_capabilities`` raises must not break generation.
+
+        The allocator treats a capability-discovery error as an unknown
+        window (``total_window == 0``) and falls back to the settings
+        chunks budget — an instrumentation/capability hiccup can never
+        abort a live generate call.
+        """
+
+        class ExplodingCapabilityLLM(FakeLLMProvider):
+            def get_capabilities(self):  # type: ignore[override]
+                raise RuntimeError("capability matrix unavailable")
+
+        llm = ExplodingCapabilityLLM(reply="Reply [1].")
+        orch = _build_orchestrator(retrieval=fake_retrieval, llm=llm)
+        orch._rag_settings.context_token_budget = 4321  # type: ignore[attr-defined]
+        result = orch.generate(QueryPlan(raw_query="Q"))
+        # Generation still succeeded …
+        assert result.answer == "Reply [1]."
+        # … on the unknown-window fallback budget.
+        assert fake_retrieval.calls[0]["context_token_budget"] == 4321
