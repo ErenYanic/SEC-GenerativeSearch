@@ -30,6 +30,32 @@ class KimiProvider(OpenAICompatibleLLMProvider):
     default_model = "kimi-k2.5"
 
     MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
+        "kimi-k2.7-code-highspeed": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                vision=True,
+                context_window_tokens=262_144,
+                max_output_tokens=262_144,
+                pricing_tier=PricingTier.HIGH,
+            ),
+        ),
+        "kimi-k2.7-code": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                vision=True,
+                context_window_tokens=262_144,
+                max_output_tokens=262_144,
+                pricing_tier=PricingTier.STANDARD,
+            ),
+        ),
         "kimi-k2.6": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
@@ -37,6 +63,7 @@ class KimiProvider(OpenAICompatibleLLMProvider):
                 tool_use=True,
                 structured_output=True,
                 prompt_caching=True,
+                vision=True,
                 context_window_tokens=262_144,
                 max_output_tokens=262_144,
                 pricing_tier=PricingTier.STANDARD,

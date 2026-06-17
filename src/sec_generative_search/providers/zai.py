@@ -43,6 +43,18 @@ class ZaiProvider(OpenAICompatibleLLMProvider):
     # ``glm-4.7`` is the lowest-cost current general-purpose entry in
     # the published family.
     MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
+        "glm-5.2": ModelInfo(
+            capability=ProviderCapability(
+                chat=True,
+                streaming=True,
+                tool_use=True,
+                structured_output=True,
+                prompt_caching=True,
+                context_window_tokens=1_000_000,
+                max_output_tokens=128_000,
+                pricing_tier=PricingTier.STANDARD,
+            ),
+        ),
         "glm-5.1": ModelInfo(
             capability=ProviderCapability(
                 chat=True,
