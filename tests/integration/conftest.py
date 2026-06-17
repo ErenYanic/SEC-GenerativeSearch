@@ -103,7 +103,7 @@ class KeywordEmbedder(BaseEmbeddingProvider):
     provider_name = "keyword-test"
 
     def __init__(self) -> None:
-        super().__init__(api_key="local")
+        super().__init__(api_key="local")  # pragma: allowlist secret
         self.embed_calls = 0
 
     def validate_key(self) -> bool:  # pragma: no cover - never exercised
