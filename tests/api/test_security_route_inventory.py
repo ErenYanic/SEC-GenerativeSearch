@@ -143,6 +143,13 @@ class TestRouteAuthTierInventory:
     an admin route returns ``403``, neither of which touches handler code
     or ``app.state``. That keeps the sweep robust (no 500s from the test's
     minimal app stubs) and lets it use the standard test client directly.
+
+    Route ENUMERATION reads the raw ``api_app`` FastAPI instance, never
+    ``TestClient.app`` — the latter does not reliably surface every router
+    under CI's newer Starlette/httpx, dropping the open routers from its
+    ``.routes`` view. HTTP REQUESTS go through ``sweep_client`` (both keys
+    configured). The two fixtures build the same route table, so mixing
+    them is sound.
     """
 
     @pytest.fixture
@@ -161,7 +168,7 @@ class TestRouteAuthTierInventory:
                     keys.add((method, r.path))
         return keys
 
-    def test_no_unlisted_route_is_unauthenticated(self, sweep_client) -> None:
+    def test_no_unlisted_route_is_unauthenticated(self, api_app, sweep_client) -> None:
         """No ``/api`` route outside the reviewed open allow-list is anonymous.
 
         For every route NOT on the allow-list, a no-header request MUST be
@@ -173,7 +180,7 @@ class TestRouteAuthTierInventory:
         this loop reaches route logic.)
         """
         offenders: dict[tuple[str, str], int] = {}
-        for method, path in self._route_keys(sweep_client.app):
+        for method, path in self._route_keys(api_app):
             if (method, path) in _EXPECTED_OPEN_ROUTES:
                 continue
             status = sweep_client.request(method, _concrete_path(path)).status_code
@@ -184,11 +191,23 @@ class TestRouteAuthTierInventory:
             f"do not require an API key (no-header status != 401): {offenders}"
         )
 
-    def test_open_allowlist_has_no_stale_entries(self, sweep_client) -> None:
-        """The open allow-list never references a route that no longer exists."""
-        registered = self._route_keys(sweep_client.app)
-        stale = set(_EXPECTED_OPEN_ROUTES) - registered
-        assert not stale, f"open allow-list references unregistered routes: {stale}"
+    def test_open_allowlist_routes_are_registered(self, sweep_client) -> None:
+        """Each open allow-list entry maps to a live route (no typos / removals).
+
+        Checked over HTTP rather than by enumerating ``.routes`` — a missing
+        or mistyped entry resolves to ``404`` (unknown path) or ``405``
+        (wrong method); a real route returns anything else (200/201/401/422
+        …). This keeps the hygiene check independent of route-enumeration
+        quirks across client/Starlette versions.
+        """
+        missing: dict[tuple[str, str], int] = {}
+        for method, path in _EXPECTED_OPEN_ROUTES:
+            status = sweep_client.request(method, _concrete_path(path)).status_code
+            if status in {404, 405}:
+                missing[(method, path)] = status
+        assert not missing, (
+            f"open allow-list entries that resolve to no live route (404/405): {missing}"
+        )
 
     def test_known_destructive_routes_are_admin_tier(self, sweep_client) -> None:
         """Each reviewed destructive route sits behind the admin gate.
