@@ -34,12 +34,18 @@ import pytest
 from starlette.routing import Route
 
 # Auth dependencies are matched by callable ``__name__``, never by object
-# identity. Identity is brittle here: under the full-suite import graph the
-# app's routes can capture a different module instance of
-# ``api.dependencies`` than this test module imports, so ``dep.call is
-# verify_admin_key`` silently goes False and every admin route misclassifies
-# as un-gated. The function names are unique and stable, so name matching is
-# both robust and equally precise.
+# identity (identity diverges under the full-suite import graph). The names
+# are unique and stable.
+#
+# We read the gates from TWO sources and union them, because FastAPI moved
+# where router-level ``dependencies=[...]`` surface between versions:
+#   - ``route.dependencies`` — the raw declared ``Depends`` list (route +
+#     router level). Populated on every version we target.
+#   - ``route.dependant.dependencies`` — the solved dependant tree. On the
+#     local pin (fastapi 0.135.3) the router-level gates are *also* merged
+#     here; on newer FastAPI they are NOT, so reading only this attribute
+#     misclassified every admin route as un-gated in CI.
+# Reading both makes the sweep version-robust.
 _API_KEY_DEP = "verify_api_key"  # pragma: allowlist secret
 _ADMIN_KEY_DEP = "verify_admin_key"
 
@@ -94,20 +100,30 @@ _EXPECTED_ADMIN_ROUTES: frozenset[tuple[str, str]] = frozenset(
 )
 
 
-def _ordered_dependency_call_names(route: Route) -> list[str]:
-    """Flatten a route's dependency tree into a pre-order list of call names.
+def _declared_dependency_names(route: Route) -> list[str]:
+    """Gate names from the route's raw declared ``Depends`` list, in order.
 
-    The order matters: ``admin_route_dependencies()`` returns
-    ``[Depends(verify_api_key), Depends(verify_admin_key)]`` in that
-    order, so ``verify_api_key`` must appear *before* ``verify_admin_key``
-    in the flattened sequence. Reversed order would make an
-    ``X-Admin-Key``-only request surface ``403`` rather than ``401``.
+    This is the canonical, version-stable home for router-level and
+    route-level ``dependencies=[...]``. ``admin_route_dependencies()``
+    returns ``[Depends(verify_api_key), Depends(verify_admin_key)]`` in
+    that order, so ``verify_api_key`` lands before ``verify_admin_key`` —
+    reversed order would make an ``X-Admin-Key``-only request surface
+    ``403`` rather than ``401``.
     """
+    names: list[str] = []
+    for dep in getattr(route, "dependencies", None) or []:
+        fn = getattr(dep, "dependency", None)
+        if fn is not None:
+            names.append(getattr(fn, "__name__", ""))
+    return names
+
+
+def _solved_dependency_names(route: Route) -> list[str]:
+    """Gate names from the solved dependant tree (pre-order), as a fallback."""
     names: list[str] = []
 
     def _walk(deps) -> None:
         for dep in deps:
-            # Pre-order: record this dependency's call before recursing.
             if dep.call is not None:
                 names.append(getattr(dep.call, "__name__", ""))
             _walk(dep.dependencies)
@@ -118,8 +134,25 @@ def _ordered_dependency_call_names(route: Route) -> list[str]:
     return names
 
 
+def _ordered_gate_names(route: Route) -> list[str]:
+    """Ordered auth-gate names, robust to where FastAPI surfaces them.
+
+    Prefer whichever source actually carries a gate (both list them in
+    api-before-admin order); fall back to the union so classification
+    still sees a gate even on a FastAPI version that populates only one
+    of the two attributes.
+    """
+    declared = _declared_dependency_names(route)
+    if _API_KEY_DEP in declared or _ADMIN_KEY_DEP in declared:
+        return declared
+    solved = _solved_dependency_names(route)
+    if _API_KEY_DEP in solved or _ADMIN_KEY_DEP in solved:
+        return solved
+    return declared + solved
+
+
 def _classify(route: Route) -> str:
-    names = _ordered_dependency_call_names(route)
+    names = _ordered_gate_names(route)
     if _ADMIN_KEY_DEP in names:
         return "ADMIN"
     if _API_KEY_DEP in names:
@@ -188,7 +221,7 @@ class TestRouteAuthTierInventory:
         assert len(admin_routes) >= len(_EXPECTED_ADMIN_ROUTES)
 
         for route in admin_routes:
-            names = _ordered_dependency_call_names(route)
+            names = _ordered_gate_names(route)
             assert _API_KEY_DEP in names, (
                 f"{route.path} is admin-gated but missing verify_api_key — "
                 "an X-Admin-Key-only request would 403 instead of 401, and "
