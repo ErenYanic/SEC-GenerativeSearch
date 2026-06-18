@@ -33,7 +33,15 @@ from __future__ import annotations
 import pytest
 from starlette.routing import Route
 
-from sec_generative_search.api.dependencies import verify_admin_key, verify_api_key
+# Auth dependencies are matched by callable ``__name__``, never by object
+# identity. Identity is brittle here: under the full-suite import graph the
+# app's routes can capture a different module instance of
+# ``api.dependencies`` than this test module imports, so ``dep.call is
+# verify_admin_key`` silently goes False and every admin route misclassifies
+# as un-gated. The function names are unique and stable, so name matching is
+# both robust and equally precise.
+_API_KEY_DEP = "verify_api_key"
+_ADMIN_KEY_DEP = "verify_admin_key"
 
 # ---------------------------------------------------------------------------
 # Route-tier introspection
@@ -86,8 +94,8 @@ _EXPECTED_ADMIN_ROUTES: frozenset[tuple[str, str]] = frozenset(
 )
 
 
-def _ordered_dependency_calls(route: Route) -> list[object]:
-    """Flatten a route's dependency tree into pre-order call sequence.
+def _ordered_dependency_call_names(route: Route) -> list[str]:
+    """Flatten a route's dependency tree into a pre-order list of call names.
 
     The order matters: ``admin_route_dependencies()`` returns
     ``[Depends(verify_api_key), Depends(verify_admin_key)]`` in that
@@ -95,26 +103,26 @@ def _ordered_dependency_calls(route: Route) -> list[object]:
     in the flattened sequence. Reversed order would make an
     ``X-Admin-Key``-only request surface ``403`` rather than ``401``.
     """
-    calls: list[object] = []
+    names: list[str] = []
 
     def _walk(deps) -> None:
         for dep in deps:
             # Pre-order: record this dependency's call before recursing.
             if dep.call is not None:
-                calls.append(dep.call)
+                names.append(getattr(dep.call, "__name__", ""))
             _walk(dep.dependencies)
 
     dependant = getattr(route, "dependant", None)
     if dependant is not None:
         _walk(dependant.dependencies)
-    return calls
+    return names
 
 
 def _classify(route: Route) -> str:
-    calls = _ordered_dependency_calls(route)
-    if verify_admin_key in calls:
+    names = _ordered_dependency_call_names(route)
+    if _ADMIN_KEY_DEP in names:
         return "ADMIN"
-    if verify_api_key in calls:
+    if _API_KEY_DEP in names:
         return "API"
     return "OPEN"
 
@@ -180,13 +188,13 @@ class TestRouteAuthTierInventory:
         assert len(admin_routes) >= len(_EXPECTED_ADMIN_ROUTES)
 
         for route in admin_routes:
-            calls = _ordered_dependency_calls(route)
-            assert verify_api_key in calls, (
+            names = _ordered_dependency_call_names(route)
+            assert _API_KEY_DEP in names, (
                 f"{route.path} is admin-gated but missing verify_api_key — "
                 "an X-Admin-Key-only request would 403 instead of 401, and "
                 "an unauthenticated request would skip the read tier."
             )
-            assert calls.index(verify_api_key) < calls.index(verify_admin_key), (
+            assert names.index(_API_KEY_DEP) < names.index(_ADMIN_KEY_DEP), (
                 f"{route.path} runs verify_admin_key before verify_api_key; "
                 "use admin_route_dependencies() so the API tier is checked first."
             )
