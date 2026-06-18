@@ -21,36 +21,26 @@ by catching a future route wired the wrong way:
     3. A known destructive route silently down-tiered out of the admin
        gate.
 
-The sweep introspects each route's flattened FastAPI dependency tree
-rather than re-encoding the route table by hand, so it tracks the app as
-it grows. A small live-behaviour probe (:class:`TestAdminKeyOnlyProbe`)
-mirrors the structural assertion against the wire so the two cannot
-drift.
+The sweep enumerates the live app's registered routes and classifies each
+one's auth tier by **observable HTTP behaviour**, not by introspecting
+FastAPI's internal dependency structures — the latter is not stable across
+FastAPI versions (where router-level ``dependencies=[...]`` surface moved
+between releases) and silently misclassified every route under CI's newer
+pin. Behaviour is the ground truth and what actually protects the route.
+A small probe (:class:`TestAdminKeyOnlyProbe`) cross-checks the same
+invariant on a curated set of routes.
 """
 
 from __future__ import annotations
 
+import re
+
 import pytest
+from fastapi.testclient import TestClient
 from starlette.routing import Route
 
-# Auth dependencies are matched by callable ``__name__``, never by object
-# identity (identity diverges under the full-suite import graph). The names
-# are unique and stable.
-#
-# We read the gates from TWO sources and union them, because FastAPI moved
-# where router-level ``dependencies=[...]`` surface between versions:
-#   - ``route.dependencies`` — the raw declared ``Depends`` list (route +
-#     router level). Populated on every version we target.
-#   - ``route.dependant.dependencies`` — the solved dependant tree. On the
-#     local pin (fastapi 0.135.3) the router-level gates are *also* merged
-#     here; on newer FastAPI they are NOT, so reading only this attribute
-#     misclassified every admin route as un-gated in CI.
-# Reading both makes the sweep version-robust.
-_API_KEY_DEP = "verify_api_key"  # pragma: allowlist secret
-_ADMIN_KEY_DEP = "verify_admin_key"
-
 # ---------------------------------------------------------------------------
-# Route-tier introspection
+# Route-tier inventory
 # ---------------------------------------------------------------------------
 
 # The complete set of ``/api`` routes that are deliberately reachable
@@ -100,64 +90,23 @@ _EXPECTED_ADMIN_ROUTES: frozenset[tuple[str, str]] = frozenset(
 )
 
 
-def _declared_dependency_names(route: Route) -> list[str]:
-    """Gate names from the route's raw declared ``Depends`` list, in order.
+# Generous per-category rate-limit ceilings so the multi-route sweep (≈2
+# requests per route) never trips a limiter and turns into a flaky 429.
+_RELAXED_RATE_LIMITS = {
+    "API_RATE_LIMIT_SEARCH": "100000",
+    "API_RATE_LIMIT_INGEST": "100000",
+    "API_RATE_LIMIT_DELETE": "100000",
+    "API_RATE_LIMIT_GENERAL": "100000",
+    "API_RATE_LIMIT_RAG": "100000",
+    "API_RATE_LIMIT_VALIDATE": "100000",
+    "API_RATE_LIMIT_VALIDATE_PER_SESSION": "100000",
+    "API_RATE_LIMIT_SESSION": "100000",
+    "API_RATE_LIMIT_LOGIN": "100000",
+    "API_RATE_LIMIT_LOGIN_PER_USERNAME": "100000",
+}
 
-    This is the canonical, version-stable home for router-level and
-    route-level ``dependencies=[...]``. ``admin_route_dependencies()``
-    returns ``[Depends(verify_api_key), Depends(verify_admin_key)]`` in
-    that order, so ``verify_api_key`` lands before ``verify_admin_key`` —
-    reversed order would make an ``X-Admin-Key``-only request surface
-    ``403`` rather than ``401``.
-    """
-    names: list[str] = []
-    for dep in getattr(route, "dependencies", None) or []:
-        fn = getattr(dep, "dependency", None)
-        if fn is not None:
-            names.append(getattr(fn, "__name__", ""))
-    return names
-
-
-def _solved_dependency_names(route: Route) -> list[str]:
-    """Gate names from the solved dependant tree (pre-order), as a fallback."""
-    names: list[str] = []
-
-    def _walk(deps) -> None:
-        for dep in deps:
-            if dep.call is not None:
-                names.append(getattr(dep.call, "__name__", ""))
-            _walk(dep.dependencies)
-
-    dependant = getattr(route, "dependant", None)
-    if dependant is not None:
-        _walk(dependant.dependencies)
-    return names
-
-
-def _ordered_gate_names(route: Route) -> list[str]:
-    """Ordered auth-gate names, robust to where FastAPI surfaces them.
-
-    Prefer whichever source actually carries a gate (both list them in
-    api-before-admin order); fall back to the union so classification
-    still sees a gate even on a FastAPI version that populates only one
-    of the two attributes.
-    """
-    declared = _declared_dependency_names(route)
-    if _API_KEY_DEP in declared or _ADMIN_KEY_DEP in declared:
-        return declared
-    solved = _solved_dependency_names(route)
-    if _API_KEY_DEP in solved or _ADMIN_KEY_DEP in solved:
-        return solved
-    return declared + solved
-
-
-def _classify(route: Route) -> str:
-    names = _ordered_gate_names(route)
-    if _ADMIN_KEY_DEP in names:
-        return "ADMIN"
-    if _API_KEY_DEP in names:
-        return "API"
-    return "OPEN"
+_SWEEP_API_KEY = "sweep-shared-api-key"  # pragma: allowlist secret
+_SWEEP_ADMIN_KEY = "sweep-shared-admin-key"  # pragma: allowlist secret
 
 
 def _api_routes(app) -> list[Route]:
@@ -166,8 +115,44 @@ def _api_routes(app) -> list[Route]:
     ]
 
 
+def _concrete_path(path: str) -> str:
+    """Fill path params with a benign placeholder.
+
+    The auth gate is a dependency that runs *before* path-parameter
+    validation, so the placeholder value is irrelevant to classification —
+    a gated route rejects with 401/403 long before the segment is parsed.
+    """
+    return re.sub(r"\{[^}]+\}", "x", path)
+
+
+def _classify_route(client: TestClient, method: str, path: str) -> str:
+    """Classify a route's auth tier purely by observable HTTP behaviour.
+
+    Dual-request gate detector. With both keys configured:
+
+    - ``no-header`` ≠ 401  → the route admits anonymous callers → ``OPEN``.
+    - ``no-header`` == 401 **and** ``api-key-only`` == 401 → the 401 came
+      from route-internal logic (e.g. a missing session cookie), not the
+      API-key gate → ``OPEN``.  This is what keeps the session-cookie
+      routes (which 401 without a cookie) correctly classified.
+    - ``no-header`` == 401 **and** ``api-key-only`` == 403 → an admin gate
+      fires once the read tier is cleared → ``ADMIN``.
+    - ``no-header`` == 401 **and** ``api-key-only`` anything else → ``API``.
+    """
+    cp = _concrete_path(path)
+    no_header = client.request(method, cp).status_code
+    if no_header != 401:
+        return "OPEN"
+    api_only = client.request(method, cp, headers={"X-API-Key": _SWEEP_API_KEY}).status_code
+    if api_only == 401:
+        return "OPEN"
+    if api_only == 403:
+        return "ADMIN"
+    return "API"
+
+
 # ---------------------------------------------------------------------------
-# 1. Auth-tier inventory
+# 1. Auth-tier inventory — behavioural
 # ---------------------------------------------------------------------------
 
 
@@ -175,19 +160,44 @@ def _api_routes(app) -> list[Route]:
 class TestRouteAuthTierInventory:
     """Every ``/api`` route sits in its intended auth tier.
 
-    These assertions are introspective (no HTTP), so they stay valid
-    regardless of body shape or settings and fire the instant a new route
-    lands in the wrong tier.
+    Classification is by HTTP behaviour against the live app with both
+    ``API_KEY`` and ``API_ADMIN_KEY`` configured, so the sweep tracks the
+    app as it grows and is immune to FastAPI-internal restructuring.
     """
 
-    def test_unauthenticated_route_set_is_exactly_the_allowlist(self, api_app) -> None:
-        routes = _api_routes(api_app)
+    @pytest.fixture
+    def sweep_client(self, api_client_factory) -> TestClient:
+        # ``raise_server_exceptions=False`` so an api-key-only request that
+        # clears the gate and then trips on the test's minimal app.state
+        # surfaces as a 500 response (→ classified API) rather than blowing
+        # up the test. The gate statuses (401/403) fire before any handler
+        # body runs, so they are unaffected.
+        configured = api_client_factory(
+            API_KEY=_SWEEP_API_KEY,
+            API_ADMIN_KEY=_SWEEP_ADMIN_KEY,
+            **_RELAXED_RATE_LIMITS,
+        )
+        return TestClient(
+            configured.app,
+            base_url="https://testserver",
+            raise_server_exceptions=False,
+        )
+
+    def _route_keys(self, app) -> set[tuple[str, str]]:
+        keys: set[tuple[str, str]] = set()
+        for r in _api_routes(app):
+            for method in r.methods or set():
+                if method not in {"HEAD", "OPTIONS"}:
+                    keys.add((method, r.path))
+        return keys
+
+    def test_unauthenticated_route_set_is_exactly_the_allowlist(
+        self, sweep_client: TestClient
+    ) -> None:
         open_routes = {
-            (method, r.path)
-            for r in routes
-            if _classify(r) == "OPEN"
-            for method in (r.methods or set())
-            if method not in {"HEAD", "OPTIONS"}
+            (method, path)
+            for (method, path) in self._route_keys(sweep_client.app)
+            if _classify_route(sweep_client, method, path) == "OPEN"
         }
         # Exact equality both ways catches both extra and missing routes.
         assert open_routes == set(_EXPECTED_OPEN_ROUTES), (
@@ -196,40 +206,30 @@ class TestRouteAuthTierInventory:
             f"\n  no-longer-open : {set(_EXPECTED_OPEN_ROUTES) - open_routes}"
         )
 
-    def test_known_destructive_routes_are_admin_tier(self, api_app) -> None:
-        routes = _api_routes(api_app)
-        admin_routes = {
-            (method, r.path)
-            for r in routes
-            if _classify(r) == "ADMIN"
-            for method in (r.methods or set())
-            if method not in {"HEAD", "OPTIONS"}
+    def test_known_destructive_routes_are_admin_tier(self, sweep_client: TestClient) -> None:
+        misgated = {
+            (method, path)
+            for (method, path) in _EXPECTED_ADMIN_ROUTES
+            if _classify_route(sweep_client, method, path) != "ADMIN"
         }
-        missing = set(_EXPECTED_ADMIN_ROUTES) - admin_routes
-        assert not missing, f"destructive routes down-tiered out of the admin gate: {missing}"
+        assert not misgated, f"destructive routes not behind the admin gate: {misgated}"
 
-    def test_every_admin_route_runs_api_key_before_admin_key(self, api_app) -> None:
-        """Admin routes must check the API key before the admin key.
+    def test_every_admin_route_runs_api_key_before_admin_key(
+        self, sweep_client: TestClient
+    ) -> None:
+        """The footgun guard, behaviourally.
 
-        Asserts for *every* admin-tier route that ``verify_api_key`` is
-        present and ordered ahead of ``verify_admin_key`` — i.e. the
-        route went through ``admin_route_dependencies()`` rather than
-        wiring ``verify_admin_key`` alone.
+        For an admin route, a no-header request must surface ``401`` (the
+        API tier runs first), never ``403``. The status flips to ``403``
+        iff the admin gate is wired ahead of — or instead of — the
+        API-key gate, which is exactly the "never wire ``verify_admin_key``
+        alone" footgun.
         """
-        admin_routes = [r for r in _api_routes(api_app) if _classify(r) == "ADMIN"]
-        # Keep the sweep non-vacuous.
-        assert len(admin_routes) >= len(_EXPECTED_ADMIN_ROUTES)
-
-        for route in admin_routes:
-            names = _ordered_gate_names(route)
-            assert _API_KEY_DEP in names, (
-                f"{route.path} is admin-gated but missing verify_api_key — "
-                "an X-Admin-Key-only request would 403 instead of 401, and "
-                "an unauthenticated request would skip the read tier."
-            )
-            assert names.index(_API_KEY_DEP) < names.index(_ADMIN_KEY_DEP), (
-                f"{route.path} runs verify_admin_key before verify_api_key; "
-                "use admin_route_dependencies() so the API tier is checked first."
+        for method, path in _EXPECTED_ADMIN_ROUTES:
+            status = sweep_client.request(method, _concrete_path(path)).status_code
+            assert status == 401, (
+                f"{method} {path}: no-header request must surface 401 (API tier "
+                f"first), got {status} — admin gate wired ahead of the API gate?"
             )
 
 
