@@ -116,7 +116,7 @@ describe("ProviderKeyRow — validation verdict", () => {
     expect(call[0]).not.toContain("sk-storedkey12345");
     expect(JSON.parse(call[1].body as string)).toMatchObject({
       provider: "openai",
-      api_key: "sk-storedkey12345",
+      api_key: "sk-storedkey12345", // pragma: allowlist secret
       surface: "llm",
     });
   });
