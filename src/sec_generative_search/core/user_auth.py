@@ -132,7 +132,7 @@ def _require_pepper(pepper: str | None, *, caller: str) -> bytes:
     if not pepper:
         raise ConfigurationError(
             f"{caller} requires API_AUTH_PEPPER (or API_AUTH_PEPPER_FILE) to "
-            "be configured. The Phase-13.11 user-tier auth surface cannot "
+            "be configured. The user-tier auth surface cannot "
             "compute auth_hash / decoy salts / enrolment tokens without a "
             "deployment-wide pepper."
         )

@@ -1,4 +1,4 @@
-"""Security tests for the Phase-13.11 user-tier auth surface.
+"""Security tests for the user-tier auth surface.
 
 Coverage:
 

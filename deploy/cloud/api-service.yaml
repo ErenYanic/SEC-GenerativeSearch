@@ -11,10 +11,10 @@
 # Substitution placeholders (NEVER commit a real value):
 #   PROJECT_ID  — GCP project id
 #   REGION      — Cloud Run + Artifact Registry region (e.g. us-central1)
-#   the @sha256 image digest is stamped by the Cloud Build step (Phase 15.7).
+#   the @sha256 image digest is stamped by the Cloud Build step.
 #
 # Security / correctness posture (statically enforced by tests/ops/
-# test_deployment_artifacts.py — the GCP half of the Phase 15.11 lockers):
+# test_deployment_artifacts.py — the GCP deployment lockers):
 #   - SINGLE INSTANCE. maxScale=1 AND minScale=1 AND cpu-throttling=false: the
 #     in-process TaskManager mints ingest task IDs in-process and runs the
 #     workers as daemon threads. A second instance orphans task IDs (task-404s);

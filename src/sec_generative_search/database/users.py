@@ -164,7 +164,7 @@ class UserStore:
         if not registry.encrypted:
             raise ConfigurationError(
                 "UserStore refuses to operate without SQLCipher.  The "
-                "Phase-13.11 users table holds auth_hash, ciphertext_vault, "
+                "users table holds auth_hash, ciphertext_vault, "
                 "and salts — running it on a plaintext SQLite file would "
                 "defeat the at-rest encryption story.  Configure "
                 "DB_ENCRYPTION_KEY (or DB_ENCRYPTION_KEY_FILE)."
@@ -188,7 +188,7 @@ class UserStore:
             raise ConfigurationError(
                 "UserStore: the users table is non-empty but "
                 "API_AUTH_PEPPER (or API_AUTH_PEPPER_FILE) is unset.  "
-                "The Phase-13.11 auth surface cannot validate logins "
+                "The auth surface cannot validate logins "
                 "or mint enrolment tokens without the pepper.  Configure "
                 "the pepper before restarting the API."
             )

@@ -134,9 +134,8 @@ def _print_error(
     :func:`error_envelope` instead of the Rich text.  ``error_code``
     is the machine-readable ``error`` slug (mirrors the API envelope
     discipline; defaults to a slugified ``label``).  ``provider set``
-    deliberately keeps ``output`` defaulted to TEXT because Phase
-    12.9 scopes the JSON flag to the read paths (``list`` /
-    ``validate``).
+    deliberately keeps ``output`` defaulted to TEXT because the JSON
+    flag is scoped to the read paths (``list`` / ``validate``).
     """
     if is_json(output):
         slug = error_code or label.lower().replace(" ", "_")

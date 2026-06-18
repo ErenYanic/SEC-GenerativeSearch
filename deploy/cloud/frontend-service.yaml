@@ -8,7 +8,7 @@
 #   gcloud run services replace deploy/cloud/frontend-service.yaml --region REGION
 #
 # Security / correctness posture (statically enforced by tests/ops/
-# test_deployment_artifacts.py — the GCP half of the Phase 15.11 lockers):
+# test_deployment_artifacts.py — the GCP deployment lockers):
 #   - KEYLESS. The image carries NO admin / API key. The operator/admin keys
 #     live only in the Next server-side admin-session Map, minted at run time via
 #     WelcomeGate. The ONLY runtime env knob is SEC_API_BASE_URL (server-side) —

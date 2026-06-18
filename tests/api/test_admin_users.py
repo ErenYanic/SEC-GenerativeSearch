@@ -1,4 +1,4 @@
-"""Security tests for the Phase-13.11 admin user-management surface.
+"""Security tests for the admin user-management surface.
 
 Coverage:
 

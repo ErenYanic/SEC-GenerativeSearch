@@ -1,7 +1,7 @@
 """Security tests for :mod:`sec_generative_search.core.user_auth`.
 
-The module is the dependency-free seam behind the Phase-13.11 user-tier
-auth surface. Every test in this file is tagged ``@pytest.mark.security``
+The module is the dependency-free seam behind the user-tier auth
+surface. Every test in this file is tagged ``@pytest.mark.security``
 because every primitive it exercises is load-bearing on the
 authentication contract.
 """

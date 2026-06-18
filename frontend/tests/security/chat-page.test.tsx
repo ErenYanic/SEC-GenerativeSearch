@@ -1,7 +1,7 @@
 // Chat page (`src/app/(app)/chat/page.tsx`).
 //
 // Mounts the multi-turn chat surface in isolation and asserts the
-// Phase-13.5 contract:
+// contract:
 //
 //   - Each user message runs `POST /api/admin/rag/plan` then
 //     `POST /api/admin/rag/stream`; the raw query travels in the body

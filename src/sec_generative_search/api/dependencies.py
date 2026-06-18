@@ -336,7 +336,7 @@ def get_task_manager(request: Request) -> TaskManager:
 
 
 def get_user_store(request: Request):
-    """Return the Phase-13.11 user store, or ``None`` when not configured.
+    """Return the user store, or ``None`` when not configured.
 
     The user store is gated on SQLCipher + the pepper; deployments
     running a pre-13.11 baseline (no users enrolled, no pepper

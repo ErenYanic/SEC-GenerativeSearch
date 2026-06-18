@@ -6,8 +6,7 @@
 # reset path PRECISELY because the API blocks `clear` under API_DEMO_MODE
 # (`DELETE /api/filings/?confirm=true` → 403 demo_mode), while the operator-only
 # CLI deliberately does NOT honour demo mode — so `sec-rag manage clear` is the
-# one surface that can reset a demo. (See AGENT.md §CLI: "CLI does NOT honour
-# API_DEMO_MODE".)
+# one surface that can reset a demo.
 #
 # Apply, then schedule:
 #   gcloud run jobs replace deploy/cloud/demo-reset-job.yaml --region REGION
@@ -18,7 +17,7 @@
 #     --oauth-service-account-email="sec-gs-scheduler-sa@PROJECT_ID.iam.gserviceaccount.com"
 #
 # Security / correctness posture (statically enforced by tests/ops/
-# test_deployment_artifacts.py — the GCP half of the Phase 15.11 lockers):
+# test_deployment_artifacts.py — the GCP deployment lockers):
 #   - It is a Job (runs to completion per trigger), never a long-lived Service.
 #   - NO BAKED SECRET. The SQLCipher key arrives from Secret Manager via
 #     `valueFrom.secretKeyRef`; the cleartext is never in the manifest or image.

@@ -300,7 +300,7 @@ class CitationError(SECGenerativeSearchError):
 
 class AuthError(SECGenerativeSearchError):
     """
-    Raised when a Phase-13.11 user-tier authentication operation fails.
+    Raised when a user-tier authentication operation fails.
 
     Wire-shape callers (``api/routes/auth.py``) intentionally collapse
     every login-side failure (unknown user, wrong proof, locked account)
