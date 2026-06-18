@@ -40,7 +40,7 @@ from starlette.routing import Route
 # verify_admin_key`` silently goes False and every admin route misclassifies
 # as un-gated. The function names are unique and stable, so name matching is
 # both robust and equally precise.
-_API_KEY_DEP = "verify_api_key"
+_API_KEY_DEP = "verify_api_key"  # pragma: allowlist secret
 _ADMIN_KEY_DEP = "verify_admin_key"
 
 # ---------------------------------------------------------------------------
