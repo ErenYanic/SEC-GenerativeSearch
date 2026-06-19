@@ -171,11 +171,16 @@ addopts = [
     "--strict-markers",
     "--strict-config",
     "-q",           # quiet by default; CI can override with -v
+    # Load / throughput tests run many iterations and concurrent fan-outs;
+    # they are opt-in.  A later ``-m`` on the command line overrides this
+    # (pytest keeps the last ``-m``), so ``pytest -m load`` runs only them.
+    "-m", "not load",
 ]
 markers = [
     "slow: marks tests that are slow (deselect with '-m \"not slow\"')",
     "integration: marks integration tests requiring external services",
     "security: marks security-focused test cases",
+    "load: marks load / throughput tests (opt-in; deselected by default, run with '-m load')",
 ]
 
 # ---------------------------------------------------------------------------
