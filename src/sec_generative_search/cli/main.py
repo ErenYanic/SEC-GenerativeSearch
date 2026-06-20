@@ -16,6 +16,7 @@ from rich.console import Console
 from rich.markup import escape
 
 from sec_generative_search.cli.backup import backup, restore
+from sec_generative_search.cli.evaluate import evaluate_app
 from sec_generative_search.cli.evict import evict
 from sec_generative_search.cli.ingest import ingest_app
 from sec_generative_search.cli.manage import manage_app
@@ -147,6 +148,11 @@ app.add_typer(rag_app, name="rag")
 # ``provider`` is a sub-Typer (``provider list`` / ``validate`` / ``set``).
 # Operator-scope only — admin-default credentials in the encrypted store.
 app.add_typer(provider_app, name="provider")
+
+# ``evaluate`` is a sub-Typer (``evaluate retrieval``).  Offline harness
+# that runs evaluation cases against the live ChromaDB collection and
+# reports precision@k / recall@k.
+app.add_typer(evaluate_app, name="evaluate")
 
 
 def main() -> None:
