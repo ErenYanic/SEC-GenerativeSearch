@@ -10,7 +10,7 @@ A security-first Retrieval-Augmented Generation (RAG) system for SEC filings (10
 - **User-choice LLM provider** — bring your own key for OpenAI, Anthropic, Gemini, Mistral, DeepSeek, Grok, Qwen, Kimi, MiniMax, MiMo, Z.ai, or OpenRouter.
 - **Privacy-preserving by default** — the default embedder (`google/embeddinggemma-300m`) runs on-device; no query or filing chunk leaves your machine during retrieval.
 - **Three deployment profiles** — Local (single user), Team (shared server), Cloud (GCP Cloud Run, internet-facing).
-- **Full web UI** — Next.js 16 + React 19 SPA with per-request CSP nonce, Trusted Types, and a per-user encrypted vault (Pattern D: server never sees your password or KEK).
+- **Full web UI** — Next.js 16 + React 19 SPA with per-request CSP nonce, Trusted Types, and a per-user encrypted vault (server never sees your password or KEK).
 - **Security-first architecture** — two-tier API key, per-session EDGAR identity, SQLCipher at rest, sliding-TTL rate limits, and 2 300+ tests with a dedicated `@pytest.mark.security` suite.
 
 ---
@@ -198,7 +198,7 @@ Provider keys are never stored in URL params or shell flags. Set them via enviro
 | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
 | Two-tier API key (`API_KEY` + `API_ADMIN_KEY`)                           | Destructive routes require both keys; a leaked read key cannot probe the delete surface  |
 | SQLCipher at rest (`[encryption]` extra)                                 | Database file theft without the key yields no usable data                                |
-| Pattern D per-user vault (PBKDF2 → HKDF → AES-GCM)                       | Server never holds your password or KEK; provider keys are encrypted client-side         |
+| Per-user vault (PBKDF2 → HKDF → AES-GCM)                                 | Server never holds your password or KEK; provider keys are encrypted client-side         |
 | `sanitize_retrieved_context()` + `<UNTRUSTED_FILING_CONTEXT>` delimiters | Defence-in-depth against prompt injection via filing content                             |
 | Per-request CSP nonce + Trusted Types                                    | XSS-to-key-exfiltration; `localStorage`/`sessionStorage` banned project-wide             |
 | `LOG_REDACT_QUERIES=true`                                                | Query text and tickers hashed before emission                                            |
