@@ -26,6 +26,7 @@ or a network, so the lockers run in the normal pytest job.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,7 @@ _CLOUD_JOB = _REPO_ROOT / "deploy" / "cloud" / "demo-reset-job.yaml"
 _DEPLOY_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "deploy.yml"
 _CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
 _CLOUDBUILD = _REPO_ROOT / "deploy" / "cloudbuild.yaml"
+_FRONTEND_PACKAGE_JSON = _REPO_ROOT / "frontend" / "package.json"
 
 _DIGEST_RE = re.compile(r"@sha256:[0-9a-f]{64}\b")
 _ARG_RE = re.compile(r"^ARG\s+([A-Za-z_][A-Za-z0-9_]*)=(.+)$")
@@ -1215,7 +1217,7 @@ def test_cloudbuild_bakes_no_secret() -> None:
 # `deploy.yml` already has its supply-chain posture locked above (SHA-pinned
 # Actions, digest-pinned deploy, command-injection guard). `ci.yml` carries the
 # *other* half of the supply chain — the dependency/secret scan gates and the
-# CPU-torch posture — yet, before this phase, only one ci.yml invariant was
+# CPU-torch posture — yet, before this check, only one ci.yml invariant was
 # pinned (`test_ci_workflow_stays_gcp_credential_free`). Several lockers above
 # claim to "mirror ci.yml" without a test that actually holds ci.yml to it.
 # These lockers close that gap and consolidate the CI supply-chain surface:
@@ -1290,3 +1292,130 @@ def test_ci_workflow_no_event_interpolation_in_run(ci_workflow: str) -> None:
             "ci.yml interpolates a `github.event.*` value directly into a `run:` "
             "shell — route it through an env var (command-injection guard)"
         )
+
+
+# ---------------------------------------------------------------------------
+# Core quality gates are wired as blocking CI checks
+#
+# The supply-chain *scan* gates (pip-audit / detect-secrets / pnpm audit) are
+# already pinned above. These comments pin the four core *quality* gates so
+# none can silently vanish from CI and let a regression merge:
+#
+#   - PRESENCE. Each gate is invoked as a real `run:` step in ci.yml (parsed
+#     from the workflow, not matched against a comment).
+#   - TOOL ANCHORING. The frontend `pnpm test` / `pnpm build` indirection is
+#     anchored to its actual tooling in frontend/package.json: `test` MUST run
+#     Vitest in non-watch mode (`vitest run` — a watch-mode invocation would
+#     hang CI and never gate), `build` MUST run `next build`.
+#   - BLOCKING. No job or step is marked `continue-on-error: true` (which turns
+#     a gate advisory), and the gates run on `pull_request` so they can be
+#     required status checks.
+#
+# All assertions are on the tracked workflow + package.json; no network, no
+# pnpm, no Docker daemon.
+# ---------------------------------------------------------------------------
+
+
+def _workflow_run_commands(workflow_text: str) -> list[str]:
+    """Every step's ``run:`` script across all jobs in a parsed workflow.
+
+    Captures both single-line (``run: ruff check .``) and block
+    (``run: |`` …) step bodies, which ``_run_block_bodies`` alone would miss.
+    """
+    workflow = yaml.safe_load(workflow_text)
+    commands: list[str] = []
+    for job in workflow.get("jobs", {}).values():
+        for step in job.get("steps", []):
+            run = step.get("run")
+            if isinstance(run, str):
+                commands.append(run)
+    return commands
+
+
+def _workflow_triggers(workflow_text: str) -> Any:
+    """The ``on:`` trigger mapping, tolerating YAML 1.1 ``on`` → ``True``."""
+    workflow = yaml.safe_load(workflow_text)
+    triggers = workflow.get(True)
+    if triggers is None:
+        triggers = workflow.get("on")
+    return triggers
+
+
+@pytest.fixture(scope="module")
+def frontend_package_scripts() -> dict[str, str]:
+    data = json.loads(_FRONTEND_PACKAGE_JSON.read_text(encoding="utf-8"))
+    return data.get("scripts", {})
+
+
+@pytest.mark.security
+def test_ci_workflow_carries_core_quality_gates(ci_workflow: str) -> None:
+    # The four quality gates are non-negotiable PR blockers; a silent
+    # removal would let a lint break, a failing test, a type/Vitest regression,
+    # or a broken production build merge to main.
+    commands = _workflow_run_commands(ci_workflow)
+
+    def _runs(predicate: str) -> bool:
+        return any(predicate in command for command in commands)
+
+    for predicate, gate in (
+        ("ruff check", "Ruff lint"),
+        ("ruff format --check", "Ruff format check"),
+        ("pytest", "pytest backend suite"),
+        ("pnpm test", "Vitest frontend suite (pnpm test)"),
+        ("pnpm build", "Next.js production build (pnpm build)"),
+    ):
+        assert _runs(predicate), (
+            f"ci.yml no longer invokes the {gate} gate (no `run:` step contains "
+            f"{predicate!r}) — the core quality gates are non-negotiable PR blockers"
+        )
+
+
+@pytest.mark.security
+def test_frontend_scripts_back_core_gates_with_vitest_and_next_build(
+    frontend_package_scripts: dict[str, str],
+) -> None:
+    # ci.yml gates the frontend through the `pnpm test` / `pnpm build` script
+    # indirection. Anchor that indirection to the expected tools so the
+    # gate cannot be hollowed out by rewriting the script body.
+    test_script = frontend_package_scripts.get("test", "")
+    assert "vitest" in test_script, (
+        "frontend `test` script no longer runs Vitest — `pnpm test` is the CI "
+        f"Vitest gate (got {test_script!r})"
+    )
+    assert "run" in test_script.split(), (
+        "frontend `test` script runs Vitest in watch mode — CI needs `vitest run` "
+        f"(non-watch); a watch invocation hangs the gate forever (got {test_script!r})"
+    )
+    build_script = frontend_package_scripts.get("build", "")
+    assert "next build" in build_script, (
+        "frontend `build` script no longer runs `next build` — `pnpm build` is the "
+        f"CI Next.js production-build gate (got {build_script!r})"
+    )
+
+
+@pytest.mark.security
+def test_ci_workflow_quality_gates_are_blocking(ci_workflow: str) -> None:
+    # A gate marked `continue-on-error: true` reports green even when it fails —
+    # advisory, not blocking. None of the CI jobs/steps may carry it.
+    workflow = yaml.safe_load(ci_workflow)
+    for job_name, job in workflow.get("jobs", {}).items():
+        assert job.get("continue-on-error") is not True, (
+            f"ci.yml job {job_name!r} is `continue-on-error: true` — a failing gate "
+            "would still report success; CI gates must block the PR"
+        )
+        for step in job.get("steps", []):
+            if step.get("continue-on-error") is True:
+                label = step.get("name") or step.get("uses") or step.get("run")
+                raise AssertionError(
+                    f"ci.yml job {job_name!r} step {label!r} is "
+                    "`continue-on-error: true` — a failing gate would still report "
+                    "success; CI gates must block the PR"
+                )
+
+    # The gates must run on pull_request so they can be required status checks
+    # on `main` — a push-only workflow never gates a PR before merge.
+    triggers = _workflow_triggers(ci_workflow)
+    assert isinstance(triggers, dict) and "pull_request" in triggers, (
+        "ci.yml does not trigger on `pull_request` — the gates cannot block a PR "
+        "before merge unless they run on pull_request events"
+    )
