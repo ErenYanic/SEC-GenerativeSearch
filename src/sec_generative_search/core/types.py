@@ -28,6 +28,7 @@ Design notes:
       encryption key — secrets never travel through the core type surface
 """
 
+import math
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import Enum, StrEnum
@@ -594,6 +595,51 @@ class PricingTier(Enum):
     UNKNOWN = "unknown"
 
 
+# Upper bounds (exclusive) of the blended USD-per-million-token cost for each
+# pricing tier, in ascending order.  A model whose blended cost falls below a
+# threshold lands in that tier; anything at or above the last bound is
+# ``PREMIUM``.  These bounds are the *only* place tier boundaries are defined —
+# :func:`derive_pricing_tier` is the single source of truth, so the per-model
+# catalogue stores exact cost and never a hand-assigned tier.
+_PRICING_TIER_BLENDED_BOUNDS: tuple[tuple[float, "PricingTier"], ...] = (
+    (1.0, PricingTier.LOW),
+    (4.0, PricingTier.STANDARD),
+    (15.0, PricingTier.HIGH),
+)
+
+
+def derive_pricing_tier(
+    input_cost_per_mtok: float | None,
+    output_cost_per_mtok: float | None,
+) -> PricingTier:
+    """Bucket a model into a coarse :class:`PricingTier` from exact cost.
+
+    Pure, total, and side-effect-free — the single sanctioned way to turn
+    per-million-token cost into a tier.  The blended cost is the mean of the
+    known input/output costs (a missing side is ignored, not treated as
+    zero), so the tier reflects whatever pricing the catalogue actually
+    carries.
+
+    Returns :attr:`PricingTier.UNKNOWN` when *both* costs are unknown
+    (``None``) — the correct answer for an arbitrary-slug provider
+    (OpenRouter) or an overlay model that arrived without pricing.  A blended
+    cost of exactly zero buckets to :attr:`PricingTier.FREE` (e.g. a local
+    LLM you host yourself).  Costs must be finite and non-negative; callers
+    validating untrusted input reject bad values before reaching here, and
+    :class:`ProviderCapability` re-checks at construction.
+    """
+    costs = [c for c in (input_cost_per_mtok, output_cost_per_mtok) if c is not None]
+    if not costs:
+        return PricingTier.UNKNOWN
+    blended = sum(costs) / len(costs)
+    if blended <= 0.0:
+        return PricingTier.FREE
+    for upper_bound, tier in _PRICING_TIER_BLENDED_BOUNDS:
+        if blended < upper_bound:
+            return tier
+    return PricingTier.PREMIUM
+
+
 @dataclass(frozen=True)
 class EmbedderStamp:
     """
@@ -931,7 +977,20 @@ class ProviderCapability:
             (prompt + response).  ``0`` means unknown.
         max_output_tokens: Maximum response tokens the model will emit.
             ``0`` means unknown.
+        input_cost_per_mtok: Exact prompt-token price in USD per million
+            input tokens.  ``None`` means unknown (arbitrary-slug providers
+            and overlay models that arrived without pricing).  This is the
+            single source of truth for cost — the pricing tier is *derived*
+            from it, never stored independently.
+        output_cost_per_mtok: Exact completion-token price in USD per million
+            output tokens.  ``None`` means unknown.
         pricing_tier: Coarse pricing bucket (see :class:`PricingTier`).
+            **Derived, not authoritative.** When either cost field is known
+            the tier is recomputed from cost at construction via
+            :func:`derive_pricing_tier`, overriding any value passed in — so
+            there is never a second pricing table to drift.  An explicitly
+            supplied tier survives only when *both* costs are unknown (e.g.
+            OpenRouter's ``UNKNOWN``).
     """
 
     chat: bool = False
@@ -943,4 +1002,28 @@ class ProviderCapability:
     vision: bool = False
     context_window_tokens: int = 0
     max_output_tokens: int = 0
+    input_cost_per_mtok: float | None = None
+    output_cost_per_mtok: float | None = None
     pricing_tier: PricingTier = PricingTier.UNKNOWN
+
+    def __post_init__(self) -> None:
+        # Exact cost is the single source of truth for the pricing tier.
+        # Reject structurally impossible cost up front (negative / NaN /
+        # inf) — the baseline catalogue is trusted, but overlay-sourced
+        # values pass through here too, so this is the last line of defence
+        # before a bad number reaches a metric label or a cost estimate.
+        for label, value in (
+            ("input_cost_per_mtok", self.input_cost_per_mtok),
+            ("output_cost_per_mtok", self.output_cost_per_mtok),
+        ):
+            if value is not None and (not math.isfinite(value) or value < 0.0):
+                raise ValueError(f"{label} must be finite and non-negative, got {value!r}")
+        # Whenever cost is known, derive the tier from it (overriding any
+        # passed value); leave an explicitly-supplied tier untouched only
+        # when both costs are unknown.
+        if self.input_cost_per_mtok is not None or self.output_cost_per_mtok is not None:
+            object.__setattr__(
+                self,
+                "pricing_tier",
+                derive_pricing_tier(self.input_cost_per_mtok, self.output_cost_per_mtok),
+            )
