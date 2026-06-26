@@ -509,7 +509,87 @@ class ProviderSettings(BaseSettings):
     circuit_breaker_reset: int = 60  # seconds before half-open retry
     cost_tracking_enabled: bool = True  # track token usage and estimated cost
 
+    # --- Opt-in model-catalogue refresh seam ----------------------------
+    #
+    # Which built-in upstream source the refresh trigger fetches from.  The
+    # refresh is never in the request path; it is driven by an explicit
+    # operator trigger (CLI / admin route / external scheduler).
+    catalogue_refresh_source: str = "models_dev"  # models_dev | litellm
+
+    # Optional operator override of the source's pinned default URL.  Must be
+    # https:// (re-checked at fetch time).  ``None`` = use the built-in pin.
+    catalogue_refresh_url: str | None = None
+
+    # Where the additive, validated catalogue overlay is written.  Lives in
+    # the data volume alongside the ChromaDB / SQLite stores; constrained to
+    # the project directory (no traversal, no parent symlink) just like the
+    # database paths.
+    catalogue_overlay_path: str = "./data/model_catalogue_overlay.json"
+
     model_config = SettingsConfigDict(env_prefix="PROVIDER_")
+
+    @field_validator("catalogue_refresh_source")
+    @classmethod
+    def _validate_catalogue_source(cls, value: str) -> str:
+        """Reject an unknown refresh source name at settings load."""
+        valid = {"models_dev", "litellm"}
+        if value not in valid:
+            raise ValueError(
+                f"Unknown PROVIDER_CATALOGUE_REFRESH_SOURCE '{value}'. "
+                f"Valid sources: {sorted(valid)}."
+            )
+        return value
+
+    @field_validator("catalogue_refresh_url")
+    @classmethod
+    def _validate_catalogue_url(cls, value: str | None) -> str | None:
+        """Require any operator-supplied refresh URL to be https://.
+
+        Defence in depth — :func:`providers.refresh.fetch_json` re-checks the
+        scheme, but failing here surfaces a misconfiguration at load rather
+        than only when a refresh is first triggered.
+        """
+        if value is None:
+            return None
+        if not value.lower().startswith("https://"):
+            raise ValueError(
+                "PROVIDER_CATALOGUE_REFRESH_URL must be an https:// URL."
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _validate_overlay_path(self) -> "ProviderSettings":
+        """Constrain the overlay path to the project directory.
+
+        Mirrors ``DatabaseSettings._validate_paths``: the resolved path must
+        stay within ``cwd`` and no lexical parent may be a symlink, so an
+        attacker-controlled env var cannot redirect the overlay write outside
+        the data volume.  The walk is over the *lexical* path on purpose — a
+        post-``resolve()`` walk would have already followed any symlink.
+        """
+        base_dir = Path.cwd().resolve()
+        raw_value = self.catalogue_overlay_path
+        lexical = Path(raw_value).absolute()
+        resolved = Path(raw_value).resolve()
+
+        if not resolved.is_relative_to(base_dir):
+            raise ValueError(
+                f"PROVIDER_CATALOGUE_OVERLAY_PATH resolves to '{resolved}' "
+                f"which is outside the project directory '{base_dir}'. Use a "
+                f"relative path within the project directory."
+            )
+
+        check = lexical
+        while check != check.parent:
+            if check.exists() and check.is_symlink():
+                raise ValueError(
+                    f"PROVIDER_CATALOGUE_OVERLAY_PATH contains a symlink at "
+                    f"'{check}'. Symlinks are not permitted for security."
+                )
+            if check == base_dir:
+                break
+            check = check.parent
+        return self
 
 
 class RAGSettings(BaseSettings):

@@ -260,6 +260,27 @@ class ProviderContentFilterError(ProviderError):
     """Raised when a provider's safety filter blocks the request or response."""
 
 
+class CatalogueRefreshError(SECGenerativeSearchError):
+    """
+    Raised when the opt-in model-catalogue refresh seam fails.
+
+    Covers every failure mode of the bounded fetch + untrusted-input
+    validation that produces the additive catalogue overlay: a non-HTTPS
+    source, a transport / TLS error, a response that exceeds the size cap,
+    unparseable JSON, or a payload that fails the same schema validation as
+    the bundled baseline (bad slug shape, count over bound, non-finite or
+    negative cost, control characters).
+
+    Deliberately **not** a :class:`ProviderError`: the refresh is an
+    operator-triggered maintenance operation, never a per-request provider
+    call, so it must not be mapped onto the provider-outage HTTP contract.
+    The message is content-free — it never echoes the offending slug or the
+    raw upstream payload.  The seam is fail-closed: on this error the caller
+    leaves any existing overlay untouched and the active catalogue keeps
+    serving the bundled baseline.
+    """
+
+
 # ---------------------------------------------------------------------------
 # RAG pipeline errors — generation, prompt, and citation failures
 # ---------------------------------------------------------------------------

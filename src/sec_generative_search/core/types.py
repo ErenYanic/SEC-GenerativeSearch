@@ -946,6 +946,43 @@ class ImportReport:
 
 
 @dataclass(frozen=True)
+class CatalogueRefreshReport:
+    """
+    Audit record for a successful model-catalogue overlay refresh.
+
+    Returned by the opt-in refresh seam
+    (:mod:`~sec_generative_search.providers.refresh`) after it has fetched,
+    validated, and written an additive catalogue overlay.  Frozen because
+    a refresh is a non-idempotent administrative event — once reported, the
+    counts must not be rewritten.
+
+    Content-free by design (the parametrised security test in
+    ``tests/core/test_types.py`` picks it up automatically): the fields carry
+    only the operator-supplied source identifier / URL and aggregate counts.
+    No model slug, no cost figure, and certainly no credential — the seam is
+    credential-free end to end.
+
+    Attributes:
+        source: The built-in source key the overlay was fetched from
+            (``"models_dev"`` / ``"litellm"``).
+        source_url: The exact URL fetched (the pinned default or an
+            operator override).  Public metadata endpoint — never a secret.
+        provider_count: Number of providers represented in the written
+            overlay (after filtering to the served LLM providers).
+        model_count: Total number of model rows across all providers in the
+            written overlay.
+        overlay_path: Filesystem path the overlay was written to, preserved
+            for audit correlation.
+    """
+
+    source: str
+    source_url: str
+    provider_count: int
+    model_count: int
+    overlay_path: str
+
+
+@dataclass(frozen=True)
 class ProviderCapability:
     """
     Feature matrix for a concrete provider + model pair.

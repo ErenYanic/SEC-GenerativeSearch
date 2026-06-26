@@ -19,6 +19,7 @@ import pytest
 
 from sec_generative_search.core.types import (
     BackupReport,
+    CatalogueRefreshReport,
     Chunk,
     Citation,
     ContentType,
@@ -572,6 +573,7 @@ class TestNoCredentialFieldsOnDomainTypes:
             RestoreReport,
             ExportReport,
             ImportReport,
+            CatalogueRefreshReport,
         ],
     )
     def test_no_secret_looking_fields(self, cls: type) -> None:
