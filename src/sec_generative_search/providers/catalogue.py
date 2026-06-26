@@ -18,15 +18,27 @@ The active catalogue is a process-global swapped via :func:`set_catalogue` /
 :func:`reset_catalogue`.  Tests use that seam to register fixture providers.
 Nothing here touches the network or a credential — the refresh that *fetches*
 an overlay is a separate, opt-in seam.
+
+On first use the active catalogue is built as the **union of baseline and
+overlay**: the bundled baseline is always the floor, and when a
+validated overlay file is present on the data volume it is merged on top, per
+field.  The overlay is re-treated as **untrusted input** at read time —
+re-validated through the same gate the refresh seam uses at write time — and the
+merge is fail-closed: a missing, unreadable, or invalid overlay leaves the
+baseline serving alone.
+``pricing_tier`` is never read from disk; it is derived from the *merged* cost.
 """
 
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Mapping
 from importlib import resources
+from pathlib import Path
 from typing import Any, Final
 
+from sec_generative_search.core.logging import get_logger
 from sec_generative_search.core.types import ProviderCapability
 
 __all__ = [
@@ -36,6 +48,8 @@ __all__ = [
     "reset_catalogue",
     "set_catalogue",
 ]
+
+logger = get_logger(__name__)
 
 # The baseline ships as package data under ``providers/data/``.  Referencing
 # the parent package (rather than a ``data`` subpackage) keeps the data tree
@@ -127,17 +141,173 @@ class ModelCatalogue:
         }
         return cls(built)
 
-    @classmethod
-    def load_baseline(cls) -> ModelCatalogue:
-        """Load the bundled JSON baseline shipped as package data."""
+    @staticmethod
+    def _read_baseline_document() -> Mapping[str, Any]:
+        """Read + parse the bundled baseline JSON document (``{_meta, providers}``)."""
         text = (
             resources.files(_DATA_PACKAGE)
             .joinpath(_BASELINE_DIR, _BASELINE_NAME)
             .read_text(encoding="utf-8")
         )
-        document = json.loads(text)
+        return json.loads(text)
+
+    @classmethod
+    def _baseline_rows(cls) -> dict[str, dict[str, dict[str, Any]]]:
+        """Return the baseline as raw ``{provider: {slug: row}}`` dicts.
+
+        The per-field overlay merge needs the *raw* rows (not the built
+        capabilities) so the cost / token "unknown" sentinels can be compared
+        field by field before the pricing tier is derived.
+        """
+        document = cls._read_baseline_document()
         providers = document.get("providers", {})
-        return cls.from_rows(providers)
+        return {
+            provider: {slug: dict(row) for slug, row in models.items()}
+            for provider, models in providers.items()
+        }
+
+    @classmethod
+    def load_baseline(cls) -> ModelCatalogue:
+        """Load the bundled JSON baseline shipped as package data."""
+        return cls.from_rows(cls._baseline_rows())
+
+    # ------------------------------------------------------------------
+    # Overlay merge
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def load_overlay(
+        cls, path: str | os.PathLike[str]
+    ) -> dict[str, dict[str, dict[str, Any]]] | None:
+        """Read + re-validate a catalogue overlay from disk as untrusted input.
+
+        Returns the validated ``{provider: {slug: row}}`` map, or ``None`` when
+        the overlay is absent, unreadable, not valid JSON, or fails the
+        untrusted-input gate.  **Fail-closed**: any problem means the caller
+        serves the baseline alone — a hostile, corrupt, or hand-edited overlay
+        can never degrade or poison the active catalogue.
+
+        The on-disk file is *not* a trust boundary: even though the refresh
+        seam validated it at write time, it is re-validated here through the
+        very same :func:`~sec_generative_search.providers.refresh.validate_catalogue_payload`
+        gate.  The ``refresh`` import is deferred to keep the catalogue ⇄
+        refresh dependency one-directional at import time.
+        """
+        target = Path(path)
+        try:
+            text = target.read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            # Absent / unreadable is the common "never refreshed" case — the
+            # baseline is the intended floor, so this is silent, not a warning.
+            return None
+        try:
+            document = json.loads(text)
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            logger.warning(
+                "Catalogue overlay at the configured path is not valid JSON; "
+                "ignoring it and serving the baseline."
+            )
+            return None
+        if not isinstance(document, Mapping):
+            logger.warning(
+                "Catalogue overlay is not a JSON object; ignoring it and serving the baseline."
+            )
+            return None
+
+        # Lazy import breaks the catalogue ⇄ refresh import cycle (refresh
+        # imports ``capability_from_row`` from this module at its top).
+        from sec_generative_search.core.exceptions import CatalogueRefreshError
+        from sec_generative_search.providers.refresh import validate_catalogue_payload
+
+        try:
+            return validate_catalogue_payload(document.get("providers", {}))
+        except CatalogueRefreshError:
+            # Content-free by construction — the validator never echoes the
+            # offending slug or value, and neither do we.
+            logger.warning(
+                "Catalogue overlay failed untrusted-input validation; ignoring "
+                "it and serving the baseline."
+            )
+            return None
+
+    @staticmethod
+    def _merge_row(baseline: Mapping[str, Any], overlay: Mapping[str, Any]) -> dict[str, Any]:
+        """Per-field merge of a baseline row with a fresher overlay row.
+
+        "Fresh-and-valid wins, else baseline survives", evaluated per field:
+
+        - **Boolean capability flags are unioned.**  The overlay can *enable*
+          a capability the baseline lacked, but a missing / ``False`` overlay
+          flag never *disables* a curated baseline capability — the upstream
+          normalisers default an unknown flag to ``False``, so overlay-``False``
+          means "no fresh assertion", not "turn it off".  The hand-curated
+          baseline is the more trustworthy source for a flag it already sets.
+        - **Token-count fields** take the overlay value when it is known
+          (``> 0``); ``0`` means unknown, so the baseline value survives.
+        - **Cost fields** take the overlay value when it is known (not
+          ``None``); ``None`` means unknown, so the baseline cost survives — a
+          freshly fetched overlay can never wipe a curated baseline price to
+          ``UNKNOWN``.
+
+        Returns a clean allow-listed row ready for :func:`capability_from_row`,
+        which re-derives the pricing tier from the *merged* cost.
+        """
+        merged: dict[str, Any] = {}
+        for field in _BOOL_FIELDS:
+            merged[field] = bool(baseline.get(field, False)) or bool(overlay.get(field, False))
+        for field in _INT_FIELDS:
+            over = overlay.get(field, 0)
+            over_int = int(over) if isinstance(over, int) and not isinstance(over, bool) else 0
+            merged[field] = over_int if over_int > 0 else int(baseline.get(field, 0) or 0)
+        for field in _COST_FIELDS:
+            over = overlay.get(field)
+            merged[field] = over if over is not None else baseline.get(field)
+        return merged
+
+    @classmethod
+    def load_merged(cls, overlay_path: str | os.PathLike[str] | None) -> ModelCatalogue:
+        """Build the active catalogue as the **union of baseline and overlay**.
+
+        The bundled baseline is always the floor.  When a valid overlay is
+        present it is merged on top: a model only in the overlay is *added*; a
+        model only in the baseline *survives*; a model in both is merged per
+        field by :meth:`_merge_row`.  The pricing tier is re-derived from the
+        merged cost at :func:`capability_from_row`, never read from disk.
+
+        **Fail-closed**: a missing / unreadable / invalid overlay — or no path
+        at all — yields the baseline alone.  Because the overlay can only
+        *raise* a baseline model's cost from unknown (it never wipes a known
+        baseline cost), every baseline model keeps its non-``UNKNOWN`` tier
+        after the merge; only overlay-only models may carry ``UNKNOWN``.
+
+        The result is cached on the active-catalogue slot, so a refresh that
+        writes a new overlay only takes effect on the next process start or
+        after :func:`reset_catalogue`.
+        """
+        baseline_rows = cls._baseline_rows()
+        overlay_rows = cls.load_overlay(overlay_path) if overlay_path is not None else None
+        if not overlay_rows:
+            return cls.from_rows(baseline_rows)
+
+        built: dict[str, dict[str, ProviderCapability]] = {}
+        overlay_only_providers = [p for p in overlay_rows if p not in baseline_rows]
+        for provider in (*baseline_rows, *overlay_only_providers):
+            b_models = baseline_rows.get(provider, {})
+            o_models = overlay_rows.get(provider, {})
+            models: dict[str, ProviderCapability] = {}
+            # Baseline slugs first (preserving declaration order), each merged
+            # with its overlay counterpart when present.
+            for slug, b_row in b_models.items():
+                o_row = o_models.get(slug)
+                row = cls._merge_row(b_row, o_row) if o_row is not None else b_row
+                models[slug] = capability_from_row(row)
+            # Then overlay-only slugs, added verbatim (already validated).
+            for slug, o_row in o_models.items():
+                if slug in b_models:
+                    continue
+                models[slug] = capability_from_row(o_row)
+            built[provider] = models
+        return cls(built)
 
     def with_provider(
         self, provider: str, models: Mapping[str, ProviderCapability]
@@ -155,16 +325,37 @@ class ModelCatalogue:
 _active: ModelCatalogue | None = None
 
 
-def model_catalogue() -> ModelCatalogue:
-    """Return the active catalogue, lazily loading the baseline on first use.
+def _resolve_overlay_path() -> str | None:
+    """Resolve the configured catalogue-overlay path, fail-closed.
 
-    The lazy load keeps importing this module side-effect-free; the file is
-    read once, at the first capability probe (effectively startup), and cached
-    for the process.
+    Reads :class:`~sec_generative_search.config.settings.ProviderSettings`
+    standalone — it carries no required fields (so it never fails on a missing
+    EDGAR identity) and applies the same project-dir / symlink guard as the
+    database paths.  Any failure — a misconfigured path, an import problem —
+    collapses to ``None`` so the catalogue always loads the baseline rather
+    than raising on the capability hot path.
+    """
+    try:
+        from sec_generative_search.config.settings import ProviderSettings
+
+        return ProviderSettings().catalogue_overlay_path
+    except Exception:
+        # Config trouble (a misconfigured path, an import problem) must never
+        # break the capability hot path — fall back to the baseline.
+        return None
+
+
+def model_catalogue() -> ModelCatalogue:
+    """Return the active catalogue, lazily merging baseline and overlay on first use.
+
+    The lazy load keeps importing this module side-effect-free; the baseline
+    file (and any configured overlay) is read once, at the first capability
+    probe (effectively startup), and cached for the process.  The merge is
+    fail-closed: absent the overlay, this is exactly the bundled baseline.
     """
     global _active
     if _active is None:
-        _active = ModelCatalogue.load_baseline()
+        _active = ModelCatalogue.load_merged(_resolve_overlay_path())
     return _active
 
 
