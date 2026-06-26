@@ -552,9 +552,7 @@ class ProviderSettings(BaseSettings):
         if value is None:
             return None
         if not value.lower().startswith("https://"):
-            raise ValueError(
-                "PROVIDER_CATALOGUE_REFRESH_URL must be an https:// URL."
-            )
+            raise ValueError("PROVIDER_CATALOGUE_REFRESH_URL must be an https:// URL.")
         return value
 
     @model_validator(mode="after")
