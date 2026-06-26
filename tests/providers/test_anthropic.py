@@ -41,6 +41,7 @@ from sec_generative_search.providers.anthropic import (
     AnthropicProvider,
 )
 from sec_generative_search.providers.base import GenerationRequest
+from sec_generative_search.providers.registry import ProviderRegistry, ProviderSurface
 
 # ---------------------------------------------------------------------------
 # SDK exception subclasses that bypass the real SDK constructors.  We
@@ -174,10 +175,14 @@ class TestProviderMetadata:
         assert AnthropicProvider.default_model == "claude-haiku-4-5"
 
     def test_catalogue_has_tiered_models(self) -> None:
-        cat = AnthropicProvider.MODEL_CATALOGUE
-        assert cat["claude-opus-4-7"].capability.pricing_tier == PricingTier.PREMIUM
-        assert cat["claude-sonnet-4-6"].capability.pricing_tier == PricingTier.PREMIUM
-        assert cat["claude-haiku-4-5"].capability.pricing_tier == PricingTier.STANDARD
+        def tier(slug: str) -> PricingTier:
+            return ProviderRegistry.get_capability(
+                "anthropic", ProviderSurface.LLM, slug
+            ).pricing_tier
+
+        assert tier("claude-opus-4-7") == PricingTier.PREMIUM
+        assert tier("claude-sonnet-4-6") == PricingTier.PREMIUM
+        assert tier("claude-haiku-4-5") == PricingTier.STANDARD
 
     def test_sdk_retries_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured: dict[str, Any] = {}

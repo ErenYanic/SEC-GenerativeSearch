@@ -254,25 +254,18 @@ _ENV_VAR_BY_PROVIDER: dict[str, str] = {
 }
 
 
-def _pricing_label(entry_cls: type, slug: str) -> str:
+def _pricing_label(name: str, surface: ProviderSurface, slug: str | None) -> str:
     """Pricing tier of the default model, with a permissive fallback.
 
-    Reads the static ``MODEL_CATALOGUE`` (LLM) — ``ModelInfo.capability.pricing_tier``.
-    Returns ``"unknown"`` for embedding-only providers (no pricing
-    surface) and for slugs absent from the catalogue (a freshly
-    released model not yet added).  Never instantiates the class.
+    Resolves the tier through :meth:`ProviderRegistry.get_capability`,
+    which reads the vendored model catalogue (LLM surface).  Returns
+    ``"unknown"`` for embedding / reranker providers (no pricing surface)
+    and for slugs absent from the catalogue (a freshly released model not
+    yet added).  Never instantiates the provider.
     """
-    catalogue = getattr(entry_cls, "MODEL_CATALOGUE", None)
-    if not catalogue or not slug:
+    if not slug or surface is not ProviderSurface.LLM:
         return "unknown"
-    info = catalogue.get(slug)
-    if info is None:
-        return "unknown"
-    capability = getattr(info, "capability", None)
-    if capability is None:
-        return "unknown"
-    tier = getattr(capability, "pricing_tier", None)
-    return getattr(tier, "value", "unknown")
+    return ProviderRegistry.get_capability(name, surface, slug).pricing_tier.value
 
 
 @provider_app.command("list")
@@ -335,11 +328,7 @@ def list_providers(
             providers_payload: list[dict[str, Any]] = []
             for entry in entries:
                 default_model = getattr(entry.provider_cls, "default_model", "") or None
-                pricing = (
-                    _pricing_label(entry.provider_cls, default_model)
-                    if default_model is not None
-                    else "unknown"
-                )
+                pricing = _pricing_label(entry.name, entry.surface, default_model)
                 env_var = _ENV_VAR_BY_PROVIDER.get(entry.name)
                 # ``key_resolves`` is a boolean only — never include
                 # the masked tail.  Rich-mode rendering surfaces the
@@ -388,10 +377,8 @@ def list_providers(
 
         for entry in entries:
             default_model = getattr(entry.provider_cls, "default_model", "") or "—"
-            pricing = (
-                _pricing_label(entry.provider_cls, default_model)
-                if default_model != "—"
-                else "unknown"
+            pricing = _pricing_label(
+                entry.name, entry.surface, None if default_model == "—" else default_model
             )
             env_var = _ENV_VAR_BY_PROVIDER.get(entry.name, "—")
             # Resolver call — returns a string when ANY tier holds a

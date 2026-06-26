@@ -46,6 +46,7 @@ from sec_generative_search.providers.mistral import (
 )
 from sec_generative_search.providers.openrouter import OpenRouterProvider
 from sec_generative_search.providers.qwen import QwenEmbeddingProvider, QwenProvider
+from sec_generative_search.providers.registry import ProviderRegistry, ProviderSurface
 from sec_generative_search.providers.zai import ZaiProvider
 
 # ---------------------------------------------------------------------------
@@ -233,28 +234,30 @@ def test_default_model_is_in_catalogue(provider_cls: type, default_model: str) -
     ``default_model`` would silently fall through to the permissive
     default branch and mask a copy-paste mistake in the catalogue.
     """
-    assert default_model in provider_cls.MODEL_CATALOGUE, (
-        f"{provider_cls.__name__} default_model '{default_model}' missing from MODEL_CATALOGUE"
+    models = ProviderRegistry.list_models(provider_cls.provider_name, ProviderSurface.LLM)
+    assert default_model in models, (
+        f"{provider_cls.__name__} default_model '{default_model}' missing from the catalogue"
     )
 
 
 def test_openrouter_catalogue_is_empty_by_design() -> None:
     """The meta-provider's empty catalogue is load-bearing.
 
-    Guarded here so a future "helpful" patch that populates
-    :attr:`OpenRouterProvider.MODEL_CATALOGUE` trips a test instead of
-    silently narrowing the set of accepted slugs.  The capability probe
-    relies on the permissive-default branch for any slug not in the
-    catalogue; populating the catalogue would start rejecting slugs
-    OpenRouter actually serves.
+    Guarded here so a future "helpful" patch that adds OpenRouter rows to
+    the vendored catalogue trips a test instead of silently narrowing the
+    set of accepted slugs.  The capability probe relies on the permissive-
+    default branch for any slug not in the catalogue; cataloguing
+    OpenRouter would start rejecting slugs OpenRouter actually serves.
     """
-    assert OpenRouterProvider.MODEL_CATALOGUE == {}
+    assert ProviderRegistry.list_models("openrouter", ProviderSurface.LLM) == []
 
 
 @pytest.mark.parametrize(("provider_cls", "extra_slug"), _LLM_VENDORS_WITH_CATALOGUE)
 def test_extra_catalogue_slug_present(provider_cls: type, extra_slug: str) -> None:
     """Spot-check a non-default slug per vendor to catch catalogue typos."""
-    assert extra_slug in provider_cls.MODEL_CATALOGUE
+    assert extra_slug in ProviderRegistry.list_models(
+        provider_cls.provider_name, ProviderSurface.LLM
+    )
 
 
 # ---------------------------------------------------------------------------

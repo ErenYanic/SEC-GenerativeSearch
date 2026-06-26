@@ -36,6 +36,12 @@ data/
 !deploy/
 !deploy/**/*.json
 
+# Track the vendored model-metadata/pricing catalogue even though *.json is
+# ignored above. This is reviewed, secret-scanned package data, not runtime
+# output.
+!src/sec_generative_search/providers/data/
+!src/sec_generative_search/providers/data/*.json
+
 # ...but NEVER the operator-supplied runtime secrets / TLS material that live
 # under deploy/. These re-ignores must stay AFTER the !deploy/ carve-out above.
 # deploy/.env is already caught by the .env rule below; these are not.

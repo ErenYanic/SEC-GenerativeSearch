@@ -3,8 +3,8 @@
 OpenRouter is a proxy that multiplexes across many upstream providers
 using the OpenAI wire protocol at ``https://openrouter.ai/api/v1``.  The
 catalogue is open-ended — OpenRouter can gain or lose models daily — so
-this adapter deliberately keeps ``MODEL_CATALOGUE`` empty and relies on
-the base class's permissive-default branch: unknown slugs yield
+this adapter is deliberately absent from the vendored model catalogue and
+relies on the base class's permissive-default branch: unknown slugs yield
 ``ProviderCapability(chat=True, streaming=True)`` and the SDK rejects
 unserviceable slugs at call time with a clear error.
 
@@ -37,10 +37,9 @@ Upstream-provider routing:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any
 
 from sec_generative_search.providers.openai_compat import (
-    ModelInfo,
     OpenAICompatibleLLMProvider,
 )
 
@@ -126,10 +125,10 @@ class OpenRouterProvider(OpenAICompatibleLLMProvider):
     """Chat-completion provider targeting ``openrouter.ai``.
 
     Any model slug accepted by OpenRouter works here — the capability
-    probe returns a permissive default for every slug not pre-declared
-    in :attr:`MODEL_CATALOGUE`.  Callers that need an accurate capability
-    matrix for a specific slug should consult the provider registry,
-    which caches OpenRouter's own ``/models`` response.
+    probe returns a permissive default for every slug not in the vendored
+    catalogue (OpenRouter has no catalogued models by design).  Callers
+    that need an accurate capability matrix for a specific slug should
+    consult the provider registry.
 
     When the :class:`~sec_generative_search.providers.base.GenerationRequest`
     carries :class:`OpenRouterRoutingHints`, the hints are forwarded into
@@ -142,10 +141,10 @@ class OpenRouterProvider(OpenAICompatibleLLMProvider):
     default_base_url = "https://openrouter.ai/api/v1"
     default_model = "qwen/qwen3.6-plus"
 
-    # Intentionally empty — see module docstring.  The base class
-    # :meth:`get_capabilities` returns a permissive default for any slug
-    # not found here, which is the correct semantics for a meta-provider.
-    MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {}
+    # Intentionally absent from the vendored catalogue — see module
+    # docstring.  The base class :meth:`get_capabilities` returns a
+    # permissive default for any slug not catalogued, which is the correct
+    # semantics for a meta-provider.
 
     def _extra_request_kwargs(self, request: GenerationRequest) -> dict[str, Any]:
         """Forward routing hints into OpenRouter's ``provider`` block.

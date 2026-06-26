@@ -27,6 +27,7 @@ from sec_generative_search.core.logging import LOGGER_NAME
 from sec_generative_search.core.types import PricingTier
 from sec_generative_search.providers import openai_compat
 from sec_generative_search.providers.openai import OpenAIEmbeddingProvider, OpenAIProvider
+from sec_generative_search.providers.registry import ProviderRegistry, ProviderSurface
 
 _LONG_KEY = "sk-test-OPENAI-ABCDEFGHIJKLMNOPQRSTUVWX"
 _KEY_TAIL = _LONG_KEY[-4:]
@@ -84,26 +85,19 @@ class TestProviderMetadata:
             "o3",
             "o4-mini",
         ):
-            assert slug in OpenAIProvider.MODEL_CATALOGUE, (
-                f"OpenAIProvider missing required model '{slug}' in MODEL_CATALOGUE"
+            assert slug in ProviderRegistry.list_models("openai", ProviderSurface.LLM), (
+                f"OpenAIProvider missing required model '{slug}' in the catalogue"
             )
 
     def test_pricing_tiers_set(self) -> None:
-        assert OpenAIProvider.MODEL_CATALOGUE["gpt-5.4-mini"].capability.pricing_tier == (
-            PricingTier.STANDARD
-        )
-        assert OpenAIProvider.MODEL_CATALOGUE["gpt-5.4"].capability.pricing_tier == (
-            PricingTier.PREMIUM
-        )
-        assert OpenAIProvider.MODEL_CATALOGUE["gpt-4.1-mini"].capability.pricing_tier == (
-            PricingTier.LOW
-        )
-        assert OpenAIProvider.MODEL_CATALOGUE["gpt-5.4-pro"].capability.pricing_tier == (
-            PricingTier.PREMIUM
-        )
-        assert OpenAIProvider.MODEL_CATALOGUE["gpt-4.1"].capability.pricing_tier == (
-            PricingTier.HIGH
-        )
+        def tier(slug: str) -> PricingTier:
+            return ProviderRegistry.get_capability("openai", ProviderSurface.LLM, slug).pricing_tier
+
+        assert tier("gpt-5.4-mini") == PricingTier.STANDARD
+        assert tier("gpt-5.4") == PricingTier.PREMIUM
+        assert tier("gpt-4.1-mini") == PricingTier.LOW
+        assert tier("gpt-5.4-pro") == PricingTier.PREMIUM
+        assert tier("gpt-4.1") == PricingTier.HIGH
 
 
 # ---------------------------------------------------------------------------

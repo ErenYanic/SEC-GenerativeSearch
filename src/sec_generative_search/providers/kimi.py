@@ -11,11 +11,7 @@ using this adapter end-to-end.
 
 from __future__ import annotations
 
-from typing import ClassVar
-
-from sec_generative_search.core.types import PricingTier, ProviderCapability
 from sec_generative_search.providers.openai_compat import (
-    ModelInfo,
     OpenAICompatibleLLMProvider,
 )
 
@@ -28,94 +24,3 @@ class KimiProvider(OpenAICompatibleLLMProvider):
     provider_name = "kimi"
     default_base_url = "https://api.moonshot.ai/v1"
     default_model = "kimi-k2.5"
-
-    MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
-        "kimi-k2.7-code-highspeed": ModelInfo(
-            capability=ProviderCapability(
-                chat=True,
-                streaming=True,
-                tool_use=True,
-                structured_output=True,
-                prompt_caching=True,
-                vision=True,
-                context_window_tokens=262_144,
-                max_output_tokens=262_144,
-                pricing_tier=PricingTier.HIGH,
-            ),
-        ),
-        "kimi-k2.7-code": ModelInfo(
-            capability=ProviderCapability(
-                chat=True,
-                streaming=True,
-                tool_use=True,
-                structured_output=True,
-                prompt_caching=True,
-                vision=True,
-                context_window_tokens=262_144,
-                max_output_tokens=262_144,
-                pricing_tier=PricingTier.STANDARD,
-            ),
-        ),
-        "kimi-k2.6": ModelInfo(
-            capability=ProviderCapability(
-                chat=True,
-                streaming=True,
-                tool_use=True,
-                structured_output=True,
-                prompt_caching=True,
-                vision=True,
-                context_window_tokens=262_144,
-                max_output_tokens=262_144,
-                pricing_tier=PricingTier.STANDARD,
-            ),
-        ),
-        "kimi-k2.5": ModelInfo(
-            capability=ProviderCapability(
-                chat=True,
-                streaming=True,
-                tool_use=True,
-                structured_output=True,
-                prompt_caching=True,
-                vision=True,
-                context_window_tokens=262_144,
-                max_output_tokens=262_144,
-                pricing_tier=PricingTier.STANDARD,
-            ),
-        ),
-        "kimi-k2-0905": ModelInfo(
-            capability=ProviderCapability(
-                chat=True,
-                streaming=True,
-                tool_use=True,
-                structured_output=True,
-                prompt_caching=True,
-                context_window_tokens=262_144,
-                max_output_tokens=262_144,
-                pricing_tier=PricingTier.STANDARD,
-            ),
-        ),
-        "kimi-k2": ModelInfo(
-            capability=ProviderCapability(
-                chat=True,
-                streaming=True,
-                tool_use=True,
-                structured_output=True,
-                prompt_caching=True,
-                context_window_tokens=131_072,
-                max_output_tokens=131_072,
-                pricing_tier=PricingTier.STANDARD,
-            ),
-        ),
-        "kimi-k2-thinking": ModelInfo(
-            capability=ProviderCapability(
-                chat=True,
-                streaming=True,
-                tool_use=True,
-                structured_output=True,
-                prompt_caching=True,
-                context_window_tokens=262_144,
-                max_output_tokens=262_144,
-                pricing_tier=PricingTier.STANDARD,
-            ),
-        ),
-    }

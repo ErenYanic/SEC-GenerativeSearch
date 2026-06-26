@@ -44,11 +44,10 @@ from sec_generative_search.core.exceptions import (
 from sec_generative_search.core.logging import LOGGER_NAME
 from sec_generative_search.core.resilience import RetryPolicy
 from sec_generative_search.core.types import PricingTier, ProviderCapability
-from sec_generative_search.providers import openai_compat
+from sec_generative_search.providers import catalogue, openai_compat
 from sec_generative_search.providers.base import GenerationRequest
 from sec_generative_search.providers.openai_compat import (
     OPENAI_EXCEPTION_MAPPING,
-    ModelInfo,
     OpenAICompatibleEmbeddingProvider,
     OpenAICompatibleLLMProvider,
 )
@@ -89,22 +88,27 @@ _KEY_TAIL = _LONG_KEY[-4:]
 
 
 class _DemoLLM(OpenAICompatibleLLMProvider):
-    """Concrete subclass used only by the test suite."""
+    """Concrete subclass used only by the test suite.
+
+    Capabilities are no longer declared on the class; the ``llm_provider``
+    fixture registers ``demo-vendor``'s ``demo-chat`` row in the vendored
+    catalogue seam (:func:`catalogue.set_catalogue`) so ``get_capabilities``
+    resolves it the same way a real adapter does.
+    """
 
     provider_name = "demo-vendor"
     default_model = "demo-chat"
-    MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
-        "demo-chat": ModelInfo(
-            capability=ProviderCapability(
-                chat=True,
-                streaming=True,
-                tool_use=True,
-                context_window_tokens=8192,
-                max_output_tokens=2048,
-                pricing_tier=PricingTier.LOW,
-            ),
-        ),
-    }
+
+
+# Capability the fixture layers onto the catalogue for ``demo-vendor``.
+_DEMO_CAPABILITY = ProviderCapability(
+    chat=True,
+    streaming=True,
+    tool_use=True,
+    context_window_tokens=8192,
+    max_output_tokens=2048,
+    pricing_tier=PricingTier.LOW,
+)
 
 
 class _DemoEmbed(OpenAICompatibleEmbeddingProvider):
@@ -183,12 +187,20 @@ def _make_chunk(
 
 
 @pytest.fixture
-def llm_provider(monkeypatch: pytest.MonkeyPatch) -> _DemoLLM:
+def llm_provider(monkeypatch: pytest.MonkeyPatch) -> Iterator[_DemoLLM]:
     fake_client = MagicMock()
     monkeypatch.setattr(openai_compat, "OpenAI", lambda **_kwargs: fake_client)
+    # Register the demo capability in the catalogue seam so
+    # ``get_capabilities`` resolves it exactly like a real adapter.
+    catalogue.set_catalogue(
+        catalogue.model_catalogue().with_provider("demo-vendor", {"demo-chat": _DEMO_CAPABILITY})
+    )
     provider = _DemoLLM(_LONG_KEY, retry_policy=_fast_retry())
     provider._fake_client = fake_client  # type: ignore[attr-defined]
-    return provider
+    try:
+        yield provider
+    finally:
+        catalogue.reset_catalogue()
 
 
 @pytest.fixture

@@ -7,7 +7,7 @@ Covers:
   :func:`importlib.util.find_spec` cannot resolve ``sentence_transformers``.
 - Class lookup by ``(name, surface)``, including the OpenAI / OpenAI-
   embedding name collision.
-- Model listings derived from ``MODEL_CATALOGUE`` / ``MODEL_DIMENSIONS``.
+- Model listings derived from the vendored catalogue / ``MODEL_DIMENSIONS``.
 - ``supports_arbitrary_models`` flag for OpenRouter.
 - Capability lookup: O(1), credential-free, no network call; permissive
   default for unknown LLM slugs; ``ValueError`` for unknown embedding
@@ -40,6 +40,7 @@ from sec_generative_search.core.exceptions import (
 )
 from sec_generative_search.core.types import PricingTier, ProviderCapability
 from sec_generative_search.providers.anthropic import AnthropicProvider
+from sec_generative_search.providers.catalogue import model_catalogue
 from sec_generative_search.providers.deepseek import DeepSeekProvider
 from sec_generative_search.providers.gemini import (
     GeminiEmbeddingProvider,
@@ -344,7 +345,11 @@ class TestGetClassCollisions:
 class TestListModels:
     def test_llm_models_match_provider_catalogue(self) -> None:
         models = set(ProviderRegistry.list_models("openai", ProviderSurface.LLM))
-        assert models == set(OpenAIProvider.MODEL_CATALOGUE.keys())
+        # The registry delegates LLM model listing to the vendored
+        # catalogue keyed by provider name — assert that delegation is
+        # faithful, plus a spot-check that a known slug is present.
+        assert models == set(model_catalogue().list_llm_models("openai"))
+        assert "gpt-4o" in models
 
     def test_embedding_models_match_provider_dimensions(self) -> None:
         models = set(ProviderRegistry.list_models("openai", ProviderSurface.EMBEDDING))
@@ -445,8 +450,8 @@ class TestUpstreamRoutingFlag:
 class TestPricingTierSingleSourceOfTruth:
     """Every catalogued LLM model carries a real, non-``UNKNOWN`` tier.
 
-    The ``MODEL_CATALOGUE`` ``pricing_tier`` is the single source of
-    truth consumed by both the metrics facade
+    The cost-derived ``pricing_tier`` in the vendored catalogue is the
+    single source of truth consumed by both the metrics facade
     (:meth:`ProviderRegistry.get_capability`) and the web UI
     (``GET /api/providers/{provider}/models``). A catalogued slug whose
     tier silently defaulted to ``UNKNOWN`` would collapse the metric's
@@ -485,7 +490,7 @@ class TestPricingTierSingleSourceOfTruth:
             if ProviderRegistry.supports_arbitrary_models(name, ProviderSurface.LLM):
                 continue
             models = ProviderRegistry.list_models(name, ProviderSurface.LLM)
-            assert models, f"closed-catalogue provider {name!r} has an empty MODEL_CATALOGUE"
+            assert models, f"closed-catalogue provider {name!r} has no catalogued models"
 
 
 # ---------------------------------------------------------------------------
@@ -497,9 +502,8 @@ class TestGetCapability:
     def test_known_llm_slug_returns_catalogued_capability(self) -> None:
         cap = ProviderRegistry.get_capability("openai", ProviderSurface.LLM, "gpt-4o")
         # Identity check — must be the same ``ProviderCapability`` the
-        # provider class advertises, not a copy with subtly different
-        # flags.
-        assert cap == OpenAIProvider.MODEL_CATALOGUE["gpt-4o"].capability
+        # vendored catalogue holds, not a copy with subtly different flags.
+        assert cap == model_catalogue().get_llm_capability("openai", "gpt-4o")
         assert cap.chat is True
         assert cap.streaming is True
         assert cap.pricing_tier == PricingTier.PREMIUM
@@ -517,7 +521,7 @@ class TestGetCapability:
         # ``OpenAIProvider.default_model`` is ``"gpt-5.4-mini"``. The
         # registry must fall through to it.
         cap = ProviderRegistry.get_capability("openai", ProviderSurface.LLM)
-        expected = OpenAIProvider.MODEL_CATALOGUE["gpt-5.4-mini"].capability
+        expected = model_catalogue().get_llm_capability("openai", "gpt-5.4-mini")
         assert cap == expected
 
     def test_known_embedding_slug_returns_embeddings_capability(self) -> None:

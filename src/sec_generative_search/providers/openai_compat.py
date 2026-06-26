@@ -4,8 +4,9 @@ Every vendor that speaks the OpenAI Chat Completions / Embeddings wire
 protocol — OpenAI itself, Mistral, Kimi, DeepSeek, Qwen, OpenRouter —
 shares the same client construction, error normalisation, and request
 shape.  This module captures that shared surface so each concrete
-vendor differs only by ``provider_name``, an optional ``base_url``, and
-its model catalogue.
+vendor differs only by ``provider_name`` and an optional ``base_url``;
+model capabilities come from the shared vendored
+:mod:`~sec_generative_search.providers.catalogue`.
 
 Design notes:
 
@@ -36,7 +37,6 @@ Design notes:
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from openai import (
@@ -67,6 +67,7 @@ from sec_generative_search.providers.base import (
     GenerationRequest,
     GenerationResponse,
 )
+from sec_generative_search.providers.catalogue import model_catalogue
 
 if TYPE_CHECKING:
     import numpy as np
@@ -100,23 +101,6 @@ OPENAI_EXCEPTION_MAPPING = ExceptionMapping(
     rate_limit=(RateLimitError,),
     timeout=(APITimeoutError, TimeoutError),
 )
-
-
-# ---------------------------------------------------------------------------
-# Default capability template
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class ModelInfo:
-    """Static metadata for a single chat/embedding model.
-
-    Concrete providers expose a ``MODEL_CATALOGUE`` mapping so that
-    capability probes are O(1) — the SDK does not advertise context
-    windows, max output, or pricing tiers in any structured way.
-    """
-
-    capability: ProviderCapability
 
 
 # ---------------------------------------------------------------------------
@@ -186,9 +170,10 @@ class _OpenAIClientMixin:
 class OpenAICompatibleLLMProvider(_OpenAIClientMixin, BaseLLMProvider):
     """Chat-completion provider over the OpenAI wire protocol.
 
-    Subclasses override ``provider_name``,
-    optionally ``default_base_url``, and supply a ``MODEL_CATALOGUE``
-    mapping model slug -> :class:`ModelInfo`.
+    Subclasses override ``provider_name`` and ``default_model`` and,
+    optionally, ``default_base_url``.  Model capabilities are no longer
+    declared per class: the vendored :mod:`~sec_generative_search.providers.catalogue`
+    is the single source, keyed by ``(provider_name, slug)``.
 
     The ``count_tokens`` implementation uses :mod:`tiktoken` when an
     encoding is registered for the model; otherwise it falls back to
@@ -196,10 +181,6 @@ class OpenAICompatibleLLMProvider(_OpenAIClientMixin, BaseLLMProvider):
     model.  An honest tokeniser keeps the cost surface accurate even
     for vendors that never publish their own encoder.
     """
-
-    # Concrete subclasses override.  Keys are model slugs the vendor
-    # supports; values are the static capability/limit metadata.
-    MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {}
 
     # Default model used when a caller does not supply one.  Concrete
     # subclasses override; left empty here so the ABC fail-fast logic
@@ -238,15 +219,16 @@ class OpenAICompatibleLLMProvider(_OpenAIClientMixin, BaseLLMProvider):
         """Return the static capability matrix for *model*.
 
         Falls back to the provider's ``default_model`` when *model* is
-        ``None``.  Unknown models receive a permissive
+        ``None``.  Reads the vendored catalogue keyed by
+        ``(provider_name, slug)``; unknown models receive a permissive
         ``ProviderCapability(chat=True, streaming=True)`` rather than a
         raise — the SDK will reject the slug at call time with a clear
         error if the vendor does not actually serve it.
         """
         slug = model or self.default_model
-        info = self.MODEL_CATALOGUE.get(slug)
-        if info is not None:
-            return info.capability
+        cap = model_catalogue().get_llm_capability(self.provider_name, slug)
+        if cap is not None:
+            return cap
         return ProviderCapability(chat=True, streaming=True)
 
     # ------------------------------------------------------------------

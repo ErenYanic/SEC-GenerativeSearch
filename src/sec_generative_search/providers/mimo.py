@@ -16,11 +16,7 @@ be added with the appropriate capability flags.
 
 from __future__ import annotations
 
-from typing import ClassVar
-
-from sec_generative_search.core.types import PricingTier, ProviderCapability
 from sec_generative_search.providers.openai_compat import (
-    ModelInfo,
     OpenAICompatibleLLMProvider,
 )
 
@@ -33,70 +29,3 @@ class MimoProvider(OpenAICompatibleLLMProvider):
     provider_name = "mimo"
     default_base_url = "https://api.xiaomimimo.com/v1"
     default_model = "mimo-v2.5"
-
-    # Xiaomi's published slugs preserve the ``MiMo-V2-*`` casing — the
-    # API is case-sensitive. ``MiMo-V2-Pro`` is the reasoning-capable
-    # flagship with a 1M-token context window; ``MiMo-V2-Flash`` remains
-    # available as the cheaper fast tier.
-    MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
-        "mimo-v2.5-pro": ModelInfo(
-            capability=ProviderCapability(
-                chat=True,
-                streaming=True,
-                tool_use=True,
-                structured_output=True,
-                prompt_caching=False,
-                context_window_tokens=1_048_576,
-                max_output_tokens=131_072,
-                pricing_tier=PricingTier.HIGH,
-            ),
-        ),
-        "mimo-v2-pro": ModelInfo(
-            capability=ProviderCapability(
-                chat=True,
-                streaming=True,
-                tool_use=True,
-                structured_output=True,
-                prompt_caching=False,
-                context_window_tokens=1_048_576,
-                max_output_tokens=131_072,
-                pricing_tier=PricingTier.HIGH,
-            ),
-        ),
-        "mimo-v2.5": ModelInfo(
-            capability=ProviderCapability(
-                chat=True,
-                streaming=True,
-                tool_use=True,
-                structured_output=True,
-                prompt_caching=False,
-                context_window_tokens=1_048_576,
-                max_output_tokens=131_072,
-                pricing_tier=PricingTier.STANDARD,
-            ),
-        ),
-        "mimo-v2-omni": ModelInfo(
-            capability=ProviderCapability(
-                chat=True,
-                streaming=True,
-                tool_use=True,
-                structured_output=True,
-                prompt_caching=False,
-                context_window_tokens=256_000,
-                max_output_tokens=65_536,
-                pricing_tier=PricingTier.STANDARD,
-            ),
-        ),
-        "mimo-v2-flash": ModelInfo(
-            capability=ProviderCapability(
-                chat=True,
-                streaming=True,
-                tool_use=True,
-                structured_output=True,
-                prompt_caching=False,
-                context_window_tokens=262_144,
-                max_output_tokens=65_536,
-                pricing_tier=PricingTier.LOW,
-            ),
-        ),
-    }

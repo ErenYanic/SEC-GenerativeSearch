@@ -51,10 +51,6 @@ from sec_generative_search.core.exceptions import (
     ProviderRateLimitError,
     ProviderTimeoutError,
 )
-from sec_generative_search.core.types import (
-    PricingTier,
-    ProviderCapability,
-)
 from sec_generative_search.providers.registry import (
     ProviderEntry,
     ProviderSurface,
@@ -785,32 +781,27 @@ class TestEnvVarTableConsistency:
 
 class TestPricingLabel:
     def test_known_model_returns_tier(self) -> None:
-        """A catalogued LLM model returns the matching tier value."""
-        from sec_generative_search.providers.openai_compat import ModelInfo
-
-        # Synthetic class with a one-row catalogue.
-        class _Fake:
-            MODEL_CATALOGUE: ClassVar = {
-                "premium-slug": ModelInfo(
-                    capability=ProviderCapability(chat=True, pricing_tier=PricingTier.PREMIUM),
-                ),
-            }
-
-        assert provider_module._pricing_label(_Fake, "premium-slug") == "premium"
+        """A catalogued LLM model returns its cost-derived tier value."""
+        assert provider_module._pricing_label("openai", ProviderSurface.LLM, "gpt-4o") == "premium"
 
     def test_unknown_slug_returns_unknown(self) -> None:
-        class _Fake:
-            MODEL_CATALOGUE: ClassVar = {}
+        """OpenRouter's arbitrary-slug surface has no catalogued tier."""
+        assert (
+            provider_module._pricing_label("openrouter", ProviderSurface.LLM, "vendor/x")
+            == "unknown"
+        )
 
-        assert provider_module._pricing_label(_Fake, "anything") == "unknown"
+    def test_embedding_surface_returns_unknown(self) -> None:
+        """Embedding providers have no pricing surface."""
+        assert (
+            provider_module._pricing_label(
+                "openai", ProviderSurface.EMBEDDING, "text-embedding-3-small"
+            )
+            == "unknown"
+        )
 
-    def test_provider_without_catalogue_returns_unknown(self) -> None:
-        """Embedding providers carry MODEL_DIMENSIONS, not MODEL_CATALOGUE."""
-
-        class _Embedding:
-            MODEL_DIMENSIONS: ClassVar = {"foo": 768}
-
-        assert provider_module._pricing_label(_Embedding, "foo") == "unknown"
+    def test_missing_slug_returns_unknown(self) -> None:
+        assert provider_module._pricing_label("openai", ProviderSurface.LLM, None) == "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -830,4 +821,3 @@ def test_provider_app_smoke() -> None:
 # touching the import header.
 _ = ProviderEntry
 _ = ProviderAuthError
-_ = ProviderSurface

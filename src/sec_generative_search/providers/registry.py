@@ -18,10 +18,12 @@ Design notes:
   back two surfaces (``"openai"`` ships both an LLM and an embedding
   adapter).  Callers ask for one surface at a time.
 
-- The capability probe is **O(1) and credential-free**: it reads the
-    static ``MODEL_CATALOGUE`` / ``MODEL_DIMENSIONS`` ClassVars on the
-    provider class, never instantiates anything, and never touches the
-    network.
+- The capability probe is **O(1) and credential-free**: for the LLM
+    surface it reads the vendored
+    :mod:`~sec_generative_search.providers.catalogue` (keyed by
+    ``(provider_name, slug)``); for the embedding surface it reads the
+    static ``MODEL_DIMENSIONS`` ClassVar.  It never instantiates anything
+    and never touches the network.
 
 - :meth:`ProviderRegistry.validate_key` is the only method that
   instantiates a provider.  It accepts the key as a positional argument
@@ -48,6 +50,7 @@ from typing import Any, ClassVar
 from sec_generative_search.core.exceptions import ProviderAuthError
 from sec_generative_search.core.types import ProviderCapability
 from sec_generative_search.providers.anthropic import AnthropicProvider
+from sec_generative_search.providers.catalogue import model_catalogue
 from sec_generative_search.providers.deepseek import DeepSeekProvider
 from sec_generative_search.providers.gemini import (
     GeminiEmbeddingProvider,
@@ -123,9 +126,9 @@ class ProviderEntry:
             populated for entries gated behind an optional-extras install
             (only :class:`LocalEmbeddingProvider` today, gated on
             ``sentence_transformers``).
-        supports_arbitrary_models: ``True`` for meta-providers whose
-            ``MODEL_CATALOGUE`` is intentionally empty
-            (:class:`OpenRouterProvider`).  Tells UIs to render a free-text
+        supports_arbitrary_models: ``True`` for meta-providers with no
+            catalogued models (:class:`OpenRouterProvider` — absent from the
+            vendored catalogue by design).  Tells UIs to render a free-text
             slug input rather than a closed dropdown.
         supports_upstream_routing: ``True`` for providers that honour
             :class:`~sec_generative_search.providers.openrouter.OpenRouterRoutingHints`
@@ -285,19 +288,19 @@ class ProviderRegistry:
 
     @classmethod
     def list_models(cls, name: str, surface: ProviderSurface) -> list[str]:
-        """Return the model slugs declared on the provider class.
+        """Return the model slugs advertised for ``(name, surface)``.
 
-        For LLM providers this is ``MODEL_CATALOGUE.keys()``; for
-        embedding providers it is ``MODEL_DIMENSIONS.keys()``.  The list
-        is intentionally **empty** for meta-providers
+        For LLM providers this comes from the vendored
+        :mod:`~sec_generative_search.providers.catalogue`; for embedding
+        providers it is ``MODEL_DIMENSIONS.keys()``.  The list is
+        intentionally **empty** for meta-providers
         (:class:`OpenRouterProvider`) — pair this call with
         :meth:`supports_arbitrary_models` to decide between a dropdown
         and a free-text input in the UI.
         """
         cls_obj = cls.get_class(name, surface)
         if surface is ProviderSurface.LLM:
-            catalogue = getattr(cls_obj, "MODEL_CATALOGUE", {})
-            return list(catalogue.keys())
+            return model_catalogue().list_llm_models(name)
         if surface is ProviderSurface.EMBEDDING:
             dimensions = getattr(cls_obj, "MODEL_DIMENSIONS", {})
             return list(dimensions.keys())
@@ -357,10 +360,9 @@ class ProviderRegistry:
 
         if surface is ProviderSurface.LLM:
             slug = model or getattr(cls_obj, "default_model", "") or ""
-            catalogue: dict[str, Any] = getattr(cls_obj, "MODEL_CATALOGUE", {})
-            info = catalogue.get(slug)
-            if info is not None:
-                return info.capability
+            cap = model_catalogue().get_llm_capability(name, slug)
+            if cap is not None:
+                return cap
             # OpenRouter (or any future arbitrary-models provider) is
             # *expected* to fall through here for almost every slug.
             # Other providers fall through only for unknown / freshly-

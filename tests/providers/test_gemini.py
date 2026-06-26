@@ -37,7 +37,7 @@ from sec_generative_search.core.exceptions import (
 )
 from sec_generative_search.core.logging import LOGGER_NAME
 from sec_generative_search.core.resilience import RetryPolicy
-from sec_generative_search.core.types import PricingTier
+from sec_generative_search.core.types import PricingTier, ProviderCapability
 from sec_generative_search.providers import gemini as gemini_mod
 from sec_generative_search.providers.base import GenerationRequest
 from sec_generative_search.providers.gemini import (
@@ -45,6 +45,7 @@ from sec_generative_search.providers.gemini import (
     GeminiEmbeddingProvider,
     GeminiProvider,
 )
+from sec_generative_search.providers.registry import ProviderRegistry, ProviderSurface
 
 # ---------------------------------------------------------------------------
 # Fake ``APIError`` — bypasses the real ``__init__`` so tests can
@@ -190,13 +191,15 @@ class TestProviderMetadata:
         assert GeminiEmbeddingProvider.default_model == "gemini-embedding-2-preview"
 
     def test_catalogue_has_tiered_models(self) -> None:
-        cat = GeminiProvider.MODEL_CATALOGUE
-        assert cat["gemini-3.1-pro-preview"].capability.pricing_tier == PricingTier.PREMIUM
-        assert cat["gemini-3.1-pro-preview-customtools"].capability.tool_use is True
-        assert cat["gemini-3-flash-preview"].capability.pricing_tier == PricingTier.STANDARD
-        assert cat["gemini-2.5-pro"].capability.pricing_tier == PricingTier.PREMIUM
-        assert cat["gemini-2.5-flash-lite"].capability.pricing_tier == PricingTier.LOW
-        assert cat["gemini-2.5-flash"].capability.pricing_tier == PricingTier.STANDARD
+        def cap(slug: str) -> ProviderCapability:
+            return ProviderRegistry.get_capability("gemini", ProviderSurface.LLM, slug)
+
+        assert cap("gemini-3.1-pro-preview").pricing_tier == PricingTier.PREMIUM
+        assert cap("gemini-3.1-pro-preview-customtools").tool_use is True
+        assert cap("gemini-3-flash-preview").pricing_tier == PricingTier.STANDARD
+        assert cap("gemini-2.5-pro").pricing_tier == PricingTier.PREMIUM
+        assert cap("gemini-2.5-flash-lite").pricing_tier == PricingTier.LOW
+        assert cap("gemini-2.5-flash").pricing_tier == PricingTier.STANDARD
 
     def test_embedding_dimensions(self) -> None:
         assert GeminiEmbeddingProvider.MODEL_DIMENSIONS["gemini-embedding-2-preview"] == 3072

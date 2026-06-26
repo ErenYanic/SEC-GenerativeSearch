@@ -50,7 +50,6 @@ from sec_generative_search.core.resilience import (
     resilient_call,
 )
 from sec_generative_search.core.types import (
-    PricingTier,
     ProviderCapability,
     TokenUsage,
 )
@@ -59,7 +58,7 @@ from sec_generative_search.providers.base import (
     GenerationRequest,
     GenerationResponse,
 )
-from sec_generative_search.providers.openai_compat import ModelInfo
+from sec_generative_search.providers.catalogue import model_catalogue
 
 if TYPE_CHECKING:
     pass
@@ -101,65 +100,6 @@ class AnthropicProvider(BaseLLMProvider):
     provider_name: ClassVar[str] = "anthropic"
     default_model: ClassVar[str] = "claude-haiku-4-5"
     default_timeout: ClassVar[float] = 60.0
-
-    # Static capability probe — O(1) lookup, no network call at
-    # registration.  Context windows and max-output figures come from
-    # the Anthropic model cards; they change rarely and are surface-
-    # only (the SDK will reject an over-long request at call time).
-    MODEL_CATALOGUE: ClassVar[dict[str, ModelInfo]] = {
-        "claude-opus-4-8": ModelInfo(
-            capability=ProviderCapability(
-                chat=True,
-                streaming=True,
-                tool_use=True,
-                structured_output=True,
-                prompt_caching=True,
-                vision=True,
-                context_window_tokens=1_000_000,
-                max_output_tokens=128_000,
-                pricing_tier=PricingTier.PREMIUM,
-            ),
-        ),
-        "claude-opus-4-7": ModelInfo(
-            capability=ProviderCapability(
-                chat=True,
-                streaming=True,
-                tool_use=True,
-                structured_output=True,
-                prompt_caching=True,
-                vision=True,
-                context_window_tokens=1_000_000,
-                max_output_tokens=128_000,
-                pricing_tier=PricingTier.PREMIUM,
-            ),
-        ),
-        "claude-sonnet-4-6": ModelInfo(
-            capability=ProviderCapability(
-                chat=True,
-                streaming=True,
-                tool_use=True,
-                structured_output=True,
-                prompt_caching=True,
-                vision=True,
-                context_window_tokens=1_000_000,
-                max_output_tokens=64_000,
-                pricing_tier=PricingTier.PREMIUM,
-            ),
-        ),
-        "claude-haiku-4-5": ModelInfo(
-            capability=ProviderCapability(
-                chat=True,
-                streaming=True,
-                tool_use=True,
-                structured_output=True,
-                prompt_caching=True,
-                vision=True,
-                context_window_tokens=200_000,
-                max_output_tokens=64_000,
-                pricing_tier=PricingTier.STANDARD,
-            ),
-        ),
-    }
 
     def __init__(
         self,
@@ -208,16 +148,17 @@ class AnthropicProvider(BaseLLMProvider):
     def get_capabilities(self, model: str | None = None) -> ProviderCapability:
         """Return the static capability matrix for *model*.
 
-        Unknown slugs receive a permissive
+        Reads the vendored catalogue keyed by ``(provider_name, slug)``;
+        unknown slugs receive a permissive
         ``ProviderCapability(chat=True, streaming=True)`` — same
         semantics as the OpenAI-compatible bases, so the SDK rejects
         unsupported slugs at call time with a clear error rather than
         here.
         """
         slug = model or self.default_model
-        info = self.MODEL_CATALOGUE.get(slug)
-        if info is not None:
-            return info.capability
+        cap = model_catalogue().get_llm_capability(self.provider_name, slug)
+        if cap is not None:
+            return cap
         return ProviderCapability(chat=True, streaming=True)
 
     # ------------------------------------------------------------------

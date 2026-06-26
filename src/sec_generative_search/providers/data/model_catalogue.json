@@ -1,0 +1,1188 @@
+{
+  "_meta": {
+    "schema_version": 1,
+    "description": "Vendored baseline LLM model catalogue: the full capability matrix and exact per-MTok costs for every closed-catalogue model. pricing_tier is NEVER stored here -- it is derived from cost at load by ProviderCapability.__post_init__ / derive_pricing_tier. chat=true / embeddings=false are LLM-surface invariants applied by the loader, not stored per row.",
+    "generated_at": "2026-06-25",
+    "source": "Consolidation of the per-adapter MODEL_CATALOGUE dicts into package data. The model set is forward-dated and largely pre-release, so baseline costs are tier-calibrated estimates (blended input/output) chosen to reproduce each model's reviewed pricing tier; they are placeholders pending a future refresh from models.dev / LiteLLM.",
+    "cost_units": "USD per 1,000,000 tokens; null = unknown"
+  },
+  "providers": {
+    "openai": {
+      "gpt-5.5-pro": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 1050000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 15.0,
+        "output_cost_per_mtok": 60.0
+      },
+      "gpt-5.5": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 1050000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 10.0,
+        "output_cost_per_mtok": 40.0
+      },
+      "gpt-5.4-pro": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 1050000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 15.0,
+        "output_cost_per_mtok": 60.0
+      },
+      "gpt-5.4": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 1050000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 10.0,
+        "output_cost_per_mtok": 40.0
+      },
+      "gpt-5.4-mini": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 400000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 0.6,
+        "output_cost_per_mtok": 2.4
+      },
+      "gpt-5.4-nano": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 400000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      },
+      "gpt-5.2-pro": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 400000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 15.0,
+        "output_cost_per_mtok": 60.0
+      },
+      "gpt-5.2": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 400000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 10.0,
+        "output_cost_per_mtok": 40.0
+      },
+      "gpt-5.1": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 400000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 10.0,
+        "output_cost_per_mtok": 40.0
+      },
+      "gpt-5-pro": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 400000,
+        "max_output_tokens": 272000,
+        "input_cost_per_mtok": 15.0,
+        "output_cost_per_mtok": 60.0
+      },
+      "gpt-5": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 400000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 10.0,
+        "output_cost_per_mtok": 40.0
+      },
+      "gpt-5-mini": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 400000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 0.6,
+        "output_cost_per_mtok": 2.4
+      },
+      "gpt-5-nano": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 400000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      },
+      "gpt-4.1": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 1047576,
+        "max_output_tokens": 32768,
+        "input_cost_per_mtok": 3.2,
+        "output_cost_per_mtok": 12.8
+      },
+      "gpt-4.1-mini": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 1047576,
+        "max_output_tokens": 32768,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      },
+      "gpt-4.1-nano": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 1047576,
+        "max_output_tokens": 32768,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      },
+      "gpt-4o": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 128000,
+        "max_output_tokens": 16384,
+        "input_cost_per_mtok": 10.0,
+        "output_cost_per_mtok": 40.0
+      },
+      "gpt-4o-mini": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 128000,
+        "max_output_tokens": 16384,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      },
+      "o3": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 200000,
+        "max_output_tokens": 100000,
+        "input_cost_per_mtok": 3.2,
+        "output_cost_per_mtok": 12.8
+      },
+      "o4-mini": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 200000,
+        "max_output_tokens": 100000,
+        "input_cost_per_mtok": 0.6,
+        "output_cost_per_mtok": 2.4
+      }
+    },
+    "anthropic": {
+      "claude-opus-4-8": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 1000000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 15.0,
+        "output_cost_per_mtok": 60.0
+      },
+      "claude-opus-4-7": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 1000000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 15.0,
+        "output_cost_per_mtok": 60.0
+      },
+      "claude-sonnet-4-6": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 1000000,
+        "max_output_tokens": 64000,
+        "input_cost_per_mtok": 10.0,
+        "output_cost_per_mtok": 40.0
+      },
+      "claude-haiku-4-5": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 200000,
+        "max_output_tokens": 64000,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      }
+    },
+    "gemini": {
+      "gemini-3.1-pro-preview": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 1048576,
+        "max_output_tokens": 65536,
+        "input_cost_per_mtok": 7.2,
+        "output_cost_per_mtok": 28.8
+      },
+      "gemini-3.1-pro-preview-customtools": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 1048576,
+        "max_output_tokens": 65536,
+        "input_cost_per_mtok": 7.2,
+        "output_cost_per_mtok": 28.8
+      },
+      "gemini-3.5-flash": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 1048576,
+        "max_output_tokens": 65536,
+        "input_cost_per_mtok": 2.2,
+        "output_cost_per_mtok": 8.8
+      },
+      "gemini-3.1-flash-lite": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 1048576,
+        "max_output_tokens": 65536,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      },
+      "gemini-3.1-flash-lite-preview": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 1048576,
+        "max_output_tokens": 65536,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      },
+      "gemini-3-flash-preview": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 1048576,
+        "max_output_tokens": 65536,
+        "input_cost_per_mtok": 0.6,
+        "output_cost_per_mtok": 2.4
+      },
+      "gemini-2.5-pro": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 1048576,
+        "max_output_tokens": 65536,
+        "input_cost_per_mtok": 7.2,
+        "output_cost_per_mtok": 28.8
+      },
+      "gemini-2.5-flash-lite": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 1048576,
+        "max_output_tokens": 65536,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      },
+      "gemini-2.5-flash": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 1048576,
+        "max_output_tokens": 65536,
+        "input_cost_per_mtok": 0.6,
+        "output_cost_per_mtok": 2.4
+      }
+    },
+    "deepseek": {
+      "deepseek-v4-flash": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 1000000,
+        "max_output_tokens": 384000,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      },
+      "deepseek-v4-pro": {
+        "streaming": true,
+        "tool_use": false,
+        "structured_output": false,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 1000000,
+        "max_output_tokens": 384000,
+        "input_cost_per_mtok": 1.2,
+        "output_cost_per_mtok": 4.8
+      }
+    },
+    "kimi": {
+      "kimi-k2.7-code-highspeed": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 262144,
+        "max_output_tokens": 262144,
+        "input_cost_per_mtok": 2.2,
+        "output_cost_per_mtok": 8.8
+      },
+      "kimi-k2.7-code": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 262144,
+        "max_output_tokens": 262144,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      },
+      "kimi-k2.6": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 262144,
+        "max_output_tokens": 262144,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      },
+      "kimi-k2.5": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 262144,
+        "max_output_tokens": 262144,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      },
+      "kimi-k2-0905": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 262144,
+        "max_output_tokens": 262144,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      },
+      "kimi-k2": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 131072,
+        "max_output_tokens": 131072,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      },
+      "kimi-k2-thinking": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 262144,
+        "max_output_tokens": 262144,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      }
+    },
+    "mistral": {
+      "mistral-medium-3.5": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": false,
+        "vision": false,
+        "context_window_tokens": 256000,
+        "max_output_tokens": 256000,
+        "input_cost_per_mtok": 4.4,
+        "output_cost_per_mtok": 17.6
+      },
+      "magistral-medium-2509": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": false,
+        "vision": false,
+        "context_window_tokens": 128000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 4.4,
+        "output_cost_per_mtok": 17.6
+      },
+      "magistral-small-2509": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": false,
+        "vision": false,
+        "context_window_tokens": 128000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      },
+      "mistral-large-2512": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": false,
+        "vision": false,
+        "context_window_tokens": 256000,
+        "max_output_tokens": 256000,
+        "input_cost_per_mtok": 0.18,
+        "output_cost_per_mtok": 0.72
+      },
+      "mistral-medium-2508": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": false,
+        "vision": false,
+        "context_window_tokens": 128000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 1.2,
+        "output_cost_per_mtok": 4.8
+      },
+      "mistral-small-2603": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": false,
+        "vision": false,
+        "context_window_tokens": 256000,
+        "max_output_tokens": 256000,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      },
+      "mistral-small-2506": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": false,
+        "vision": false,
+        "context_window_tokens": 256000,
+        "max_output_tokens": 256000,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      },
+      "ministral-14b-2512": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": false,
+        "vision": false,
+        "context_window_tokens": 256000,
+        "max_output_tokens": 256000,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      },
+      "ministral-8b-2512": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": false,
+        "vision": false,
+        "context_window_tokens": 256000,
+        "max_output_tokens": 256000,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      },
+      "ministral-3b-2512": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": false,
+        "vision": false,
+        "context_window_tokens": 256000,
+        "max_output_tokens": 256000,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      },
+      "codestral-2508": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": false,
+        "vision": false,
+        "context_window_tokens": 128000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 0.18,
+        "output_cost_per_mtok": 0.72
+      },
+      "devstral-2512": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": false,
+        "vision": false,
+        "context_window_tokens": 256000,
+        "max_output_tokens": 256000,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      }
+    },
+    "qwen": {
+      "qwen3.7-max": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 1000000,
+        "max_output_tokens": 65536,
+        "input_cost_per_mtok": 4.4,
+        "output_cost_per_mtok": 17.6
+      },
+      "qwen3.7-plus": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 1000000,
+        "max_output_tokens": 65536,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      },
+      "qwen3-max": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 262144,
+        "max_output_tokens": 32768,
+        "input_cost_per_mtok": 15.0,
+        "output_cost_per_mtok": 60.0
+      },
+      "qwen3-max-thinking": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 262144,
+        "max_output_tokens": 32768,
+        "input_cost_per_mtok": 15.0,
+        "output_cost_per_mtok": 60.0
+      },
+      "qwen3.6-max-preview": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 262144,
+        "max_output_tokens": 65536,
+        "input_cost_per_mtok": 15.0,
+        "output_cost_per_mtok": 60.0
+      },
+      "qwen3.6-plus": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 1000000,
+        "max_output_tokens": 65536,
+        "input_cost_per_mtok": 3.2,
+        "output_cost_per_mtok": 12.8
+      },
+      "qwen3.6-flash": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 1000000,
+        "max_output_tokens": 65536,
+        "input_cost_per_mtok": 0.6,
+        "output_cost_per_mtok": 2.4
+      },
+      "qwen3.6-35b-a3b": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 262144,
+        "max_output_tokens": 262144,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      },
+      "qwen3.6-27b": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 262144,
+        "max_output_tokens": 262144,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      },
+      "qwen3.5-plus": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 1000000,
+        "max_output_tokens": 65536,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      },
+      "qwen3.5-flash": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 1000000,
+        "max_output_tokens": 65536,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      },
+      "qwen3.5-35b-a3b": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 262144,
+        "max_output_tokens": 262144,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      },
+      "qwen3.5-27b": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 262144,
+        "max_output_tokens": 65536,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      },
+      "qwen3.5-9b": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 262144,
+        "max_output_tokens": 81920,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      },
+      "qwen3.5-397b-a17b": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 262144,
+        "max_output_tokens": 65536,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      },
+      "qwen3.5-omni-plus": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": false,
+        "vision": false,
+        "context_window_tokens": 262144,
+        "max_output_tokens": 65536,
+        "input_cost_per_mtok": 4.4,
+        "output_cost_per_mtok": 17.6
+      },
+      "qwen3.5-omni-flash": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": false,
+        "vision": false,
+        "context_window_tokens": 262144,
+        "max_output_tokens": 65536,
+        "input_cost_per_mtok": 0.6,
+        "output_cost_per_mtok": 2.4
+      },
+      "qwen-plus": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 1000000,
+        "max_output_tokens": 32768,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      },
+      "qwen-plus-2025-07-28": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 1000000,
+        "max_output_tokens": 32768,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      }
+    },
+    "zai": {
+      "glm-5.2": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 1000000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      },
+      "glm-5.1": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 200000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      },
+      "glm-5": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 200000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      },
+      "glm-5-turbo": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 200000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 0.6,
+        "output_cost_per_mtok": 2.4
+      },
+      "glm-4.7": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 200000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      },
+      "glm-4.7-flashx": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 200000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      },
+      "glm-4.6": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 200000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      },
+      "glm-4.5": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 128000,
+        "max_output_tokens": 96000,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      },
+      "glm-4.5-x": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 128000,
+        "max_output_tokens": 96000,
+        "input_cost_per_mtok": 4.4,
+        "output_cost_per_mtok": 17.6
+      },
+      "glm-4.5-air": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 128000,
+        "max_output_tokens": 96000,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      },
+      "glm-4.5-airx": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 128000,
+        "max_output_tokens": 96000,
+        "input_cost_per_mtok": 0.6,
+        "output_cost_per_mtok": 2.4
+      },
+      "glm-4.7-flash": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 200000,
+        "max_output_tokens": 128000,
+        "input_cost_per_mtok": 0.0,
+        "output_cost_per_mtok": 0.0
+      },
+      "glm-4.5-flash": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 128000,
+        "max_output_tokens": 96000,
+        "input_cost_per_mtok": 0.0,
+        "output_cost_per_mtok": 0.0
+      }
+    },
+    "grok": {
+      "grok-4.3": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 1000000,
+        "max_output_tokens": 1000000,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      },
+      "grok-4.20-0309-reasoning": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 2000000,
+        "max_output_tokens": 2000000,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      },
+      "grok-4.20-0309-non-reasoning": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 2000000,
+        "max_output_tokens": 2000000,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      },
+      "grok-4.20-multi-agent-0309": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 2000000,
+        "max_output_tokens": 2000000,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      },
+      "grok-4-1-fast-reasoning": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 2000000,
+        "max_output_tokens": 2000000,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      },
+      "grok-4-1-fast-non-reasoning": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 2000000,
+        "max_output_tokens": 2000000,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      }
+    },
+    "minimax": {
+      "minimax-m3": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": true,
+        "context_window_tokens": 1048576,
+        "max_output_tokens": 512000,
+        "input_cost_per_mtok": 0.6,
+        "output_cost_per_mtok": 2.4
+      },
+      "minimax-m2.7": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 204800,
+        "max_output_tokens": 204800,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      },
+      "minimax-m2.7-highspeed": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 204800,
+        "max_output_tokens": 204800,
+        "input_cost_per_mtok": 0.6,
+        "output_cost_per_mtok": 2.4
+      },
+      "minimax-m2.5": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 204800,
+        "max_output_tokens": 204800,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      },
+      "minimax-m2.5-highspeed": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 204800,
+        "max_output_tokens": 204800,
+        "input_cost_per_mtok": 0.6,
+        "output_cost_per_mtok": 2.4
+      },
+      "minimax-m2.1": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 204800,
+        "max_output_tokens": 204800,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      },
+      "minimax-m2.1-highspeed": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 204800,
+        "max_output_tokens": 204800,
+        "input_cost_per_mtok": 0.6,
+        "output_cost_per_mtok": 2.4
+      },
+      "minimax-m2": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": true,
+        "vision": false,
+        "context_window_tokens": 204800,
+        "max_output_tokens": 204800,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      }
+    },
+    "mimo": {
+      "mimo-v2.5-pro": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": false,
+        "vision": false,
+        "context_window_tokens": 1048576,
+        "max_output_tokens": 131072,
+        "input_cost_per_mtok": 4.4,
+        "output_cost_per_mtok": 17.6
+      },
+      "mimo-v2-pro": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": false,
+        "vision": false,
+        "context_window_tokens": 1048576,
+        "max_output_tokens": 131072,
+        "input_cost_per_mtok": 4.4,
+        "output_cost_per_mtok": 17.6
+      },
+      "mimo-v2.5": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": false,
+        "vision": false,
+        "context_window_tokens": 1048576,
+        "max_output_tokens": 131072,
+        "input_cost_per_mtok": 0.9,
+        "output_cost_per_mtok": 3.6
+      },
+      "mimo-v2-omni": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": false,
+        "vision": false,
+        "context_window_tokens": 256000,
+        "max_output_tokens": 65536,
+        "input_cost_per_mtok": 1.2,
+        "output_cost_per_mtok": 4.8
+      },
+      "mimo-v2-flash": {
+        "streaming": true,
+        "tool_use": true,
+        "structured_output": true,
+        "prompt_caching": false,
+        "vision": false,
+        "context_window_tokens": 262144,
+        "max_output_tokens": 65536,
+        "input_cost_per_mtok": 0.08,
+        "output_cost_per_mtok": 0.32
+      }
+    }
+  }
+}

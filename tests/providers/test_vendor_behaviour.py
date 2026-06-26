@@ -61,6 +61,7 @@ from sec_generative_search.providers.mistral import (
 )
 from sec_generative_search.providers.openrouter import OpenRouterRoutingHints
 from sec_generative_search.providers.qwen import QwenEmbeddingProvider, QwenProvider
+from sec_generative_search.providers.registry import ProviderRegistry, ProviderSurface
 from sec_generative_search.providers.zai import ZaiProvider
 
 # ---------------------------------------------------------------------------
@@ -381,11 +382,16 @@ def test_default_model_is_not_premium_tier(provider_cls: type, default_model: st
     A vendor whose flagship is its costliest slug must still default to a
     cheaper tier.
     """
-    info = provider_cls.MODEL_CATALOGUE[default_model]
-    assert info.capability.pricing_tier is not PricingTier.PREMIUM
+    cap = ProviderRegistry.get_capability(
+        provider_cls.provider_name, ProviderSurface.LLM, default_model
+    )
+    assert cap.pricing_tier is not PricingTier.PREMIUM
     # And the declared default must be a real, catalogued slug (not the
     # permissive-default fall-through) so the tier above is meaningful.
     assert provider_cls.default_model == default_model
+    assert default_model in ProviderRegistry.list_models(
+        provider_cls.provider_name, ProviderSurface.LLM
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -398,12 +404,12 @@ def test_grok_preserves_dated_slugs_not_moving_aliases() -> None:
 
     The catalogue intentionally preserves dated slugs.
     """
-    catalogue = GrokProvider.MODEL_CATALOGUE
-    assert "grok-4.20-0309-reasoning" in catalogue
-    assert "grok-4-1-fast-non-reasoning" in catalogue
+    models = ProviderRegistry.list_models("grok", ProviderSurface.LLM)
+    assert "grok-4.20-0309-reasoning" in models
+    assert "grok-4-1-fast-non-reasoning" in models
     # Moving aliases that xAI does not serve authoritatively are absent.
-    assert "grok-4" not in catalogue
-    assert "grok" not in catalogue
+    assert "grok-4" not in models
+    assert "grok" not in models
 
 
 def test_zai_targets_general_paas_not_coding_endpoint() -> None:

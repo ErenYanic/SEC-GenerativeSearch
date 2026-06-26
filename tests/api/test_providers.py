@@ -337,11 +337,11 @@ class TestListProvidersNoSecrets:
             assert needle not in text, f"forbidden substring {needle!r} leaked into list response"
 
     def test_response_carries_no_model_catalogue(self, api_client: TestClient) -> None:
-        # ``MODEL_CATALOGUE`` is an internal class attribute on every
-        # LLM provider. v1 deliberately does NOT surface it — listing
-        # models on the catalogue route would couple the UI to backend
-        # slug renames. (A dedicated ``GET /api/providers/{name}/models``
-        # is the right shape if/when the UI needs it.)
+        # The per-model catalogue is internal backend data. The ``GET
+        # /api/providers/`` list route deliberately does NOT surface it —
+        # listing models there would couple the UI to backend slug
+        # renames. (The dedicated ``GET /api/providers/{name}/models``
+        # route is the right shape for that.)
         response = api_client.get("/api/providers/")
         providers = response.json()["providers"]
         for entry in providers:
@@ -420,7 +420,7 @@ class TestListProvidersBodyCap:
 
 
 class TestProviderModelsShape:
-    """The models route lifts the LLM ``MODEL_CATALOGUE`` of one provider.
+    """The models route lifts the LLM model catalogue of one provider.
 
     Asserts the catalogue makes it onto the wire as ``(model,
     pricing_tier)`` rows in declaration order, that the tier is the
