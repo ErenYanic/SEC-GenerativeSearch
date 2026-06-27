@@ -14,6 +14,7 @@
 
 import { useEffect, useState, type JSX } from "react";
 
+import { CatalogueRefreshCard } from "@/components/catalogue-refresh-card";
 import { EdgarIdentityCard } from "@/components/edgar-identity-card";
 import { Skeleton } from "@/components/skeleton";
 import { ApiError, getStatus } from "@/lib/api";
@@ -85,6 +86,10 @@ export default function DashboardPage(): JSX.Element {
           <StatusGrid data={state.data} />
         ) : null}
       </section>
+
+      {state.kind === "ready" && state.data.is_admin ? (
+        <CatalogueRefreshCard />
+      ) : null}
 
       <EdgarIdentityCard heading="EDGAR identity (per-session)" />
     </div>

@@ -24,6 +24,7 @@ __all__ = [
     "AdminUserUnlockResponse",
     "BulkDeleteRequest",
     "BulkDeleteResponse",
+    "CatalogueRefreshResponse",
     "CitationSchema",
     "ClearAllResponse",
     "ConversationTurnSchema",
@@ -260,6 +261,29 @@ class ProviderModelsResponse(_BaseModel):
     supports_arbitrary_models: bool
     models: list[ModelPricingSchema]
     total: int
+
+
+class CatalogueRefreshResponse(_BaseModel):
+    """Result of ``POST /api/providers/catalogue/refresh`` (admin only).
+
+    Content-free, allow-list lift of
+    :class:`~sec_generative_search.core.types.CatalogueRefreshReport`: the
+    operator-supplied ``source`` key + the public metadata ``source_url``
+    that was fetched, plus the aggregate ``provider_count`` / ``model_count``
+    written into the additive overlay.
+
+    The report's ``overlay_path`` is **deliberately NOT lifted** — a
+    filesystem path never belongs on the wire (same posture as
+    :class:`GpuStatusResponse`).  No model slug, no per-token cost, and no
+    credential ever reaches this surface: the refresh seam is credential-free
+    end to end and ``pricing_tier`` is derived at load, never fetched.
+    Widening this schema is a security-sensitive change.
+    """
+
+    source: str
+    source_url: str
+    provider_count: int
+    model_count: int
 
 
 class ProviderValidateRequest(_BaseModel):

@@ -147,6 +147,17 @@ ROUTE_POLICIES: tuple[tuple[str, str | None, RoutePolicy], ...] = (
         "POST",
         RoutePolicy(rate_category="validate", max_body_bytes=16 * _KIB),
     ),
+    # Catalogue refresh trigger: admin-gated POST with no body. It drives an
+    # outbound HTTPS fetch, so it rides the destructive ``delete`` bucket — a
+    # leaking admin key must not be able to hammer the upstream metadata source
+    # in a tight loop. MUST precede the ``/api/providers`` GET entry so the
+    # longer prefix wins. 1 KiB cap defends against declared-Content-Length
+    # probes against a body-free route.
+    (
+        "/api/providers/catalogue",
+        "POST",
+        RoutePolicy(rate_category="delete", max_body_bytes=1 * _KIB),
+    ),
     # Provider catalogue: read-tier GET with no body. Tight cap defends
     # against declared-Content-Length probes against an authenticated
     # route. MUST come after ``/api/providers/validate`` (which pins the

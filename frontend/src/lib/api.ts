@@ -19,6 +19,7 @@ import type {
   AdminUserUnlockResponseBody,
   AnswerMode,
   AuthSignOutResponseBody,
+  CatalogueRefreshResponse,
   CitationSchema,
   ConversationTurnSchema,
   EdgarIdentityRegisterResponse,
@@ -326,6 +327,24 @@ export function validateProvider(
     method: "POST",
     body: JSON.stringify(body),
     attachProviderKeys: true,
+  });
+}
+
+/**
+ * Trigger an admin-gated model-catalogue refresh via
+ * `POST /api/providers/catalogue/refresh`. The backend fetches the
+ * configured upstream metadata source, re-validates it as untrusted input,
+ * and writes an additive overlay; the handling worker reloads it in place.
+ *
+ * Admin-tier: the admin proxy injects the operator's `X-Admin-Key`. A
+ * non-admin caller (or a deployment with a configured admin key the proxy
+ * lacks) surfaces as `ApiError` 403. Fetch / validation failures surface as
+ * `ApiError` 502 — the refresh is fail-closed, so the prior catalogue keeps
+ * serving. No request body: source / URL / overlay-path are server config.
+ */
+export function refreshModelCatalogue(): Promise<CatalogueRefreshResponse> {
+  return apiFetch<CatalogueRefreshResponse>("providers/catalogue/refresh", {
+    method: "POST",
   });
 }
 

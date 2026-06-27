@@ -29,6 +29,7 @@ Goals:
 from __future__ import annotations
 
 import re
+from types import SimpleNamespace
 from typing import Any, ClassVar
 
 import pytest
@@ -45,12 +46,14 @@ from sec_generative_search.config.settings import (
     SearchSettings,
 )
 from sec_generative_search.core.exceptions import (
+    CatalogueRefreshError,
     DatabaseError,
     ProviderAuthError,
     ProviderError,
     ProviderRateLimitError,
     ProviderTimeoutError,
 )
+from sec_generative_search.core.types import CatalogueRefreshReport
 from sec_generative_search.providers.registry import (
     ProviderEntry,
     ProviderSurface,
@@ -805,6 +808,102 @@ class TestPricingLabel:
 
 
 # ---------------------------------------------------------------------------
+# `provider refresh-catalogue`
+# ---------------------------------------------------------------------------
+
+
+class _StubProviderRefreshSettings:
+    """Minimal settings stub exposing only the catalogue-refresh fields."""
+
+    def __init__(self) -> None:
+        self.provider = SimpleNamespace(
+            catalogue_refresh_source="models_dev",
+            catalogue_refresh_url=None,
+            catalogue_overlay_path="./data/model_catalogue_overlay.json",
+        )
+
+
+class TestProviderRefreshCatalogue:
+    """``provider refresh-catalogue`` drives the opt-in refresh seam."""
+
+    _OVERLAY = "/srv/data/SENTINEL-overlay.json"
+
+    @pytest.fixture
+    def patch_settings(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(provider_module, "get_settings", lambda: _StubProviderRefreshSettings())
+
+    def _patch_refresh(self, monkeypatch: pytest.MonkeyPatch, fn: Any) -> None:
+        # ``cli.provider`` local-imports ``refresh_overlay`` inside the command,
+        # so patch the source module the import resolves to.
+        import sec_generative_search.providers.refresh as refresh_module
+
+        monkeypatch.setattr(refresh_module, "refresh_overlay", fn)
+
+    def test_happy_path_reports_counts(
+        self, runner: CliRunner, app: typer.Typer, monkeypatch: pytest.MonkeyPatch, patch_settings
+    ) -> None:
+        def _fake(**_: Any) -> CatalogueRefreshReport:
+            return CatalogueRefreshReport(
+                source="models_dev",
+                source_url="https://models.dev/api.json",
+                provider_count=7,
+                model_count=42,
+                overlay_path=self._OVERLAY,
+            )
+
+        self._patch_refresh(monkeypatch, _fake)
+        result = runner.invoke(app, ["provider", "refresh-catalogue"])
+        assert result.exit_code == 0
+        out = _stripped(result.stdout)
+        assert "7 providers, 42 models" in out
+        assert "models_dev" in out
+
+    def test_forwards_configured_args(
+        self, runner: CliRunner, app: typer.Typer, monkeypatch: pytest.MonkeyPatch, patch_settings
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        def _spy(**kwargs: Any) -> CatalogueRefreshReport:
+            captured.update(kwargs)
+            return CatalogueRefreshReport(
+                source="models_dev",
+                source_url="https://models.dev/api.json",
+                provider_count=1,
+                model_count=1,
+                overlay_path=self._OVERLAY,
+            )
+
+        self._patch_refresh(monkeypatch, _spy)
+        runner.invoke(app, ["provider", "refresh-catalogue"])
+        assert captured["source"] == "models_dev"
+        assert captured["url"] is None
+        assert captured["overlay_path"] == "./data/model_catalogue_overlay.json"
+
+    def test_refresh_error_exits_1(
+        self, runner: CliRunner, app: typer.Typer, monkeypatch: pytest.MonkeyPatch, patch_settings
+    ) -> None:
+        def _boom(**_: Any) -> CatalogueRefreshReport:
+            raise CatalogueRefreshError("Catalogue refresh response was not valid JSON.")
+
+        self._patch_refresh(monkeypatch, _boom)
+        result = runner.invoke(app, ["provider", "refresh-catalogue"])
+        assert result.exit_code == 1
+        assert "Catalogue refresh failed" in _stripped(result.stdout)
+
+    def test_os_error_does_not_leak_path(
+        self, runner: CliRunner, app: typer.Typer, monkeypatch: pytest.MonkeyPatch, patch_settings
+    ) -> None:
+        def _disk(**_: Any) -> CatalogueRefreshReport:
+            raise OSError(f"[Errno 13] Permission denied: '{self._OVERLAY}'")
+
+        self._patch_refresh(monkeypatch, _disk)
+        result = runner.invoke(app, ["provider", "refresh-catalogue"])
+        assert result.exit_code == 1
+        # The OS error's embedded path must never reach the rendered output.
+        assert self._OVERLAY not in result.stdout
+
+
+# ---------------------------------------------------------------------------
 # Smoke import — placate ruff that imports are used
 # ---------------------------------------------------------------------------
 
@@ -812,7 +911,7 @@ class TestPricingLabel:
 def test_provider_app_smoke() -> None:
     """The Typer instance is importable and carries every subcommand."""
     info_names = {cmd.name for cmd in provider_app.registered_commands}
-    assert {"list", "validate", "set"} <= info_names
+    assert {"list", "validate", "set", "refresh-catalogue"} <= info_names
 
 
 # Unused symbols carried for parametric extension — pin so ruff

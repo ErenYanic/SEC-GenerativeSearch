@@ -121,6 +121,18 @@ export interface ProviderValidateResponse {
   surface: string;
 }
 
+// `POST /api/providers/catalogue/refresh` (admin only). Content-free lift
+// of the backend `CatalogueRefreshReport`: the source key + public metadata
+// URL that was fetched and the aggregate counts written into the additive
+// overlay. The backend deliberately omits the overlay filesystem path — no
+// model slug, cost figure, or credential ever reaches this surface.
+export interface CatalogueRefreshResponse {
+  source: string;
+  source_url: string;
+  provider_count: number;
+  model_count: number;
+}
+
 // ---------------------------------------------------------------------------
 // RAG — plan / query / stream
 // ---------------------------------------------------------------------------

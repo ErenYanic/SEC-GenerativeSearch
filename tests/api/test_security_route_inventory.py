@@ -80,6 +80,7 @@ _EXPECTED_ADMIN_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("DELETE", "/api/admin/users/{user_id}"),
         ("POST", "/api/admin/users/{user_id}/unlock"),
         ("GET", "/api/providers/health"),
+        ("POST", "/api/providers/catalogue/refresh"),
         ("DELETE", "/api/filings/{accession}"),
         ("POST", "/api/filings/delete-by-ids"),
         ("POST", "/api/filings/bulk-delete"),

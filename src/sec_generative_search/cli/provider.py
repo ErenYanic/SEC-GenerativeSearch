@@ -65,6 +65,7 @@ from sec_generative_search.core.credentials import (
     validate_credential,
 )
 from sec_generative_search.core.exceptions import (
+    CatalogueRefreshError,
     ConfigurationError,
     DatabaseError,
     ProviderError,
@@ -793,3 +794,74 @@ def set_key(
                 raise typer.Exit(code=1)
     finally:
         registry.close()
+
+
+# ---------------------------------------------------------------------------
+# `provider refresh-catalogue`
+# ---------------------------------------------------------------------------
+
+
+@provider_app.command("refresh-catalogue")
+def refresh_catalogue() -> None:
+    """Refresh the model-catalogue overlay from the configured upstream.
+
+    The operator trigger for the opt-in refresh seam
+    (:mod:`providers.refresh`).  Performs a single bounded, fail-closed
+    HTTPS fetch of the configured source
+    (``PROVIDER_CATALOGUE_REFRESH_SOURCE`` / ``_URL``), re-validates it as
+    untrusted input, and writes an additive overlay to
+    ``PROVIDER_CATALOGUE_OVERLAY_PATH`` — never the request path, never a
+    credential.  A running API picks the overlay up on its next start (or on
+    the admin route's in-process reload).
+
+    Exit codes:
+
+    - ``0`` — overlay written.
+    - ``1`` — fetch / validation / write failed (fail-closed: any prior
+      overlay and the bundled baseline keep serving untouched).
+    """
+    provider_settings = get_settings().provider
+
+    # Local import keeps the refresh module (and its lazy httpx) off the
+    # CLI's ``--help`` / ``--version`` start-up path.
+    from sec_generative_search.providers.refresh import refresh_overlay
+
+    try:
+        report = refresh_overlay(
+            overlay_path=provider_settings.catalogue_overlay_path,
+            source=provider_settings.catalogue_refresh_source,
+            url=provider_settings.catalogue_refresh_url,
+        )
+    except CatalogueRefreshError as exc:
+        # The message is content-free by construction — never an upstream body.
+        _print_error(
+            "Catalogue refresh failed",
+            str(exc),
+            hint=(
+                "Fail-closed: any prior overlay and the bundled baseline are "
+                "untouched.  Check PROVIDER_CATALOGUE_REFRESH_SOURCE / _URL is "
+                "reachable and returns the expected schema, then retry."
+            ),
+        )
+        raise typer.Exit(code=1) from None
+    except OSError as exc:
+        # Disk failure writing the overlay — render the error *type* only, never
+        # ``str(exc)`` (it can carry the configured filesystem path).
+        _print_error(
+            "Catalogue overlay write failed",
+            f"Could not write the overlay to disk ({type(exc).__name__}).",
+            hint="Verify the overlay path is writable and the volume has free space.",
+        )
+        raise typer.Exit(code=1) from None
+
+    console.print(
+        f"[green]✓[/green] Catalogue overlay refreshed from "
+        f"[cyan]{escape(report.source)}[/cyan]: "
+        f"{report.provider_count} providers, {report.model_count} models."
+    )
+    console.print(f"  [dim]Source: {escape(report.source_url)}[/dim]")
+    console.print(f"  [dim]Overlay: {escape(report.overlay_path)}[/dim]")
+    console.print(
+        "  [dim italic]Takes effect on the next API start, or immediately via "
+        "the admin refresh route.[/dim italic]"
+    )
