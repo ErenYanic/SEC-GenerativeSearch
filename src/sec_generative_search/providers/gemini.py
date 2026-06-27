@@ -475,12 +475,16 @@ class GeminiEmbeddingProvider(_GeminiClientMixin, BaseEmbeddingProvider):
     """Embedding provider for Google's hosted embedding models."""
 
     provider_name: ClassVar[str] = "gemini"
-    default_model: ClassVar[str] = "gemini-embedding-2-preview"
+    default_model: ClassVar[str] = "gemini-embedding-2"
 
-    # Native dimensions. ``gemini-embedding-2-preview`` currently
-    # defaults to 3072 dimensions while also supporting smaller request-
-    # time projections; the registry uses the native default.
+    # Native dimensions. The GA ``gemini-embedding-2`` is the default — a
+    # defaulted run must not depend on a preview endpoint. It emits 3072
+    # dimensions natively while also supporting smaller request-time
+    # projections; the registry uses the native default. The superseded
+    # ``gemini-embedding-2-preview`` slug is retained so a collection
+    # already stamped against it still opens (selection is explicit).
     MODEL_DIMENSIONS: ClassVar[dict[str, int]] = {
+        "gemini-embedding-2": 3072,
         "gemini-embedding-2-preview": 3072,
         "gemini-embedding-001": 3072,
     }

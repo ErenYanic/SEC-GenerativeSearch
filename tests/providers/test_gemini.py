@@ -188,7 +188,7 @@ class TestProviderMetadata:
 
     def test_default_models(self) -> None:
         assert GeminiProvider.default_model == "gemini-3-flash-preview"
-        assert GeminiEmbeddingProvider.default_model == "gemini-embedding-2-preview"
+        assert GeminiEmbeddingProvider.default_model == "gemini-embedding-2"
 
     def test_catalogue_has_tiered_models(self) -> None:
         def cap(slug: str) -> ProviderCapability:
@@ -202,6 +202,7 @@ class TestProviderMetadata:
         assert cap("gemini-2.5-flash").pricing_tier == PricingTier.STANDARD
 
     def test_embedding_dimensions(self) -> None:
+        assert GeminiEmbeddingProvider.MODEL_DIMENSIONS["gemini-embedding-2"] == 3072
         assert GeminiEmbeddingProvider.MODEL_DIMENSIONS["gemini-embedding-2-preview"] == 3072
         assert GeminiEmbeddingProvider.MODEL_DIMENSIONS["gemini-embedding-001"] == 3072
 
@@ -482,7 +483,7 @@ class TestEmbeddings:
         embedder._fake_client.models.embed_content.return_value = response
         embedder.embed_texts(["x"])
         assert embedder._fake_client.models.embed_content.call_args.kwargs["model"] == (
-            "gemini-embedding-2-preview"
+            "gemini-embedding-2"
         )
 
     def test_embed_auth_error_terminal(self, embedder: GeminiEmbeddingProvider) -> None:
