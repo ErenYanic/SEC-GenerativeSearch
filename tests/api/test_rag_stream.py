@@ -333,6 +333,9 @@ class TestRagStreamHappyPath:
             "output_tokens": 42,
             "total_tokens": 162,
         }
+        # Per-request cost estimate mirrors the non-streaming surface:
+        # gpt-5.4-mini (in=0.6, out=2.4 USD/MTok) over 120+42 tokens.
+        assert final["estimated_cost_usd"] == pytest.approx(0.0001728)
 
     def test_orchestrator_receives_lifted_plan(self, rag_stream_app_factory) -> None:
         events = [StreamEvent(final=_default_final_result(citations=[]))]

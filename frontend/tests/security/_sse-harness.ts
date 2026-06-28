@@ -97,14 +97,22 @@ export function pendingStreamingResponse(): {
  * model / token-usage payload most tests do not exercise. Use the
  * lower-level `sseFrame("final", …)` directly when a test needs to
  * pin a non-default value (e.g. an OpenRouter run).
+ *
+ * `estimatedCostUsd` defaults to a small priced figure so the chat
+ * surface's session-total accumulation has something to add; pass `null`
+ * to simulate an unknown-cost model (arbitrary-slug provider).
  */
-export function finalFrame(answer: string): string {
+export function finalFrame(
+  answer: string,
+  estimatedCostUsd: number | null = 0.0001728,
+): string {
   return sseFrame("final", {
     answer,
     provider: "openai",
     model: "gpt-test",
     prompt_version: "v1",
     token_usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
+    estimated_cost_usd: estimatedCostUsd,
     latency_seconds: 0.1,
     streamed: true,
     refused: false,

@@ -1196,6 +1196,7 @@ class TestRagQueryJson:
             "model",
             "prompt_version",
             "token_usage",
+            "estimated_cost_usd",
             "latency_seconds",
             "streamed",
             "refused",
@@ -1204,6 +1205,10 @@ class TestRagQueryJson:
         # ``retrieved_chunks`` MUST NOT leak — same discipline as the
         # API surface (citations are the audit trail).
         assert "retrieved_chunks" not in payload
+        # The CLI mirrors the API's per-request estimate.
+        # The resolved provider/model (openai default → gpt-5.4-mini,
+        # in=0.6 / out=2.4 USD/MTok) over 100+50 tokens → 0.00018.
+        assert payload["estimated_cost_usd"] == pytest.approx(0.00018)
         # Citation shape mirrors CitationSchema.
         citation = payload["citations"][0]
         cite_keys = {

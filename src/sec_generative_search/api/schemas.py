@@ -218,25 +218,46 @@ class ProviderListResponse(_BaseModel):
 
 
 class ModelPricingSchema(_BaseModel):
-    """One catalogued LLM model and its coarse pricing tier.
+    """One catalogued LLM model with its coarse tier and exact per-MTok cost.
 
-    Deliberately narrow: only the model slug and its
-    :class:`~sec_generative_search.core.types.PricingTier` value — the
-    single source of truth the web UI needs to surface a "cheap vs.
-    premium" hint without re-deriving cost from a second table. No
-    per-token cost, no dollar figure, no capability matrix: those are
-    either out-of-scope or belong to a deliberate later widening.
-    Widening this schema is a security-sensitive change.
+    Deliberately narrow: the model slug, its
+    :class:`~sec_generative_search.core.types.PricingTier` value, and the
+    exact input / output per-million-token cost — the single source of truth
+    the web UI needs to surface a "cheap vs. premium" hint *and* a
+    per-request cost estimate without re-deriving anything from a second
+    table. Still no capability matrix (context window, tool-use, …): that
+    remains out of scope. Widening this schema further is a
+    security-sensitive change.
+
+    The two cost fields are the deliberate later widening the original
+    (tier-only) schema anticipated. The figures are public vendor pricing
+    already shipped in the vendored catalogue, never a secret; the pricing
+    tier remains derived from cost, so the two fields never contradict each
+    other.
 
     ``pricing_tier`` is the lower-case :class:`PricingTier` value
     (``"free"`` / ``"low"`` / ``"standard"`` / ``"high"`` / ``"premium"``
     / ``"unknown"``); the route lifts the enum *value*, never the enum
     object, so a future rename is caught as a schema mismatch rather than
     silently surfacing a Python ``repr``.
+
+    ``input_cost_per_mtok`` / ``output_cost_per_mtok`` are USD per one
+    million tokens, or ``None`` when unknown (arbitrary-slug providers and
+    overlay-only models) — exactly the rows whose tier is ``"unknown"``.
     """
 
     model: str
     pricing_tier: str
+    input_cost_per_mtok: float | None = Field(
+        default=None,
+        ge=0.0,
+        description="Exact prompt-token price, USD per 1M tokens; None when unknown.",
+    )
+    output_cost_per_mtok: float | None = Field(
+        default=None,
+        ge=0.0,
+        description="Exact completion-token price, USD per 1M tokens; None when unknown.",
+    )
 
 
 class ProviderModelsResponse(_BaseModel):
@@ -1141,6 +1162,20 @@ class RagQueryResponse(_BaseModel):
     model: str
     prompt_version: str
     token_usage: TokenUsageSchema
+    estimated_cost_usd: float | None = Field(
+        default=None,
+        ge=0.0,
+        description=(
+            "Estimated USD cost of this call, derived from token usage and the "
+            "model's exact per-MTok cost via "
+            ":func:`~sec_generative_search.core.types.estimate_cost`. ``None`` "
+            "when the model's cost is unknown (arbitrary-slug providers / "
+            "overlay-only models) — the UI renders that as '—'. An estimate, "
+            "not a final bill: prompt-caching discounts and tiered pricing are "
+            "not modelled, and token counts for some providers are an offline "
+            "approximation."
+        ),
+    )
     latency_seconds: float = Field(ge=0.0)
     streamed: bool = Field(
         default=False,

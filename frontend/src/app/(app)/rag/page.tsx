@@ -52,6 +52,7 @@ import type {
   RagStreamFinalPayload,
 } from "@/lib/api-types";
 import { ModelPicker, type ModelPickerValue } from "@/components/model-picker";
+import { formatUsd } from "@/lib/format";
 
 const ANSWER_MODES: AnswerMode[] = [
   "concise",
@@ -743,7 +744,18 @@ function AnswerCard({
             <span className="font-mono">{state.final.provider}</span> /{" "}
             <span className="font-mono">{state.final.model}</span>
             {" — "}
-            {state.final.token_usage.total_tokens.toString()} tokens in{" "}
+            {state.final.token_usage.total_tokens.toString()} tokens
+            {state.final.estimated_cost_usd !== undefined ? (
+              <>
+                {" — "}
+                <span className="font-mono" title="Estimated cost — not a final bill">
+                  {state.final.estimated_cost_usd !== null
+                    ? `~${formatUsd(state.final.estimated_cost_usd)}`
+                    : "—"}
+                </span>
+              </>
+            ) : null}
+            {" in "}
             {state.final.latency_seconds.toFixed(1)} s
           </span>
         ) : null}

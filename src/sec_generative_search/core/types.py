@@ -640,6 +640,43 @@ def derive_pricing_tier(
     return PricingTier.PREMIUM
 
 
+def estimate_cost(
+    usage: "TokenUsage",
+    capability: "ProviderCapability",
+) -> float | None:
+    """Estimate the USD cost of a provider call from token usage + cost data.
+
+    Pure, total, and side-effect-free — the single sanctioned way to turn a
+    :class:`TokenUsage` record into an estimated dollar figure, mirroring how
+    :func:`derive_pricing_tier` is the single tier function.  Both per-MTok
+    costs on ``capability`` are exact (USD per one million tokens); the
+    estimate is::
+
+        input_tokens / 1e6 * input_cost + output_tokens / 1e6 * output_cost
+
+    Returns ``None`` (the UNKNOWN case) whenever *either* cost is unknown
+    (``None``) — a one-sided estimate would understate the true price and
+    mislead the caller, so the honest answer is "unknown" rather than a
+    partial figure.  The closed-catalogue baseline always carries both costs,
+    so this only collapses to ``None`` for arbitrary-slug providers
+    (OpenRouter) or overlay-only models that arrived without pricing — exactly
+    the rows whose :attr:`ProviderCapability.pricing_tier` is
+    :attr:`PricingTier.UNKNOWN`.
+
+    The figure is an *estimate*, never a billing record: token counts are the
+    project's own offline approximation for Anthropic / Gemini, prompt-caching
+    discounts and tiered pricing are not modelled, and the upstream may bill
+    differently.  Callers surface it with a not-final-price disclaimer.  Cost
+    is never written to a metric or log line (rule **C**) — it rides response
+    bodies only.
+    """
+    in_cost = capability.input_cost_per_mtok
+    out_cost = capability.output_cost_per_mtok
+    if in_cost is None or out_cost is None:
+        return None
+    return usage.input_tokens / 1_000_000 * in_cost + usage.output_tokens / 1_000_000 * out_cost
+
+
 @dataclass(frozen=True)
 class EmbedderStamp:
     """

@@ -94,7 +94,9 @@ from sec_generative_search.core.types import (
     Citation,
     ConversationTurn,
     GenerationResult,
+    ProviderCapability,
     TokenUsage,
+    estimate_cost,
 )
 from sec_generative_search.providers.factory import build_llm_provider
 from sec_generative_search.providers.openrouter import OpenRouterRoutingHints
@@ -539,6 +541,7 @@ def _result_to_response(
     result: GenerationResult,
     *,
     refused: bool,
+    capability: ProviderCapability,
 ) -> RagQueryResponse:
     """Lift the orchestrator's :class:`GenerationResult` onto the wire.
 
@@ -548,6 +551,13 @@ def _result_to_response(
     are the user-visible audit trail; operators wanting the full
     candidate set use ``POST /api/search`` against the same retrieval
     primitive.
+
+    ``estimated_cost_usd`` is derived from the call's token usage and the
+    resolved model's exact per-MTok cost via the canonical
+    :func:`~sec_generative_search.core.types.estimate_cost` helper —
+    ``None`` when the model's cost is unknown (arbitrary-slug providers /
+    overlay-only models).  The figure rides the response body only; it is
+    never recorded to a metric or log line (rule **C**).
     """
     usage = result.token_usage
     return RagQueryResponse(
@@ -561,6 +571,7 @@ def _result_to_response(
             output_tokens=usage.output_tokens,
             total_tokens=usage.total_tokens,
         ),
+        estimated_cost_usd=estimate_cost(usage, capability),
         latency_seconds=result.latency_seconds,
         streamed=result.streamed,
         refused=refused,
@@ -775,7 +786,7 @@ async def generate_answer(
         ),
     )
 
-    return _result_to_response(result, refused=refused)
+    return _result_to_response(result, refused=refused, capability=capability)
 
 
 # ---------------------------------------------------------------------------
@@ -794,7 +805,12 @@ def _sse_format(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-def _final_payload(result: GenerationResult, *, refused: bool) -> dict:
+def _final_payload(
+    result: GenerationResult,
+    *,
+    refused: bool,
+    capability: ProviderCapability,
+) -> dict:
     """Build the JSON payload for the terminal ``final`` event.
 
     The shape mirrors :class:`RagQueryResponse` minus ``citations`` —
@@ -806,6 +822,12 @@ def _final_payload(result: GenerationResult, *, refused: bool) -> dict:
     citation-extraction step may have stripped a JSON envelope from the
     streamed deltas (in structured-output mode), in which case the
     final answer differs from the concatenated deltas.
+
+    ``estimated_cost_usd`` mirrors the non-streaming surface — derived from
+    the call's token usage and the resolved model's exact per-MTok cost via
+    :func:`~sec_generative_search.core.types.estimate_cost`, ``None`` for an
+    unknown-cost model.  Cost rides the event body only, never a metric or
+    log line (rule **C**).
     """
     usage = result.token_usage
     return {
@@ -818,6 +840,7 @@ def _final_payload(result: GenerationResult, *, refused: bool) -> dict:
             "output_tokens": usage.output_tokens,
             "total_tokens": usage.total_tokens,
         },
+        "estimated_cost_usd": estimate_cost(usage, capability),
         "latency_seconds": result.latency_seconds,
         "streamed": True,
         "refused": refused,
@@ -1135,7 +1158,11 @@ async def stream_answer(
                         yield _sse_format("citation", _citation_payload(citation))
                     yield _sse_format(
                         "final",
-                        _final_payload(final_result, refused=refused),
+                        _final_payload(
+                            final_result,
+                            refused=refused,
+                            capability=capability,
+                        ),
                     )
         finally:
             # The queue's producer thread is daemon-flagged; if the

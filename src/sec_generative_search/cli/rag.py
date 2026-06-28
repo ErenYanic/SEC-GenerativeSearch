@@ -112,6 +112,8 @@ from sec_generative_search.core.types import (
     ConversationTurn,
     EmbedderStamp,
     GenerationResult,
+    ProviderCapability,
+    estimate_cost,
 )
 from sec_generative_search.database import ChromaDBClient, MetadataRegistry
 from sec_generative_search.providers.factory import (
@@ -508,13 +510,15 @@ def _result_to_dict(
     result: GenerationResult,
     *,
     refused: bool,
+    capability: ProviderCapability,
 ) -> dict[str, Any]:
     """Lift a :class:`GenerationResult` onto the JSON wire shape.
 
-    Mirrors :class:`api.schemas.RagQueryResponse` exactly.
-    ``retrieved_chunks`` is intentionally NOT echoed back (same
-    discipline as the API surface — the citations are the audit trail;
-    operators wanting the full candidate set use ``sec-rag search``).
+    Mirrors :class:`api.schemas.RagQueryResponse` exactly, including the
+    ``estimated_cost_usd`` per-request estimate (``None`` for an
+    unknown-cost model). ``retrieved_chunks`` is intentionally NOT echoed
+    back (same discipline as the API surface — the citations are the audit
+    trail; operators wanting the full candidate set use ``sec-rag search``).
     """
     usage = result.token_usage
     return {
@@ -528,6 +532,7 @@ def _result_to_dict(
             "output_tokens": usage.output_tokens,
             "total_tokens": usage.total_tokens,
         },
+        "estimated_cost_usd": estimate_cost(usage, capability),
         "latency_seconds": result.latency_seconds,
         "streamed": result.streamed,
         "refused": refused,
@@ -617,13 +622,19 @@ def _render_citations(citations: list[Citation]) -> None:
     console.print(table)
 
 
-def _render_result(result: GenerationResult, *, refused: bool) -> None:
+def _render_result(
+    result: GenerationResult,
+    *,
+    refused: bool,
+    capability: ProviderCapability,
+) -> None:
     """Render the answer panel + citations + traceability footer.
 
     Footer mirrors the API's :class:`RagQueryResponse` traceability
     fields (``provider``, ``model``, ``prompt_version``,
-    ``token_usage``, ``latency_seconds``) so the operator sees the
-    same evidence the web UI would.
+    ``token_usage``, ``estimated_cost_usd``, ``latency_seconds``) so the
+    operator sees the same evidence the web UI would. The cost is an
+    estimate (``—`` when the model's cost is unknown), never a final bill.
     """
     title = "[bold red]Refused[/bold red]" if refused else "[bold]Answer[/bold]"
     console.print(Panel(escape(result.answer), title=title, expand=True))
@@ -631,12 +642,15 @@ def _render_result(result: GenerationResult, *, refused: bool) -> None:
     _render_citations(result.citations)
 
     usage = result.token_usage
+    cost = estimate_cost(usage, capability)
+    cost_label = f"~${cost:.6f}" if cost is not None else "—"
     console.print(
         f"\n[dim]Provider:[/dim] [cyan]{escape(result.provider)}[/cyan]  "
         f"[dim]Model:[/dim] [green]{escape(result.model or '—')}[/green]  "
         f"[dim]Prompt:[/dim] {escape(result.prompt_version)}  "
         f"[dim]Tokens:[/dim] {usage.input_tokens}+{usage.output_tokens}"
         f"={usage.total_tokens}  "
+        f"[dim]Est. cost:[/dim] {cost_label}  "
         f"[dim]Latency:[/dim] {result.latency_seconds:.2f}s"
     )
 
@@ -1142,10 +1156,10 @@ def query(
         # surface (provider / model / counts only); the JSON document
         # adds the answer + citations because the wire response on
         # ``/api/rag/query`` does the same.
-        print_json(_result_to_dict(result, refused=refused))
+        print_json(_result_to_dict(result, refused=refused, capability=capability))
         return
 
-    _render_result(result, refused=refused)
+    _render_result(result, refused=refused, capability=capability)
 
 
 # ---------------------------------------------------------------------------

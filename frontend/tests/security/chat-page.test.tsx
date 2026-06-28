@@ -169,6 +169,74 @@ describe("ChatPage — happy path", () => {
   });
 });
 
+describe("ChatPage — session cost summary", () => {
+  it("accumulates an estimated session cost across priced turns", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/api/admin/rag/plan") {
+        return new Response(
+          JSON.stringify({
+            plan: SAMPLE_PLAN,
+            provider: "openai",
+            model: "gpt-test",
+          }),
+          { status: 200 },
+        );
+      }
+      // Default `finalFrame` carries a small priced estimate.
+      return streamingResponse([finalFrame("Apple answer.")]);
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    render(<ChatPage />);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText(/your message/i), "first");
+    await user.click(screen.getByRole("button", { name: /^Send$/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Apple answer.")).toBeInTheDocument();
+    });
+    const summary = screen.getByLabelText(/estimated session cost/i);
+    expect(summary).toHaveTextContent(/Estimated session cost/i);
+    // A priced turn surfaces a "$" figure and the not-a-bill disclaimer.
+    expect(summary.textContent ?? "").toContain("$");
+    expect(summary).toHaveTextContent(/not a final bill/i);
+    // No unknown-pricing turns, so that caveat is absent.
+    expect(summary.textContent ?? "").not.toMatch(/unknown pricing/i);
+  });
+
+  it("shows '—' for unknown-cost turns and flags them in the summary", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/api/admin/rag/plan") {
+        return new Response(
+          JSON.stringify({
+            plan: SAMPLE_PLAN,
+            provider: "openrouter",
+            model: "some/free-slug",
+          }),
+          { status: 200 },
+        );
+      }
+      // `null` cost models an arbitrary-slug provider (UNKNOWN pricing).
+      return streamingResponse([finalFrame("OpenRouter answer.", null)]);
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    render(<ChatPage />);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText(/your message/i), "first");
+    await user.click(screen.getByRole("button", { name: /^Send$/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText("OpenRouter answer.")).toBeInTheDocument();
+    });
+    const summary = screen.getByLabelText(/estimated session cost/i);
+    // The unknown-pricing turn is surfaced, not silently treated as $0.
+    expect(summary).toHaveTextContent(/unknown pricing/i);
+  });
+});
+
 describe("ChatPage — cancellation semantics", () => {
   it("cancelling an in-flight turn does NOT commit it to history", async () => {
     const pending = pendingStreamingResponse();

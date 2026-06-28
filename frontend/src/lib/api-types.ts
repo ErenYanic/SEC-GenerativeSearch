@@ -99,9 +99,17 @@ export interface ProviderListResponse {
 // union) so a backend tier rename never breaks the build silently — the
 // ModelPicker tooltip (14.6.bis) maps the known values and falls back to
 // "unknown" for anything else.
+//
+// `input_cost_per_mtok` / `output_cost_per_mtok` are exact public vendor
+// pricing in USD per 1M tokens, or `null` when unknown
+// (arbitrary-slug providers / overlay-only models — the rows whose tier is
+// "unknown"). The backend derives the tier from these, so the two never
+// contradict.
 export interface ModelPricing {
   model: string;
   pricing_tier: string;
+  input_cost_per_mtok: number | null;
+  output_cost_per_mtok: number | null;
 }
 
 // `GET /api/providers/{provider}/models`. `models` is empty and
@@ -197,6 +205,12 @@ export interface RagStreamFinalPayload {
   model: string;
   prompt_version: string;
   token_usage: TokenUsageSchema;
+  // Estimated USD cost of the call, derived server-side from token usage
+  // and the model's exact per-MTok cost. `null` when the
+  // model's cost is unknown — the chat surface renders that as "—" and
+  // excludes it from the running session total. An estimate, not a final
+  // bill.
+  estimated_cost_usd: number | null;
   latency_seconds: number;
   streamed: boolean;
   refused: boolean;

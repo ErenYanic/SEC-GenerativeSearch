@@ -50,6 +50,7 @@ import type {
   RagStreamFinalPayload,
 } from "@/lib/api-types";
 import { ModelPicker, type ModelPickerValue } from "@/components/model-picker";
+import { formatUsd } from "@/lib/format";
 import { INITIAL_STATE, reducer, type InFlightState } from "./reducer";
 
 // One committed conversation turn. Mirrors the wire-tier
@@ -65,6 +66,10 @@ interface ChatTurn {
   provider: string;
   model: string;
   tokenTotal: number;
+  // Estimated USD cost of this turn (server-derived from token usage and
+  // the model's exact per-MTok cost). `null` when the model's cost is
+  // unknown — rendered as "—" and excluded from the session total.
+  costUsd: number | null;
   refused: boolean;
 }
 
@@ -134,6 +139,25 @@ export default function ChatPage(): JSX.Element {
           ? turn.answer.slice(0, HISTORY_ANSWER_MAX_CHARS)
           : turn.answer,
     }));
+  }, [turns]);
+
+  // Running session cost — accumulated entirely client-side from the
+  // per-turn `estimated_cost_usd` the backend returns on each `final`
+  // event. Never persisted, never sent back to the server (no per-user
+  // spend ledger in v1); dies with the tab like the rest of the history.
+  // Turns whose model has unknown pricing (`costUsd === null`) are counted
+  // separately and surfaced as "—" rather than silently treated as $0.
+  const sessionCost = useMemo(() => {
+    let total = 0;
+    let unknownTurns = 0;
+    for (const turn of turns) {
+      if (turn.costUsd === null) {
+        unknownTurns += 1;
+      } else {
+        total += turn.costUsd;
+      }
+    }
+    return { total, unknownTurns, knownTurns: turns.length - unknownTurns };
   }, [turns]);
 
   const runTurn = useCallback(
@@ -275,6 +299,10 @@ export default function ChatPage(): JSX.Element {
           final !== null
             ? (final as RagStreamFinalPayload).token_usage.total_tokens
             : 0,
+        costUsd:
+          final !== null
+            ? (final as RagStreamFinalPayload).estimated_cost_usd
+            : null,
         refused: final !== null ? (final as RagStreamFinalPayload).refused : false,
       };
       setTurns((prev) => [...prev, settled]);
@@ -354,6 +382,32 @@ export default function ChatPage(): JSX.Element {
             History lives in this tab only — closing the tab or pressing
             Escape twice clears it. Each turn re-retrieves fresh chunks.
           </p>
+          {turns.length > 0 ? (
+            <p
+              className="text-xs text-slate-500"
+              aria-label="Estimated session cost"
+            >
+              {sessionCost.knownTurns > 0 ? (
+                <>
+                  Estimated session cost:{" "}
+                  <span className="font-mono text-slate-700">
+                    {formatUsd(sessionCost.total)}
+                  </span>{" "}
+                  — an estimate, not a final bill.
+                </>
+              ) : (
+                <>Estimated session cost: — (no priced turns yet).</>
+              )}
+              {sessionCost.unknownTurns > 0 ? (
+                <>
+                  {" "}
+                  {sessionCost.unknownTurns.toString()} turn
+                  {sessionCost.unknownTurns === 1 ? "" : "s"} with unknown
+                  pricing shown as —.
+                </>
+              ) : null}
+            </p>
+          ) : null}
         </div>
         <button
           type="button"
@@ -512,6 +566,14 @@ function TurnCard({
           {turn.tokenTotal > 0
             ? ` — ${turn.tokenTotal.toString()} tokens`
             : null}
+          {turn.tokenTotal > 0 ? (
+            <>
+              {" — "}
+              <span className="font-mono">
+                {turn.costUsd !== null ? `~${formatUsd(turn.costUsd)}` : "—"}
+              </span>
+            </>
+          ) : null}
         </p>
         {turn.citations.length > 0 ? (
           <SourcePanel citations={turn.citations} turnId={turn.id} />

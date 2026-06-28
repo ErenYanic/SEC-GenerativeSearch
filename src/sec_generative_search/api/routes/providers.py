@@ -9,11 +9,12 @@ admin-gated):
   intentionally narrow so a future field addition is a deliberate
   security-reviewed change rather than an accidental drift.
 - ``GET /api/providers/{provider}/models`` — lifts the LLM-surface
-    ``MODEL_CATALOGUE`` of one provider as ``(model, pricing_tier)`` rows.
-    The pricing tier is the single source of truth consumed by both the
-    metrics facade and the web UI; the route reads the static catalogue
-    only, never instantiates a provider, never touches the network, and
-    never reads a credential.
+    catalogue of one provider as ``(model, pricing_tier, input_cost_per_mtok,
+    output_cost_per_mtok)`` rows. The pricing tier is the single source of
+    truth consumed by both the metrics facade and the web UI, and the exact
+    per-MTok cost feeds the client-side per-request cost estimate; the route
+    reads the static catalogue only, never instantiates a provider, never
+    touches the network, and never reads a credential.
 - ``POST /api/providers/validate`` — wraps the audit-logged
   :func:`validate_credential` seam so the SDK round-trip that confirms a
   key is a thin route adapter, not a re-implementation.
@@ -135,15 +136,18 @@ async def list_provider_models(
         description="Lower-case provider slug; must be registered on the LLM surface.",
     ),
 ) -> ProviderModelsResponse:
-    """Return the LLM model catalogue of *provider* with pricing tiers.
+    """Return the LLM model catalogue of *provider* with tier + exact cost.
 
-    Each row is an explicit ``(model, pricing_tier)`` allow-list lift of
-    the provider class's static ``MODEL_CATALOGUE`` — never an
-    ``**asdict()`` of the capability matrix, so a future field added to
-    :class:`~sec_generative_search.core.types.ProviderCapability` cannot
-    leak onto this surface. The pricing tier is the same value the
-    metrics facade reads from :meth:`ProviderRegistry.get_capability`, so
-    the web UI never derives cost from a second table.
+    Each row is an explicit ``(model, pricing_tier, input_cost_per_mtok,
+    output_cost_per_mtok)`` allow-list lift of the catalogue capability —
+    never an ``**asdict()`` of the capability matrix, so a future field added
+    to :class:`~sec_generative_search.core.types.ProviderCapability` cannot
+    leak onto this surface. The pricing tier is the same value the metrics
+    facade reads from :meth:`ProviderRegistry.get_capability`, and the cost is
+    the exact per-MTok figure the tier was derived from, so the web UI never
+    derives cost from a second table and the two never contradict. Cost is
+    ``None`` for arbitrary-slug providers / overlay-only models — the rows
+    whose tier is ``UNKNOWN``.
 
     The handler reads the registry's static class attributes only — it
     never instantiates a provider, never makes a network call, and never
@@ -166,15 +170,17 @@ async def list_provider_models(
             hint="Use GET /api/providers/ to see registered LLM-surface slugs.",
         ) from None
 
-    models = [
-        ModelPricingSchema(
-            model=slug,
-            pricing_tier=ProviderRegistry.get_capability(
-                provider, ProviderSurface.LLM, slug
-            ).pricing_tier.value,
+    models = []
+    for slug in ProviderRegistry.list_models(provider, ProviderSurface.LLM):
+        capability = ProviderRegistry.get_capability(provider, ProviderSurface.LLM, slug)
+        models.append(
+            ModelPricingSchema(
+                model=slug,
+                pricing_tier=capability.pricing_tier.value,
+                input_cost_per_mtok=capability.input_cost_per_mtok,
+                output_cost_per_mtok=capability.output_cost_per_mtok,
+            )
         )
-        for slug in ProviderRegistry.list_models(provider, ProviderSurface.LLM)
-    ]
     return ProviderModelsResponse(
         provider=provider,
         surface=ProviderSurface.LLM.value,

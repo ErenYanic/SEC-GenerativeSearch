@@ -445,34 +445,61 @@ class TestProviderModelsShape:
         assert body["total"] == len(body["models"])
         assert body["total"] >= 1
 
-    def test_each_row_is_exactly_two_fields(self, api_client: TestClient) -> None:
+    def test_each_row_is_exactly_four_fields(self, api_client: TestClient) -> None:
         response = api_client.get("/api/providers/openai/models")
         models = response.json()["models"]
         assert models, "openai must surface at least one catalogued model"
         for row in models:
             # The explicit allow-list lift means a future
             # ProviderCapability field (context window, tool_use, ...)
-            # cannot leak onto this surface. If it does, this fails and
-            # forces a security review.
-            assert set(row.keys()) == {"model", "pricing_tier"}
+            # cannot leak onto this surface. The row is intentionally four
+            # fields wide: model, tier, and exact per-MTok input/output cost.
+            # If a *different* field leaks through, this fails and forces a
+            # review.
+            assert set(row.keys()) == {
+                "model",
+                "pricing_tier",
+                "input_cost_per_mtok",
+                "output_cost_per_mtok",
+            }
 
     def test_rows_match_registry_catalogue(self, api_client: TestClient) -> None:
         # The wire is the registry's single source of truth, in
-        # declaration order, with the same tier the metrics facade reads.
+        # declaration order, with the same tier the metrics facade reads and
+        # the exact per-MTok cost the tier was derived from.
         expected = [
             (
                 slug,
-                ProviderRegistry.get_capability(
-                    "openai", ProviderSurface.LLM, slug
-                ).pricing_tier.value,
+                cap.pricing_tier.value,
+                cap.input_cost_per_mtok,
+                cap.output_cost_per_mtok,
             )
             for slug in ProviderRegistry.list_models("openai", ProviderSurface.LLM)
+            for cap in [ProviderRegistry.get_capability("openai", ProviderSurface.LLM, slug)]
         ]
         actual = [
-            (row["model"], row["pricing_tier"])
+            (
+                row["model"],
+                row["pricing_tier"],
+                row["input_cost_per_mtok"],
+                row["output_cost_per_mtok"],
+            )
             for row in api_client.get("/api/providers/openai/models").json()["models"]
         ]
         assert actual == expected
+
+    def test_closed_catalogue_cost_is_known_and_non_negative(self, api_client: TestClient) -> None:
+        # Every vendored OpenAI row carries exact cost (the baseline is
+        # fully priced) and the derived tier is never UNKNOWN. Cost on the
+        # wire keeps that invariant visible end to end.
+        from sec_generative_search.core.types import PricingTier
+
+        for row in api_client.get("/api/providers/openai/models").json()["models"]:
+            assert row["input_cost_per_mtok"] is not None
+            assert row["output_cost_per_mtok"] is not None
+            assert row["input_cost_per_mtok"] >= 0.0
+            assert row["output_cost_per_mtok"] >= 0.0
+            assert row["pricing_tier"] != PricingTier.UNKNOWN.value
 
     def test_tier_values_are_valid_pricing_tiers(self, api_client: TestClient) -> None:
         from sec_generative_search.core.types import PricingTier

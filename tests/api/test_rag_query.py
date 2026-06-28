@@ -298,6 +298,10 @@ class TestRagQueryDelegation:
         assert usage["input_tokens"] == 120
         assert usage["output_tokens"] == 42
         assert usage["total_tokens"] == 162
+        # Estimated cost is the canonical token-weighted estimate for the
+        # resolved model (gpt-5.4-mini: in=0.6, out=2.4 USD/MTok):
+        # 120/1e6*0.6 + 42/1e6*2.4 = 0.0001728.
+        assert body["estimated_cost_usd"] == pytest.approx(0.0001728)
         # Orchestrator received the lifted plan, not the raw payload.
         call = orch.calls[0]
         assert call["plan_raw_query"] == "What are AAPL's iPhone segment risks?"
@@ -323,6 +327,7 @@ class TestRagQueryDelegation:
             "model",
             "prompt_version",
             "token_usage",
+            "estimated_cost_usd",
             "latency_seconds",
             "streamed",
             "refused",
@@ -455,6 +460,67 @@ class TestRagQueryDelegation:
         # resolver — header tier first.  Without that, an admin-env
         # fallback would silently mask a missing header.
         assert build.calls[0]["resolved_key"] == secret
+
+
+# ---------------------------------------------------------------------------
+# Per-request cost estimate
+# ---------------------------------------------------------------------------
+
+
+class TestRagQueryCostEstimate:
+    """``estimated_cost_usd`` is the canonical per-request USD estimate.
+
+    Derived from the call's token usage and the resolved model's exact
+    per-MTok cost; ``None`` (the UNKNOWN case) for arbitrary-slug providers.
+    """
+
+    def test_known_model_returns_estimate(self, rag_query_app_factory) -> None:
+        app, _build, _orch = rag_query_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        response = client.post(
+            "/api/rag/query",
+            json={"plan": _sample_plan_payload()},
+            headers={"X-Provider-Key-openai": "sk-1234"},  # pragma: allowlist secret
+        )
+        assert response.status_code == 200
+        assert response.json()["estimated_cost_usd"] == pytest.approx(0.0001728)
+
+    def test_arbitrary_slug_provider_cost_is_none(self, rag_query_app_factory) -> None:
+        # OpenRouter carries no catalogued cost — the capability the route
+        # probes has both costs None, so the estimate is None (rendered "—").
+        app, _build, _orch = rag_query_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        response = client.post(
+            "/api/rag/query",
+            json={"plan": _sample_plan_payload(), "provider": "openrouter"},
+            headers={"X-Provider-Key-openrouter": "sk-or-1234"},  # pragma: allowlist secret
+        )
+        assert response.status_code == 200
+        assert response.json()["estimated_cost_usd"] is None
+
+    def test_refusal_with_zero_tokens_is_zero_for_known_model(self, rag_query_app_factory) -> None:
+        # A refusal short-circuits with a zero usage record; for a
+        # known-cost model the estimate is a clean 0.0, not None.
+        refusal = GenerationResult(
+            answer="I cannot answer this from the available filings.",
+            provider="openai",
+            model="gpt-5.4-mini",
+            prompt_version="rag-prompt-v1",
+            citations=[],
+            retrieved_chunks=[],
+            token_usage=TokenUsage(),
+            latency_seconds=0.01,
+            streamed=False,
+        )
+        app, _build, _orch = rag_query_app_factory(result=refusal)
+        client = TestClient(app, base_url="https://testserver")
+        response = client.post(
+            "/api/rag/query",
+            json={"plan": _sample_plan_payload()},
+            headers={"X-Provider-Key-openai": "sk-1234"},  # pragma: allowlist secret
+        )
+        assert response.status_code == 200
+        assert response.json()["estimated_cost_usd"] == 0.0
 
 
 # ---------------------------------------------------------------------------

@@ -40,6 +40,7 @@ from sec_generative_search.core.types import (
     SearchResult,
     Segment,
     TokenUsage,
+    estimate_cost,
 )
 
 
@@ -393,6 +394,62 @@ class TestProviderCapability:
         )
         assert caps.context_window_tokens == 200_000
         assert caps.pricing_tier is PricingTier.STANDARD
+
+
+# ---------------------------------------------------------------------------
+# estimate_cost — canonical per-request USD cost primitive
+# ---------------------------------------------------------------------------
+
+
+class TestEstimateCost:
+    """The single sanctioned token-usage → USD estimate.
+
+    Mirrors :func:`derive_pricing_tier`'s role for tiers: pure, total, and the
+    only place per-MTok cost is turned into a dollar figure.
+    """
+
+    def test_known_cost_is_token_weighted_sum(self) -> None:
+        # in=0.6, out=2.4 USD/MTok (gpt-5.4-mini-shaped). 120 input + 42
+        # output tokens → 120/1e6*0.6 + 42/1e6*2.4 = 0.0001728.
+        cap = ProviderCapability(chat=True, input_cost_per_mtok=0.6, output_cost_per_mtok=2.4)
+        assert estimate_cost(TokenUsage(input_tokens=120, output_tokens=42), cap) == pytest.approx(
+            0.0001728
+        )
+
+    def test_zero_tokens_is_exactly_zero(self) -> None:
+        # A refusal short-circuits the LLM with a zero usage record; the
+        # estimate is a clean 0.0 (not None) when the model's cost is known.
+        cap = ProviderCapability(chat=True, input_cost_per_mtok=1.0, output_cost_per_mtok=1.0)
+        assert estimate_cost(TokenUsage(), cap) == 0.0
+
+    def test_free_model_is_zero(self) -> None:
+        cap = ProviderCapability(chat=True, input_cost_per_mtok=0.0, output_cost_per_mtok=0.0)
+        assert cap.pricing_tier is PricingTier.FREE
+        assert estimate_cost(TokenUsage(input_tokens=1000, output_tokens=1000), cap) == 0.0
+
+    def test_both_costs_unknown_returns_none(self) -> None:
+        # The UNKNOWN case — OpenRouter / overlay-only rows whose tier is
+        # also UNKNOWN. The honest answer is "unknown", not a partial figure.
+        cap = ProviderCapability(chat=True)
+        assert cap.pricing_tier is PricingTier.UNKNOWN
+        assert estimate_cost(TokenUsage(input_tokens=120, output_tokens=42), cap) is None
+
+    def test_one_sided_cost_returns_none(self) -> None:
+        # A one-sided estimate would understate the true price; refuse it.
+        in_only = ProviderCapability(chat=True, input_cost_per_mtok=0.6)
+        out_only = ProviderCapability(chat=True, output_cost_per_mtok=2.4)
+        usage = TokenUsage(input_tokens=120, output_tokens=42)
+        assert estimate_cost(usage, in_only) is None
+        assert estimate_cost(usage, out_only) is None
+
+    def test_estimate_is_pure_no_mutation(self) -> None:
+        # Neither argument is mutated — the helper is side-effect-free.
+        cap = ProviderCapability(chat=True, input_cost_per_mtok=1.0, output_cost_per_mtok=2.0)
+        usage = TokenUsage(input_tokens=10, output_tokens=20)
+        estimate_cost(usage, cap)
+        assert usage.input_tokens == 10
+        assert usage.output_tokens == 20
+        assert cap.input_cost_per_mtok == 1.0
 
 
 # ---------------------------------------------------------------------------
