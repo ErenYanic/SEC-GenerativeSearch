@@ -480,3 +480,52 @@ class TestRefreshOverlay:
         served = refresh.resolve_known_llm_providers()
         assert "openai" in served
         assert "openrouter" not in served
+
+
+@pytest.mark.security
+class TestAggregatorIsDataOnly:
+    """Aggregators are a **data** source, never a library.
+
+    "No LiteLLM / aggregator" was relaxed to *no aggregator library on the
+    request / credential path*. LiteLLM's catalogue is consumed only as a
+    pinned, validated, offline-capable JSON document over the bounded fetch
+    seam — the library itself is never a dependency and is never imported.
+    This lock fails closed if anyone adds ``import litellm`` (or langchain /
+    any aggregator) to the catalogue or refresh modules.
+    """
+
+    _AGGREGATOR_LIBS = ("litellm", "langchain", "llama_index", "llamaindex", "haystack")
+
+    def test_litellm_source_is_a_pinned_https_data_url(self) -> None:
+        # The LiteLLM source is a static JSON document fetched over the same
+        # https-only, redirect-free envelope as every other source — not an
+        # import of the LiteLLM package.
+        source = refresh.BUILTIN_SOURCES["litellm"]
+        assert source.default_url.startswith("https://")
+        assert source.default_url.endswith(".json")
+
+    def test_no_aggregator_library_imported_by_data_path(self) -> None:
+        import inspect
+
+        from sec_generative_search.providers import catalogue as catalogue_mod
+
+        for module in (refresh, catalogue_mod):
+            src = inspect.getsource(module)
+            for lib in self._AGGREGATOR_LIBS:
+                assert f"import {lib}" not in src, (
+                    f"{module.__name__} imports the aggregator library {lib!r}; "
+                    "aggregators must stay a data-only source."
+                )
+
+    def test_no_aggregator_library_is_a_runtime_dependency(self) -> None:
+        # Belt-and-suspenders: even if something transitively pulled an
+        # aggregator in, none must be reachable on the request/credential
+        # path. The refresh seam imports only stdlib + httpx (lazily) + the
+        # project's own modules.
+        import importlib.util
+
+        for lib in ("litellm", "langchain"):
+            assert importlib.util.find_spec(lib) is None, (
+                f"aggregator library {lib!r} is installed; it must never be a "
+                "dependency — aggregators are a data-only metadata source."
+            )

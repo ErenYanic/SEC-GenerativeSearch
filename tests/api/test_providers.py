@@ -488,7 +488,7 @@ class TestProviderModelsShape:
         ]
         assert actual == expected
 
-    def test_closed_catalogue_cost_is_known_and_non_negative(self, api_client: TestClient) -> None:
+    def test_baseline_cost_is_known_and_non_negative(self, api_client: TestClient) -> None:
         # Every vendored OpenAI row carries exact cost (the baseline is
         # fully priced) and the derived tier is never UNKNOWN. Cost on the
         # wire keeps that invariant visible end to end.
@@ -507,7 +507,7 @@ class TestProviderModelsShape:
         valid = {tier.value for tier in PricingTier}
         for row in api_client.get("/api/providers/openai/models").json()["models"]:
             assert row["pricing_tier"] in valid
-            # A closed catalogue must never surface UNKNOWN — that would
+            # The vendored baseline must never surface UNKNOWN — that would
             # defeat the single-source-of-truth contract.
             assert row["pricing_tier"] != PricingTier.UNKNOWN.value
 
@@ -522,6 +522,45 @@ class TestProviderModelsArbitraryProvider:
         assert body["models"] == []
         assert body["total"] == 0
         assert body["supports_arbitrary_models"] is True
+
+
+@pytest.mark.security
+class TestProviderModelsOverlayUnknown:
+    """Overlay-only unknown pricing, end-to-end at the read surface.
+
+    A closed-catalogue provider gains an overlay / auto-discovered model
+    that arrived without pricing. The read route must *surface* it — with
+    ``pricing_tier == "unknown"`` and ``None`` costs — rather than rejecting
+    it or coercing a misleading price. The vendored baseline rows stay fully
+    priced alongside it (that invariant is unchanged).
+    """
+
+    def test_overlay_only_model_surfaces_with_unknown_tier_and_null_cost(
+        self, api_client: TestClient
+    ) -> None:
+        from sec_generative_search.core.types import PricingTier, ProviderCapability
+        from sec_generative_search.providers.catalogue import (
+            model_catalogue,
+            reset_catalogue,
+            set_catalogue,
+        )
+
+        unpriced = ProviderCapability(chat=True, streaming=True)  # both costs None
+        assert unpriced.pricing_tier is PricingTier.UNKNOWN
+        set_catalogue(model_catalogue().with_provider("openai", {"gpt-overlay-x": unpriced}))
+        try:
+            rows = api_client.get("/api/providers/openai/models").json()["models"]
+        finally:
+            reset_catalogue()
+
+        by_slug = {row["model"]: row for row in rows}
+        overlay_row = by_slug["gpt-overlay-x"]
+        assert overlay_row["pricing_tier"] == PricingTier.UNKNOWN.value
+        assert overlay_row["input_cost_per_mtok"] is None
+        assert overlay_row["output_cost_per_mtok"] is None
+        # The baseline rows are untouched — still priced, never UNKNOWN.
+        assert by_slug["gpt-4o"]["pricing_tier"] != PricingTier.UNKNOWN.value
+        assert by_slug["gpt-4o"]["input_cost_per_mtok"] is not None
 
 
 @pytest.mark.security

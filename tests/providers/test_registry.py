@@ -448,38 +448,81 @@ class TestUpstreamRoutingFlag:
 
 
 class TestPricingTierSingleSourceOfTruth:
-    """Every catalogued LLM model carries a real, non-``UNKNOWN`` tier.
+    """The **vendored baseline** stays fully priced; overlay rows may not.
 
-    The cost-derived ``pricing_tier`` in the vendored catalogue is the
-    single source of truth consumed by both the metrics facade
+    The cost-derived ``pricing_tier`` is the single source of truth
+    consumed by both the metrics facade
     (:meth:`ProviderRegistry.get_capability`) and the web UI
-    (``GET /api/providers/{provider}/models``). A catalogued slug whose
+    (``GET /api/providers/{provider}/models``). A *baseline* slug whose
     tier silently defaulted to ``UNKNOWN`` would collapse the metric's
     ``pricing_tier`` label to noise and leave the UI unable to render a
     cheap-vs-premium hint — so the invariant is locked here rather than
     left to per-provider review.
 
-    OpenRouter is exempt: its catalogue is intentionally empty (arbitrary
-    slugs), so there are no rows to tag and ``UNKNOWN`` is the *correct*
-    answer for any slug a user types.
+    Overlay / auto-discovered models — and OpenRouter's arbitrary slugs —
+    *may* carry ``UNKNOWN`` (a freshly-fetched row can legitimately arrive
+    without pricing, exactly like a slug a user types into the free-text
+    input). The baseline is the part that must never be ``UNKNOWN``; the
+    consumer surfaces must *tolerate* an ``UNKNOWN`` row from anywhere else
+    (see :meth:`test_overlay_only_model_may_carry_unknown_tier`).
     """
 
     @pytest.mark.security
-    def test_no_closed_catalogue_model_is_unknown_tier(self) -> None:
+    def test_no_baseline_model_is_unknown_tier(self) -> None:
         from sec_generative_search.core.types import PricingTier
+        from sec_generative_search.providers.catalogue import (
+            ModelCatalogue,
+            reset_catalogue,
+            set_catalogue,
+        )
 
-        offenders: list[str] = []
-        for name in ProviderRegistry.list_providers(ProviderSurface.LLM):
-            if ProviderRegistry.supports_arbitrary_models(name, ProviderSurface.LLM):
-                continue  # OpenRouter — empty catalogue by design.
-            for slug in ProviderRegistry.list_models(name, ProviderSurface.LLM):
-                tier = ProviderRegistry.get_capability(name, ProviderSurface.LLM, slug).pricing_tier
-                if tier is PricingTier.UNKNOWN:
-                    offenders.append(f"{name}/{slug}")
+        # Pin the active catalogue to the pure baseline so the lock is
+        # explicitly baseline-scoped and immune to any overlay another
+        # test might have left installed — this is the row set that must
+        # never surface ``UNKNOWN``.
+        set_catalogue(ModelCatalogue.load_baseline())
+        try:
+            offenders: list[str] = []
+            for name in ProviderRegistry.list_providers(ProviderSurface.LLM):
+                if ProviderRegistry.supports_arbitrary_models(name, ProviderSurface.LLM):
+                    continue  # OpenRouter — empty catalogue by design.
+                for slug in ProviderRegistry.list_models(name, ProviderSurface.LLM):
+                    tier = ProviderRegistry.get_capability(
+                        name, ProviderSurface.LLM, slug
+                    ).pricing_tier
+                    if tier is PricingTier.UNKNOWN:
+                        offenders.append(f"{name}/{slug}")
+        finally:
+            reset_catalogue()
         assert not offenders, (
-            "every catalogued LLM model must carry a non-UNKNOWN pricing tier; "
+            "every vendored baseline LLM model must carry a non-UNKNOWN pricing tier; "
             f"offenders: {offenders}"
         )
+
+    @pytest.mark.security
+    def test_overlay_only_model_may_carry_unknown_tier(self) -> None:
+        # An overlay / auto-discovered model that arrives without pricing
+        # surfaces through the registry as ``UNKNOWN`` — tolerated, never
+        # an error. This mirrors the OpenRouter free-text contract for a
+        # closed-catalogue provider once a price-less row is merged on top
+        # of the baseline.
+        from sec_generative_search.core.types import PricingTier, ProviderCapability
+        from sec_generative_search.providers.catalogue import (
+            model_catalogue,
+            reset_catalogue,
+            set_catalogue,
+        )
+
+        unpriced = ProviderCapability(chat=True, streaming=True)  # both costs None
+        assert unpriced.pricing_tier is PricingTier.UNKNOWN
+        augmented = model_catalogue().with_provider("openai", {"gpt-overlay-x": unpriced})
+        set_catalogue(augmented)
+        try:
+            cap = ProviderRegistry.get_capability("openai", ProviderSurface.LLM, "gpt-overlay-x")
+            assert cap.pricing_tier is PricingTier.UNKNOWN
+            assert "gpt-overlay-x" in ProviderRegistry.list_models("openai", ProviderSurface.LLM)
+        finally:
+            reset_catalogue()
 
     def test_closed_catalogue_providers_have_at_least_one_model(self) -> None:
         # Defensive: the UNKNOWN sweep above is vacuously true for an
