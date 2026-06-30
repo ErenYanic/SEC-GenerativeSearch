@@ -18,7 +18,7 @@ prompt — including the user's question (Tier-3 data) and the retrieved
 filing context — over the wire to that endpoint.  The privacy win is that
 the endpoint is one the operator runs (loopback by default), so the
 prompt need not reach a third-party hosted provider.  The base URL that
-decides *where* the prompt goes is settings-driven and host-policy-guarded; 
+decides *where* the prompt goes is settings-driven and host-policy-guarded;
 this module pins only the shipped loopback default.
 
 The endpoint accepts any model slug the local server has pulled, so the
