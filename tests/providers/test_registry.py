@@ -142,6 +142,7 @@ _EXPECTED_LLM_NAMES = (
     "minimax",
     "mimo",
     "openrouter",
+    "local_llm",
 )
 
 _EXPECTED_EMBEDDING_NAMES_BASE = (

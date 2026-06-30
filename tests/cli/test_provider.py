@@ -766,12 +766,17 @@ class TestEnvVarTableConsistency:
         otherwise ``provider list``'s 'Admin env var' column would be
         empty for that row, and ``provider validate`` could not tell the
         operator which env var to set.  Skip ``local`` (still entered
-        as HF_TOKEN) and any future surface that fundamentally has no
-        admin-default."""
+        as HF_TOKEN) and ``local_llm`` (a self-hosted endpoint with no
+        credential — it is reached via a sentinel, not an admin-default
+        key), the surfaces that fundamentally have no admin-default."""
         from sec_generative_search.providers.registry import ProviderRegistry
 
+        # Credential-free surfaces: a self-hosted ``local_llm`` endpoint
+        # carries no API key, so it has no admin-env var by design.
+        no_admin_default = {"local_llm"}
+
         names = {entry.name for entry in ProviderRegistry.all_entries(include_unavailable=True)}
-        for name in names:
+        for name in names - no_admin_default:
             assert name in provider_module._ENV_VAR_BY_PROVIDER, (
                 f"{name!r} has no admin env var entry"
             )

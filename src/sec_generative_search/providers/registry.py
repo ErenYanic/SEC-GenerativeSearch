@@ -59,6 +59,7 @@ from sec_generative_search.providers.gemini import (
 from sec_generative_search.providers.grok import GrokProvider
 from sec_generative_search.providers.kimi import KimiProvider
 from sec_generative_search.providers.local import LocalEmbeddingProvider
+from sec_generative_search.providers.local_llm import LocalLLMProvider
 from sec_generative_search.providers.mimo import MimoProvider
 from sec_generative_search.providers.minimax import MiniMaxProvider
 from sec_generative_search.providers.mistral import (
@@ -187,6 +188,16 @@ class ProviderRegistry:
             OpenRouterProvider,
             supports_arbitrary_models=True,
             supports_upstream_routing=True,
+        ),
+        # Self-hosted local endpoint (Ollama / llama.cpp / vLLM / LM Studio).
+        # Catalogued OpenRouter-style: the served model set is operator-
+        # defined, so it advertises arbitrary models with an empty vendored
+        # catalogue and does not honour upstream-routing hints.
+        ProviderEntry(
+            "local_llm",
+            ProviderSurface.LLM,
+            LocalLLMProvider,
+            supports_arbitrary_models=True,
         ),
         # --- Embedding surface ---
         ProviderEntry("openai", ProviderSurface.EMBEDDING, OpenAIEmbeddingProvider),

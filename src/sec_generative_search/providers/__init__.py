@@ -28,6 +28,7 @@ from sec_generative_search.providers.gemini import (
 from sec_generative_search.providers.grok import GrokProvider
 from sec_generative_search.providers.kimi import KimiProvider
 from sec_generative_search.providers.local import LocalEmbeddingProvider
+from sec_generative_search.providers.local_llm import LocalLLMProvider
 from sec_generative_search.providers.mimo import MimoProvider
 from sec_generative_search.providers.minimax import MiniMaxProvider
 from sec_generative_search.providers.mistral import (
@@ -64,6 +65,7 @@ __all__ = [
     "GrokProvider",
     "KimiProvider",
     "LocalEmbeddingProvider",
+    "LocalLLMProvider",
     "MimoProvider",
     "MiniMaxProvider",
     "MistralEmbeddingProvider",
