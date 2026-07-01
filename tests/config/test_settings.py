@@ -17,6 +17,7 @@ from sec_generative_search.config.settings import (
     DatabaseSettings,
     EmbeddingSettings,
     LLMSettings,
+    LocalLLMSettings,
     ProviderSettings,
     RAGSettings,
     SearchSettings,
@@ -53,6 +54,140 @@ class TestLLMSettings:
         assert s.temperature == pytest.approx(0.7)
         assert s.max_output_tokens == 4096
         assert s.streaming is False
+
+
+# ---------------------------------------------------------------------------
+# LocalLLMSettings — self-hosted LLM endpoint + loopback host policy
+# ---------------------------------------------------------------------------
+
+
+class TestLocalLLMSettings:
+    def test_defaults(self, clean_env: pytest.MonkeyPatch) -> None:
+        s = LocalLLMSettings()
+        # Ships targeting a stock Ollama install on the loopback interface.
+        assert s.base_url == "http://127.0.0.1:11434/v1"
+        assert s.default_model == "llama3.2"
+        # Non-local endpoints are opt-in only — the default keeps the prompt
+        # on the host.
+        assert s.allow_non_local is False
+
+    def test_env_override(self, clean_env: pytest.MonkeyPatch) -> None:
+        # Other backends (llama.cpp-server, vLLM, LM Studio) work by pointing
+        # the base URL at their own loopback OpenAI-compatible port.
+        clean_env.setenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:8080/v1")
+        clean_env.setenv("LOCAL_LLM_DEFAULT_MODEL", "qwen2.5")
+
+        s = LocalLLMSettings()
+        assert s.base_url == "http://127.0.0.1:8080/v1"
+        assert s.default_model == "qwen2.5"
+
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "http://127.0.0.1:11434/v1",
+            "http://127.5.5.5:11434/v1",  # anywhere in 127.0.0.0/8 is loopback
+            "http://localhost:11434/v1",
+            "http://[::1]:11434/v1",  # IPv6 loopback
+            "https://127.0.0.1:11434/v1",  # https is also permitted
+        ],
+    )
+    def test_loopback_hosts_accepted(self, clean_env: pytest.MonkeyPatch, base_url: str) -> None:
+        clean_env.setenv("LOCAL_LLM_BASE_URL", base_url)
+        assert LocalLLMSettings().base_url == base_url
+
+    def test_http_scheme_permitted_for_loopback(self, clean_env: pytest.MonkeyPatch) -> None:
+        # Plain http carries no TLS but needs none on loopback — the traffic
+        # never leaves the host.  The project's usual https-only stance does
+        # not apply to a self-hosted local endpoint.
+        clean_env.setenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:11434/v1")
+        assert LocalLLMSettings().base_url.startswith("http://")
+
+    def test_root_settings_composes_local_llm(self, clean_env: pytest.MonkeyPatch) -> None:
+        s = Settings()
+        assert isinstance(s.local_llm, LocalLLMSettings)
+        assert s.local_llm.base_url == "http://127.0.0.1:11434/v1"
+
+
+@pytest.mark.security
+class TestLocalLLMHostPolicy:
+    """The loopback host-policy guard is a security control.
+
+    The base URL decides *where* the assembled prompt (Tier-3 data) is
+    sent.  A misconfiguration that points the local provider at an off-box
+    host must fail loudly at settings load unless the operator has
+    explicitly opted in with ``LOCAL_LLM_ALLOW_NON_LOCAL=true``.
+    """
+
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "http://192.168.1.10:11434/v1",  # private LAN IP
+            "http://10.0.0.5:11434/v1",  # private RFC1918 IP
+            "http://203.0.113.7:11434/v1",  # public IP
+            "http://ollama.internal:11434/v1",  # bare hostname
+            "https://api.example.com/v1",  # public hostname
+        ],
+    )
+    def test_non_local_host_rejected_without_opt_in(
+        self, clean_env: pytest.MonkeyPatch, base_url: str
+    ) -> None:
+        clean_env.setenv("LOCAL_LLM_BASE_URL", base_url)
+        with pytest.raises(ValidationError):
+            LocalLLMSettings()
+
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "http://192.168.1.10:11434/v1",
+            "https://api.example.com/v1",
+            "http://ollama.internal:11434/v1",
+        ],
+    )
+    def test_non_local_host_accepted_with_opt_in(
+        self, clean_env: pytest.MonkeyPatch, base_url: str
+    ) -> None:
+        clean_env.setenv("LOCAL_LLM_BASE_URL", base_url)
+        clean_env.setenv("LOCAL_LLM_ALLOW_NON_LOCAL", "true")
+        s = LocalLLMSettings()
+        assert s.base_url == base_url
+        assert s.allow_non_local is True
+
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "ws://127.0.0.1:11434/v1",  # non-http scheme
+            "ftp://127.0.0.1/v1",
+            "file:///etc/passwd",
+            "127.0.0.1:11434/v1",  # missing scheme entirely
+            "://127.0.0.1/v1",
+        ],
+    )
+    def test_non_http_scheme_rejected(self, clean_env: pytest.MonkeyPatch, base_url: str) -> None:
+        clean_env.setenv("LOCAL_LLM_BASE_URL", base_url)
+        with pytest.raises(ValidationError):
+            LocalLLMSettings()
+
+    def test_missing_host_rejected(self, clean_env: pytest.MonkeyPatch) -> None:
+        clean_env.setenv("LOCAL_LLM_BASE_URL", "http:///v1")
+        with pytest.raises(ValidationError):
+            LocalLLMSettings()
+
+    def test_opt_in_relaxes_host_only_not_scheme(self, clean_env: pytest.MonkeyPatch) -> None:
+        # The opt-in flag relaxes the *host* policy; a non-http(s) scheme is
+        # still rejected regardless of the flag.
+        clean_env.setenv("LOCAL_LLM_BASE_URL", "ftp://api.example.com/v1")
+        clean_env.setenv("LOCAL_LLM_ALLOW_NON_LOCAL", "true")
+        with pytest.raises(ValidationError):
+            LocalLLMSettings()
+
+    def test_root_settings_rejects_non_local_without_opt_in(
+        self, clean_env: pytest.MonkeyPatch
+    ) -> None:
+        # The guard must bite through the full root-settings load path, not
+        # only when the nested class is built in isolation.
+        clean_env.setenv("LOCAL_LLM_BASE_URL", "http://203.0.113.7:11434/v1")
+        with pytest.raises(ValidationError):
+            Settings()
 
 
 # ---------------------------------------------------------------------------

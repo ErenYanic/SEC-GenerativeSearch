@@ -27,6 +27,7 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[pytest.MonkeyPatch]:
         "CHUNKING_",
         "DB_",
         "LLM_",
+        "LOCAL_LLM_",
         "PROVIDER_",
         "RAG_",
         "SEARCH_",

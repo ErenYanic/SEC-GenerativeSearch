@@ -14,7 +14,9 @@ Environment variable mapping (examples):
     API_KEY                 -> settings.api.key
 """
 
+from ipaddress import ip_address
 from pathlib import Path
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from pydantic import Field, ValidationInfo, field_validator, model_validator
@@ -494,6 +496,97 @@ class LLMSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="LLM_")
 
 
+def _is_loopback_host(host: str) -> bool:
+    """Whether *host* is a loopback address or the literal ``localhost``.
+
+    ``127.0.0.0/8``, ``::1``, and the case-insensitive name ``localhost``
+    are loopback; every other IP or hostname (private, public, or
+    DNS-resolvable) is not.  No DNS resolution is performed — the policy is
+    purely lexical, so it cannot be subverted by a hosts-file entry that
+    points a decoy name at a loopback address while the real traffic leaves
+    the host.
+    """
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        # Not an IP literal — a hostname.  Hostnames are never treated as
+        # loopback (see docstring); reaching a hostname requires the opt-in.
+        return False
+
+
+class LocalLLMSettings(BaseSettings):
+    """Self-hosted (local) LLM endpoint configuration.
+
+    Backs the ``local_llm`` provider — a model server the operator runs
+    themselves (Ollama by default, or llama.cpp-server / vLLM / LM Studio)
+    that speaks the OpenAI Chat Completions wire protocol.  Unlike the
+    hosted vendors, the endpoint URL is operator-owned infrastructure, so
+    it is a *deployment* setting rather than a per-request / per-user one:
+    it is read from here at provider construction, never through the
+    credential resolver chain.
+
+    Host policy (the load-bearing security control):
+
+    - ``base_url`` scheme must be ``http`` or ``https``.  Plain ``http`` is
+      deliberately permitted because a loopback endpoint carries no TLS and
+      needs none — the traffic never leaves the host.
+    - The host must be loopback (``127.0.0.0/8``, ``::1``, or the literal
+      ``localhost``) unless ``allow_non_local`` is set.  Pointing the
+      provider at a private IP, a hostname, or a public IP — anywhere the
+      prompt (Tier-3 data) would leave the machine — is an explicit,
+      operator-acknowledged decision guarded by
+      ``LOCAL_LLM_ALLOW_NON_LOCAL=true``.
+
+    Validation runs at settings load so a misconfiguration fails fast,
+    before the app can serve a request against an unintended endpoint.  The
+    provider additionally re-reads these settings standalone at
+    construction and fails *closed* to the loopback default, so even a
+    torn-down config never silently sends the prompt off-box.
+    """
+
+    base_url: str = "http://127.0.0.1:11434/v1"
+    default_model: str = "llama3.2"
+    allow_non_local: bool = False
+
+    model_config = SettingsConfigDict(env_prefix="LOCAL_LLM_")
+
+    @model_validator(mode="after")
+    def _validate_base_url_host_policy(self) -> "LocalLLMSettings":
+        """Enforce scheme + loopback-only host policy on ``base_url``.
+
+        Runs after the whole model is built because the host check depends
+        on ``allow_non_local``.  Rejects any non-``http(s)`` scheme, a URL
+        with no host, and — unless the operator opted in — any host that is
+        not loopback.  Every message names the offending value and the knob
+        the operator can set, so a misconfiguration is self-diagnosing at
+        load time.
+        """
+        parsed = urlparse(self.base_url)
+        scheme = parsed.scheme.lower()
+        if scheme not in ("http", "https"):
+            raise ValueError(
+                f"LOCAL_LLM_BASE_URL must use the http or https scheme; got {self.base_url!r}."
+            )
+        host = parsed.hostname
+        if not host:
+            raise ValueError(f"LOCAL_LLM_BASE_URL must include a host; got {self.base_url!r}.")
+        if self.allow_non_local:
+            # Operator has explicitly acknowledged that prompts may leave
+            # the host — accept any well-formed http(s) URL.
+            return self
+        if not _is_loopback_host(host):
+            raise ValueError(
+                f"LOCAL_LLM_BASE_URL host {host!r} is not loopback. The local LLM "
+                f"endpoint must be loopback (127.0.0.0/8, ::1, or localhost) so the "
+                f"prompt never leaves the host. To target a non-local endpoint "
+                f"(a private or hosted server), set LOCAL_LLM_ALLOW_NON_LOCAL=true to "
+                f"acknowledge that prompts will be sent off-box."
+            )
+        return self
+
+
 class ProviderSettings(BaseSettings):
     """Provider-level network and resilience policy.
 
@@ -806,6 +899,7 @@ class Settings(BaseSettings):
     chunking: ChunkingSettings = Field(default_factory=ChunkingSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
+    local_llm: LocalLLMSettings = Field(default_factory=LocalLLMSettings)
     provider: ProviderSettings = Field(default_factory=ProviderSettings)
     rag: RAGSettings = Field(default_factory=RAGSettings)
     search: SearchSettings = Field(default_factory=SearchSettings)
