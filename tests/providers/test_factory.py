@@ -444,9 +444,10 @@ class TestBuildLLMProvider:
     """The LLM construction seam mirrors ``build_embedder``.
 
     Differences asserted: no per-instance model is forwarded; a missing
-    credential is *always* a ``ConfigurationError`` (no ``local`` sentinel
-    tolerance); the resolver chain remains the canonical credential
-    seam.
+    credential is a ``ConfigurationError`` for every hosted provider,
+    while the self-hosted ``local_llm`` entry tolerates a ``None`` resolver
+    result via a sentinel; the resolver chain remains the canonical
+    credential seam.
     """
 
     def test_builds_openai_llm_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -501,15 +502,22 @@ class TestBuildLLMProvider:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Patching ``ProviderRegistry.get_class`` proves ``build_llm_provider``
-        routes through the registry rather than importing adapters directly."""
+        """Patching ``ProviderRegistry.get_entry`` proves ``build_llm_provider``
+        routes through the registry rather than importing adapters directly.
+
+        The factory reads the *entry* (not just the class) so it can honour
+        per-provider flags such as ``requires_api_key``; the delegation seam
+        is therefore ``get_entry``.
+        """
+        from sec_generative_search.providers.registry import ProviderEntry
+
         calls: list[tuple[str, ProviderSurface]] = []
 
-        def stub_class(name: str, surface: ProviderSurface) -> type:
+        def stub_entry(name: str, surface: ProviderSurface) -> ProviderEntry:
             calls.append((name, surface))
-            return OpenAIProvider
+            return ProviderEntry(name, surface, OpenAIProvider)
 
-        monkeypatch.setattr(ProviderRegistry, "get_class", stub_class)
+        monkeypatch.setattr(ProviderRegistry, "get_entry", stub_entry)
 
         build_llm_provider("openai", api_key_resolver=lambda _n: "sk-test-1234ABCD")
         assert calls == [("openai", ProviderSurface.LLM)]

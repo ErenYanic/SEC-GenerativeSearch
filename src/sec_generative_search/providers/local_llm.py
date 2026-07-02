@@ -30,6 +30,7 @@ empty default :meth:`_extra_request_kwargs` hook.
 
 from __future__ import annotations
 
+from sec_generative_search.core.types import ProviderCapability
 from sec_generative_search.providers.openai_compat import (
     OpenAICompatibleLLMProvider,
 )
@@ -43,8 +44,9 @@ class LocalLLMProvider(OpenAICompatibleLLMProvider):
     Defaults target a stock Ollama install on the loopback interface;
     other backends (llama.cpp-server, vLLM, LM Studio) work by pointing the
     base URL at their own OpenAI-compatible port.  The capability probe
-    returns the permissive default for every slug because the served model
-    set is whatever the local server has pulled — the SDK surfaces an
+    returns a FREE (``0.0``-cost) capability for every slug because the
+    served model set is whatever the local server has pulled — an endpoint
+    the operator hosts costs nothing per token, and the SDK surfaces an
     unserviceable slug at call time with the endpoint's own error.
     """
 
@@ -54,5 +56,28 @@ class LocalLLMProvider(OpenAICompatibleLLMProvider):
 
     # Intentionally absent from the vendored catalogue — the served model
     # set is operator-defined, so the registry lists it OpenRouter-style
-    # (``supports_arbitrary_models``) and the base class's permissive
-    # capability default covers any slug the local server accepts.
+    # (``supports_arbitrary_models``) and this adapter supplies the FREE
+    # capability for any slug the local server accepts.
+
+    def get_capabilities(self, model: str | None = None) -> ProviderCapability:
+        """Return the FREE capability matrix for any served slug.
+
+        The vendored catalogue is empty by design, so every slug is
+        uncatalogued.  A self-hosted endpoint costs the operator nothing
+        per API token, so both per-MTok costs are reported as ``0.0``:
+        :class:`~sec_generative_search.core.types.ProviderCapability`
+        derives the tier from that (→ :attr:`PricingTier.FREE`) rather than
+        accepting a hand-assigned tier, and
+        :func:`~sec_generative_search.core.types.estimate_cost` returns
+        ``$0.00`` instead of the honest-UNKNOWN ``None``.  This mirrors the
+        ``free_tier`` branch of :meth:`ProviderRegistry.get_capability`, so
+        the credential-free registry probe and this instance probe never
+        disagree.
+        """
+        del model  # served model set is operator-defined; cost is 0.0 for any slug
+        return ProviderCapability(
+            chat=True,
+            streaming=True,
+            input_cost_per_mtok=0.0,
+            output_cost_per_mtok=0.0,
+        )

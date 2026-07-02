@@ -139,6 +139,27 @@ class ProviderEntry:
             the hint actually does something.  Every other provider
             silently ignores ``routing_hints`` via the OpenAI-compatible
             base's empty default :meth:`_extra_request_kwargs` hook.
+        requires_api_key: ``True`` (the default) for every hosted provider
+            — a missing credential is a hard :class:`ConfigurationError` at
+            :func:`~sec_generative_search.providers.factory.build_llm_provider`
+            time.  ``False`` only for the self-hosted
+            :class:`~sec_generative_search.providers.local_llm.LocalLLMProvider`,
+            whose endpoint is one the operator runs and typically needs no
+            credential; the factory then tolerates a ``None`` resolver
+            result and passes a non-secret sentinel so the base-class
+            "``api_key`` must be non-empty" contract still holds.  The
+            default stays ``True`` so no hosted provider ever silently
+            drops its key requirement.
+        free_tier: ``True`` only for a self-hosted / operator-run provider
+            (:class:`LocalLLMProvider`) whose served models cost nothing per
+            token.  When an uncatalogued slug falls through
+            :meth:`ProviderRegistry.get_capability`, a ``free_tier`` entry
+            returns a ``0.0``-cost capability so the tier derives to
+            :attr:`~sec_generative_search.core.types.PricingTier.FREE` and
+            :func:`~sec_generative_search.core.types.estimate_cost` returns
+            ``$0.00`` — the tier stays cost-derived, never hand-assigned.
+            Every other provider keeps the permissive ``UNKNOWN``-cost
+            default for an uncatalogued slug (OpenRouter's free-text case).
     """
 
     name: str
@@ -147,6 +168,8 @@ class ProviderEntry:
     requires_extras: tuple[str, ...] = ()
     supports_arbitrary_models: bool = False
     supports_upstream_routing: bool = False
+    requires_api_key: bool = True
+    free_tier: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -192,12 +215,18 @@ class ProviderRegistry:
         # Self-hosted local endpoint (Ollama / llama.cpp / vLLM / LM Studio).
         # Catalogued OpenRouter-style: the served model set is operator-
         # defined, so it advertises arbitrary models with an empty vendored
-        # catalogue and does not honour upstream-routing hints.
+        # catalogue and does not honour upstream-routing hints.  It is the
+        # only LLM entry that (a) tolerates a missing credential — the
+        # operator's own endpoint usually needs none — and (b) prices an
+        # uncatalogued slug as FREE (0.0 cost → derived tier), since a model
+        # the operator hosts costs nothing per token.
         ProviderEntry(
             "local_llm",
             ProviderSurface.LLM,
             LocalLLMProvider,
             supports_arbitrary_models=True,
+            requires_api_key=False,
+            free_tier=True,
         ),
         # --- Embedding surface ---
         ProviderEntry("openai", ProviderSurface.EMBEDDING, OpenAIEmbeddingProvider),
@@ -379,6 +408,19 @@ class ProviderRegistry:
             # Other providers fall through only for unknown / freshly-
             # released slugs — same permissive default as their own
             # ``get_capabilities``.
+            if entry.free_tier:
+                # Self-hosted / operator-run endpoint: an uncatalogued slug
+                # costs nothing per token, so report 0.0 cost.  The tier is
+                # *derived* from that (→ FREE) — never hand-assigned — which
+                # keeps this consistent with the adapter's own
+                # ``get_capabilities`` and makes ``estimate_cost`` return
+                # ``$0.00`` instead of the honest-UNKNOWN ``None``.
+                return ProviderCapability(
+                    chat=True,
+                    streaming=True,
+                    input_cost_per_mtok=0.0,
+                    output_cost_per_mtok=0.0,
+                )
             return ProviderCapability(chat=True, streaming=True)
 
         if surface is ProviderSurface.EMBEDDING:

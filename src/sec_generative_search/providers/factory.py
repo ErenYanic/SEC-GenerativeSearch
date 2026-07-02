@@ -63,6 +63,14 @@ __all__ = [
 ApiKeyResolver = Callable[[str], str | None]
 
 
+# Non-secret sentinel passed to the self-hosted LLM entry when no real
+# credential is required.  The base-class contract still demands a non-empty
+# ``api_key`` string, and most self-hosted OpenAI-wire servers ignore the
+# bearer token entirely.  Kept < 8 characters so :func:`mask_secret` fully
+# redacts it, mirroring the ``LocalEmbeddingProvider`` ``_NO_TOKEN_SENTINEL``.
+_LLM_NO_KEY_SENTINEL = "local"  # pragma: allowlist secret
+
+
 # Provider name → environment variable the default resolver reads.
 # Unknown names fall through to ``None`` — the factory decides whether
 # that is acceptable (only ``local`` is).  Embedding-only entries
@@ -193,10 +201,13 @@ def build_llm_provider(
     - LLM providers do not carry a model on the instance — model
       selection is per-request via ``GenerationRequest.model``.  The
       factory therefore takes only ``provider_name``.
-    - There is no ``local`` LLM surface, and therefore no sentinel
-      tolerance for a missing credential.  Every LLM provider requires
-      a real key; a ``None`` resolver result is always a configuration
-      error.
+        - Almost every LLM provider is hosted and requires a real key; a
+            ``None`` resolver result is a configuration error.  The self-hosted
+            LLM entry may omit a credential, so the factory tolerates ``None``
+            there and passes a non-secret sentinel so the base-class
+            "``api_key`` must be non-empty" contract still holds.  A resolver
+            that *does* return a key (e.g. a vLLM server behind a bearer token)
+            is honoured either way.
 
     Args:
         provider_name: Registry key (``"openai"``, ``"anthropic"``,
@@ -211,20 +222,25 @@ def build_llm_provider(
 
     Raises:
         KeyError: The provider's optional extras are not installed
-            (raised by :meth:`ProviderRegistry.get_class`).
-        ConfigurationError: The resolver returned ``None`` — every LLM
-            provider requires a real key.
+            (raised by :meth:`ProviderRegistry.get_entry`).
+        ConfigurationError: The resolver returned ``None`` for a provider
+            that requires a real key.
     """
-    provider_cls = ProviderRegistry.get_class(provider_name, ProviderSurface.LLM)
+    entry = ProviderRegistry.get_entry(provider_name, ProviderSurface.LLM)
 
     api_key = api_key_resolver(provider_name)
     if api_key is None:
-        env_var = _DEFAULT_ENV_VAR_BY_PROVIDER.get(provider_name, "<unknown>")
-        raise ConfigurationError(
-            f"No API key resolved for LLM provider '{provider_name}'. "
-            f"Supply the key via the request-scoped resolver chain "
-            f"(session / encrypted user store) or set {env_var} in the "
-            f"server environment for the admin-default fallback."
-        )
+        if entry.requires_api_key:
+            env_var = _DEFAULT_ENV_VAR_BY_PROVIDER.get(provider_name, "<unknown>")
+            raise ConfigurationError(
+                f"No API key resolved for LLM provider '{provider_name}'. "
+                f"Supply the key via the request-scoped resolver chain "
+                f"(session / encrypted user store) or set {env_var} in the "
+                f"server environment for the admin-default fallback."
+            )
+        # ``requires_api_key=False``: the endpoint is operator-run and
+        # typically needs no credential.  Fail *open* to the sentinel
+        # here, never via the per-request resolver chain.
+        api_key = _LLM_NO_KEY_SENTINEL
 
-    return provider_cls(api_key)
+    return entry.provider_cls(api_key)

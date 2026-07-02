@@ -10,8 +10,13 @@ the local provider:
 - it is registered on the LLM surface OpenRouter-style — an empty vendored
   catalogue with ``supports_arbitrary_models=True`` and
   ``supports_upstream_routing=False``;
-- the O(1) capability probe accepts any slug with the permissive default
-  and never makes an SDK round-trip;
+- the O(1) capability probe accepts any slug as a FREE (``0.0``-cost)
+  capability and never makes an SDK round-trip;
+- FREE pricing is cost-derived (0.0 cost → ``PricingTier.FREE`` →
+  ``estimate_cost`` returns ``$0.00``) and the registry's credential-free
+  probe agrees with the adapter's instance probe;
+- ``build_llm_provider`` tolerates a missing credential for this provider
+  only, passing a non-secret sentinel;
 - the loopback base URL is wired into the OpenAI client unchanged, with
   the SDK's own retry loop disabled (``resilient_call`` owns retry);
 - security: the SDK key never appears in the provider's ``repr``.
@@ -27,7 +32,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from sec_generative_search.core.types import (
+    PricingTier,
+    ProviderCapability,
+    TokenUsage,
+    estimate_cost,
+)
 from sec_generative_search.providers import openai_compat
+from sec_generative_search.providers.factory import build_llm_provider
 from sec_generative_search.providers.local_llm import LocalLLMProvider
 from sec_generative_search.providers.openai_compat import (
     OpenAICompatibleLLMProvider,
@@ -112,21 +124,24 @@ class TestRegistration:
 
 
 # ---------------------------------------------------------------------------
-# Capability probe: O(1), accepts any slug, no SDK round-trip
+# Capability probe: O(1), accepts any slug as FREE, no SDK round-trip
 # ---------------------------------------------------------------------------
 
 
 class TestCapabilityProbe:
-    def test_arbitrary_slug_returns_permissive_default(
-        self, patched_openai: dict[str, Any]
-    ) -> None:
+    def test_arbitrary_slug_returns_free_capability(self, patched_openai: dict[str, Any]) -> None:
         provider = LocalLLMProvider(_LONG_KEY)
         client = patched_openai["client"]
         client.reset_mock()
         caps = provider.get_capabilities("some-model-the-server-pulled")
         assert caps.chat is True
         assert caps.streaming is True
-        # Permissive default carries no context window / output budget —
+        # A self-hosted endpoint costs nothing per token — both per-MTok
+        # costs are 0.0 and the tier is *derived* to FREE (never assigned).
+        assert caps.input_cost_per_mtok == 0.0
+        assert caps.output_cost_per_mtok == 0.0
+        assert caps.pricing_tier is PricingTier.FREE
+        # The FREE capability carries no context window / output budget —
         # the true values depend on the locally served model.
         assert not caps.context_window_tokens
         assert not caps.max_output_tokens
@@ -134,12 +149,87 @@ class TestCapabilityProbe:
         client.models.list.assert_not_called()
         client.chat.completions.create.assert_not_called()
 
-    def test_registry_capability_probe_is_offline(self) -> None:
+    def test_registry_capability_probe_is_offline_and_free(self) -> None:
         # The registry probe reads the (empty) catalogue and falls through
-        # to the permissive default without instantiating the provider.
+        # to the FREE capability without instantiating the provider.
         cap = ProviderRegistry.get_capability("local_llm", ProviderSurface.LLM, "any-slug")
         assert cap.chat is True
         assert cap.streaming is True
+        assert cap.pricing_tier is PricingTier.FREE
+        assert cap.input_cost_per_mtok == 0.0
+        assert cap.output_cost_per_mtok == 0.0
+
+    def test_registry_and_adapter_probes_agree(self, patched_openai: dict[str, Any]) -> None:
+        # The credential-free registry probe and the adapter's instance
+        # probe must never disagree — both are the FREE capability.
+        provider = LocalLLMProvider(_LONG_KEY)
+        adapter_cap = provider.get_capabilities("mixtral")
+        registry_cap = ProviderRegistry.get_capability("local_llm", ProviderSurface.LLM, "mixtral")
+        assert adapter_cap == registry_cap
+
+
+# ---------------------------------------------------------------------------
+# FREE pricing is cost-derived and yields a $0.00 estimate
+# ---------------------------------------------------------------------------
+
+
+class TestFreeTierPricing:
+    def test_free_tier_is_cost_derived_not_assigned(self, patched_openai: dict[str, Any]) -> None:
+        # The tier must fall out of the 0.0 cost via ProviderCapability's
+        # __post_init__, matching a freshly-derived capability — never a
+        # hand-stamped FREE tier alongside a different cost.
+        cap = LocalLLMProvider(_LONG_KEY).get_capabilities()
+        assert cap == ProviderCapability(
+            chat=True,
+            streaming=True,
+            input_cost_per_mtok=0.0,
+            output_cost_per_mtok=0.0,
+        )
+
+    def test_estimate_cost_is_zero_for_any_usage(self, patched_openai: dict[str, Any]) -> None:
+        cap = LocalLLMProvider(_LONG_KEY).get_capabilities("llama3.2")
+        usage = TokenUsage(input_tokens=12_345, output_tokens=6_789)
+        # 0.0 cost (not None) → a real $0.00 estimate, not the honest-UNKNOWN
+        # ``None`` an arbitrary-slug OpenRouter row would report.
+        assert estimate_cost(usage, cap) == 0.0
+
+    def test_registry_probe_estimate_cost_is_zero(self) -> None:
+        cap = ProviderRegistry.get_capability("local_llm", ProviderSurface.LLM, "phi3")
+        usage = TokenUsage(input_tokens=1_000, output_tokens=2_000)
+        assert estimate_cost(usage, cap) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# build_llm_provider: sentinel-key tolerance for this provider only
+# ---------------------------------------------------------------------------
+
+
+class TestBuildWithoutCredential:
+    def test_builds_without_a_resolved_key(self, patched_openai: dict[str, Any]) -> None:
+        # A None resolver result is tolerated only for local_llm; the
+        # factory passes a non-secret sentinel so construction succeeds.
+        provider = build_llm_provider("local_llm", api_key_resolver=lambda _n: None)
+        assert isinstance(provider, LocalLLMProvider)
+
+    def test_default_env_resolver_needs_no_local_llm_var(
+        self, patched_openai: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # There is no LOCAL_LLM_API_KEY env var; the default resolver
+        # returns None for local_llm and the build still succeeds.
+        provider = build_llm_provider("local_llm")
+        assert isinstance(provider, LocalLLMProvider)
+
+    def test_resolved_key_is_honoured_over_sentinel(self, patched_openai: dict[str, Any]) -> None:
+        # A vLLM/LM-Studio server behind a bearer token: when the resolver
+        # DOES return a key, it must be used verbatim, not the sentinel.
+        provider = build_llm_provider(
+            "local_llm",
+            api_key_resolver=lambda _n: "sk-vllm-REALKEY-1234567890",
+        )
+        rendered = repr(provider)
+        # repr is redacted, but the distinctive tail proves the real key
+        # (not the 5-char sentinel) reached the instance.
+        assert "1234567890"[-4:] in rendered
 
 
 # ---------------------------------------------------------------------------
@@ -176,3 +266,59 @@ def test_repr_never_exposes_key(patched_openai: dict[str, Any]) -> None:
     text = repr(LocalLLMProvider(_LONG_KEY))
     assert _LONG_KEY not in text
     assert _KEY_TAIL in text
+
+
+# ---------------------------------------------------------------------------
+# Security — the no-credential tolerance is scoped to local_llm alone
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.security
+class TestNoKeyToleranceIsScoped:
+    """``requires_api_key=False`` is a per-provider opt-in — never a default.
+
+    Relaxing the credential requirement for every provider would let a
+    hosted vendor build silently against a sentinel and burn quota (or leak
+    the sentinel as if it were a real bearer token).  The relaxation is
+    locked to ``local_llm`` only.
+    """
+
+    def test_only_local_llm_relaxes_the_key_requirement(self) -> None:
+        for name in ProviderRegistry.list_providers(ProviderSurface.LLM):
+            entry = ProviderRegistry.get_entry(name, ProviderSurface.LLM)
+            expected = name == "local_llm"
+            assert entry.requires_api_key is (not expected), (
+                f"{name}: requires_api_key must be True for every hosted "
+                "provider and False only for the self-hosted local_llm"
+            )
+
+    def test_hosted_provider_still_fails_closed_without_a_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The default (requires_api_key=True) must stay fail-closed: a
+        # None resolver result for a hosted provider is still a hard error.
+        from sec_generative_search.core.exceptions import ConfigurationError
+
+        with pytest.raises(ConfigurationError):
+            build_llm_provider("openai", api_key_resolver=lambda _n: None)
+
+    def test_sentinel_is_not_a_real_credential(self, patched_openai: dict[str, Any]) -> None:
+        # The sentinel must be short enough that mask_secret fully redacts
+        # it (no recognisable tail) and must not look key-shaped.
+        from sec_generative_search.core.security import mask_secret
+        from sec_generative_search.providers import factory
+
+        sentinel = factory._LLM_NO_KEY_SENTINEL
+        assert len(sentinel) < 8
+        # A short value is masked in full — no recognisable tail leaks.
+        assert mask_secret(sentinel) == "***"
+        for needle in ("sk-", "bearer", "secret", "password"):
+            assert needle not in sentinel.lower()
+
+    def test_free_tier_relaxation_is_scoped_to_local_llm(self) -> None:
+        # Only local_llm prices an uncatalogued slug as FREE; every other
+        # LLM entry keeps its baseline pricing (and OpenRouter stays UNKNOWN
+        # for arbitrary slugs — never silently free).
+        for name in ProviderRegistry.list_providers(ProviderSurface.LLM):
+            entry = ProviderRegistry.get_entry(name, ProviderSurface.LLM)
+            assert entry.free_tier is (name == "local_llm")

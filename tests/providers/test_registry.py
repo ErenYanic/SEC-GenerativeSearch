@@ -560,6 +560,19 @@ class TestGetCapability:
         cap = ProviderRegistry.get_capability("openrouter", ProviderSurface.LLM, "vendor/model-x")
         assert cap.chat is True
         assert cap.streaming is True
+        # OpenRouter's arbitrary slugs are honestly UNKNOWN-cost — never
+        # silently priced as free.
+        assert cap.pricing_tier is PricingTier.UNKNOWN
+
+    def test_local_llm_uncatalogued_slug_returns_free_capability(self) -> None:
+        # local_llm is the only ``free_tier`` entry: an uncatalogued slug
+        # resolves to a 0.0-cost capability whose tier *derives* to FREE.
+        cap = ProviderRegistry.get_capability("local_llm", ProviderSurface.LLM, "mixtral")
+        assert cap.chat is True
+        assert cap.streaming is True
+        assert cap.input_cost_per_mtok == 0.0
+        assert cap.output_cost_per_mtok == 0.0
+        assert cap.pricing_tier is PricingTier.FREE
 
     def test_default_model_used_when_none_passed(self) -> None:
         # ``OpenAIProvider.default_model`` is ``"gpt-5.4-mini"``. The
@@ -777,6 +790,15 @@ class TestRegistryHoldsNoSecrets:
 
     def test_provider_entry_has_no_credential_fields(self) -> None:
         for f in fields(ProviderEntry):
+            # Boolean *flags* (e.g. ``requires_api_key``) describe whether a
+            # credential is needed — they cannot hold one, so the credential-
+            # name heuristic must not fire on them.  A field that could
+            # actually carry a secret is str/bytes-shaped; those are still
+            # caught below, and the value-based lock
+            # (``test_validate_key_does_not_appear_in_returned_entries``)
+            # is the belt to this suspenders.
+            if isinstance(f.default, bool):
+                continue
             lowered = f.name.lower()
             for hint in _SECRET_FIELD_HINTS:
                 assert hint not in lowered, (
