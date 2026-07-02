@@ -53,6 +53,7 @@ from sec_generative_search.core.exceptions import (
     ConfigurationError,
     GenerationError,
     ProviderAuthError,
+    ProviderConnectionError,
     ProviderError,
     ProviderRateLimitError,
     ProviderTimeoutError,
@@ -685,6 +686,24 @@ class TestRagQueryErrorMapping:
             headers={"X-Provider-Key-openai": "sk-1234"},  # pragma: allowlist secret
         )
         assert response.status_code == 503
+
+    def test_connection_error_maps_to_503(self, rag_query_app_factory) -> None:
+        # An unreachable endpoint (chiefly an unstarted local_llm server) is
+        # transient → 503, with endpoint-focused guidance, not a key rotation.
+        app, _build, _orch = rag_query_app_factory(
+            generate_raise=ProviderConnectionError("could not reach endpoint"),
+        )
+        client = TestClient(app, base_url="https://testserver")
+        response = client.post(
+            "/api/rag/query",
+            json={"plan": _sample_plan_payload()},
+            headers={"X-Provider-Key-openai": "sk-1234"},  # pragma: allowlist secret
+        )
+        assert response.status_code == 503
+        body = response.json()
+        assert body["error"] == "provider_unavailable"
+        assert "reach" in body["message"].lower()
+        assert "local_llm" in body["hint"].lower()
 
     def test_generic_provider_error_maps_to_502(self, rag_query_app_factory) -> None:
         app, _build, _orch = rag_query_app_factory(

@@ -49,6 +49,7 @@ from sec_generative_search.core.exceptions import (
     ConfigurationError,
     GenerationError,
     ProviderAuthError,
+    ProviderConnectionError,
     ProviderError,
     ProviderRateLimitError,
 )
@@ -576,6 +577,30 @@ class TestRagStreamInStreamErrors:
         assert any(
             name == "error" and data["error"] == "provider_unavailable" for name, data in frames
         )
+
+    def test_connection_error_emits_provider_unavailable_sse_error(
+        self, rag_stream_app_factory
+    ) -> None:
+        # Mirrors the /query 503 mapping: an unreachable endpoint surfaces
+        # as an in-stream ``provider_unavailable`` event (the stream already
+        # opened 200), with endpoint-focused guidance.
+        app, _build, _orch = rag_stream_app_factory(
+            events=[],
+            raise_after=ProviderConnectionError("could not reach endpoint"),
+        )
+        client = TestClient(app, base_url="https://testserver")
+        response = client.post(
+            "/api/rag/stream",
+            json={"plan": _sample_plan_payload()},
+            headers={"X-Provider-Key-openai": "sk-1234"},  # pragma: allowlist secret
+        )
+        assert response.status_code == 200
+        frames = _parse_sse_frames(response.text)
+        err = [data for name, data in frames if name == "error"]
+        assert err, "expected an SSE error frame"
+        assert err[0]["error"] == "provider_unavailable"
+        assert "reach" in err[0]["message"].lower()
+        assert "local_llm" in err[0]["hint"].lower()
 
     def test_generic_provider_error_emits_sse_error(self, rag_stream_app_factory) -> None:
         app, _build, _orch = rag_stream_app_factory(

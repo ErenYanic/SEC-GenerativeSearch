@@ -24,6 +24,7 @@ Exception hierarchy:
     │   ├── ProviderAuthError — Invalid or expired API key
     │   ├── ProviderRateLimitError — Provider rate limit exceeded
     │   ├── ProviderTimeoutError — Provider call timed out
+    │   ├── ProviderConnectionError — Provider endpoint unreachable (refused / no route / DNS)
     │   └── ProviderContentFilterError — Content blocked by provider safety filter
     ├── GenerationError — RAG answer generation failures
     ├── PromptError — Prompt template or injection-detection failures
@@ -254,6 +255,25 @@ class ProviderRateLimitError(ProviderError):
 
 class ProviderTimeoutError(ProviderError):
     """Raised when a provider API call exceeds the configured timeout."""
+
+
+class ProviderConnectionError(ProviderError):
+    """Raised when a provider endpoint cannot be reached.
+
+    Covers connection refused, no route to host, and DNS-resolution
+    failures — the SDK could not open a transport to the endpoint at
+    all, distinct from :class:`ProviderTimeoutError` (the connection
+    opened but the response was too slow).  The predominant trigger is a
+    self-hosted ``local_llm`` endpoint that is not running or whose
+    ``LOCAL_LLM_BASE_URL`` points nowhere, but any provider can hit a
+    transient network blip.
+
+    Treated as **transient / retryable**, never terminal: ``resilient_call``
+    retries it within the backoff budget, and the API surfaces it as
+    ``503 provider_unavailable`` (safe to retry once the endpoint
+    recovers).  The message is content-free — it never echoes the base
+    URL, the query, or the raw SDK transport error.
+    """
 
 
 class ProviderContentFilterError(ProviderError):

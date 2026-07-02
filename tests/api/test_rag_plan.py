@@ -43,6 +43,7 @@ from sec_generative_search.core.edgar_identity import InMemorySessionEdgarIdenti
 from sec_generative_search.core.exceptions import (
     ConfigurationError,
     ProviderAuthError,
+    ProviderConnectionError,
     ProviderError,
     ProviderRateLimitError,
     ProviderTimeoutError,
@@ -408,6 +409,24 @@ class TestRagPlanErrorMapping:
             headers={"X-Provider-Key-openai": "sk-1234"},  # pragma: allowlist secret
         )
         assert response.status_code == 503
+
+    def test_connection_error_maps_to_503(self, rag_app_factory) -> None:
+        # Unreachable endpoint during planning → transient 503 with
+        # endpoint-focused guidance (chiefly an unstarted local_llm server).
+        app, _build, _understand = rag_app_factory(
+            understand_raise=ProviderConnectionError("could not reach endpoint"),
+        )
+        client = TestClient(app, base_url="https://testserver")
+        response = client.post(
+            "/api/rag/plan",
+            json={"query": "any"},
+            headers={"X-Provider-Key-openai": "sk-1234"},  # pragma: allowlist secret
+        )
+        assert response.status_code == 503
+        body = response.json()
+        assert body["error"] == "provider_unavailable"
+        assert "reach" in body["message"].lower()
+        assert "local_llm" in body["hint"].lower()
 
     def test_generic_provider_error_maps_to_502(self, rag_app_factory) -> None:
         app, _build, _understand = rag_app_factory(

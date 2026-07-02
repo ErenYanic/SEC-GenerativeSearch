@@ -32,6 +32,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from sec_generative_search.core.exceptions import (
+    ProviderConnectionError,
+    ProviderTimeoutError,
+)
+from sec_generative_search.core.resilience import RetryPolicy
 from sec_generative_search.core.types import (
     PricingTier,
     ProviderCapability,
@@ -39,6 +44,7 @@ from sec_generative_search.core.types import (
     estimate_cost,
 )
 from sec_generative_search.providers import openai_compat
+from sec_generative_search.providers.base import GenerationRequest
 from sec_generative_search.providers.factory import build_llm_provider
 from sec_generative_search.providers.local_llm import LocalLLMProvider
 from sec_generative_search.providers.openai_compat import (
@@ -56,6 +62,25 @@ _KEY_TAIL = _LONG_KEY[-4:]
 
 _LOOPBACK_BASE_URL = "http://127.0.0.1:11434/v1"
 _DEFAULT_MODEL = "llama3.2"
+
+
+def _fast_retry() -> RetryPolicy:
+    """Tight retry schedule so a retried failure stays in milliseconds."""
+    return RetryPolicy(max_retries=2, backoff_base=2.0, initial_delay=0.0, max_delay=0.0)
+
+
+class _FakeAPIConnection(openai_compat.APIConnectionError):
+    """SDK-shaped connection error that skips the heavy httpx constructor."""
+
+    def __init__(self, message: str = "connection refused") -> None:
+        Exception.__init__(self, message)
+
+
+class _FakeAPITimeout(openai_compat.APITimeoutError):
+    """SDK-shaped timeout — subclasses the connection error in the real SDK."""
+
+    def __init__(self, message: str = "timed out") -> None:
+        Exception.__init__(self, message)
 
 
 @pytest.fixture
@@ -322,3 +347,59 @@ class TestNoKeyToleranceIsScoped:
         for name in ProviderRegistry.list_providers(ProviderSurface.LLM):
             entry = ProviderRegistry.get_entry(name, ProviderSurface.LLM)
             assert entry.free_tier is (name == "local_llm")
+
+
+# ---------------------------------------------------------------------------
+# Endpoint unreachable — the dominant local_llm failure
+# ---------------------------------------------------------------------------
+
+
+class TestConnectionFailure:
+    """An unreachable endpoint maps onto the ProviderError contract.
+
+    A stock Ollama install that is not running (or a mis-pointed
+    ``LOCAL_LLM_BASE_URL``) surfaces as ``openai.APIConnectionError`` from
+    the SDK.  The shared mapping normalises that to
+    :class:`ProviderConnectionError` — a transient, retryable
+    :class:`ProviderError` the orchestrator / API / CLI already reason
+    about — and never lets the raw SDK/transport exception leak.
+    """
+
+    def test_unreachable_endpoint_maps_to_connection_error(
+        self, patched_openai: dict[str, Any]
+    ) -> None:
+        provider = LocalLLMProvider(_LONG_KEY, retry_policy=_fast_retry())
+        client = patched_openai["client"]
+        client.chat.completions.create.side_effect = _FakeAPIConnection()
+        with pytest.raises(ProviderConnectionError) as excinfo:
+            provider.generate(GenerationRequest(prompt="hi", model="llama3.2"))
+        # Transient → retried within the budget (initial + 2 retries).
+        assert client.chat.completions.create.call_count == 3
+        # The endpoint base URL must never leak into the normalised error.
+        assert _LOOPBACK_BASE_URL not in str(excinfo.value)
+
+    def test_timeout_is_not_reclassified_as_connection(
+        self, patched_openai: dict[str, Any]
+    ) -> None:
+        # ``APITimeoutError`` subclasses ``APIConnectionError`` — a slow
+        # local server must stay a ProviderTimeoutError, never a
+        # ProviderConnectionError (ordering guard).
+        provider = LocalLLMProvider(_LONG_KEY, retry_policy=_fast_retry())
+        patched_openai["client"].chat.completions.create.side_effect = _FakeAPITimeout()
+        with pytest.raises(ProviderTimeoutError) as excinfo:
+            provider.generate(GenerationRequest(prompt="hi", model="llama3.2"))
+        assert not isinstance(excinfo.value, ProviderConnectionError)
+
+    @pytest.mark.security
+    def test_connection_error_never_leaks_the_key(self, patched_openai: dict[str, Any]) -> None:
+        # Whatever the SDK transport error carries, the normalised
+        # connection error must not echo the API key.
+        provider = LocalLLMProvider(_LONG_KEY, retry_policy=_fast_retry())
+        patched_openai["client"].chat.completions.create.side_effect = _FakeAPIConnection(
+            "refused talking to endpoint"
+        )
+        with pytest.raises(ProviderConnectionError) as excinfo:
+            provider.generate(GenerationRequest(prompt="hi", model="llama3.2"))
+        assert _LONG_KEY not in str(excinfo.value)
+        assert _LONG_KEY not in str(excinfo.value.details or "")
+        assert _LONG_KEY not in str(excinfo.value.hint or "")

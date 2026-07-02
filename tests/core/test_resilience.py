@@ -21,6 +21,7 @@ import pytest
 
 from sec_generative_search.core.exceptions import (
     ProviderAuthError,
+    ProviderConnectionError,
     ProviderContentFilterError,
     ProviderError,
     ProviderRateLimitError,
@@ -196,9 +197,24 @@ class _FakeContentFilterError(Exception):
     """Stand-in for an SDK-specific safety-filter exception."""
 
 
+class _FakeConnectionError(Exception):
+    """Stand-in for an SDK-specific endpoint-unreachable exception."""
+
+
+class _FakeTimeoutSubclassingConnectionError(_FakeConnectionError):
+    """A timeout type that *subclasses* the connection type.
+
+    Mirrors the real SDKs (``openai.APITimeoutError`` derives from
+    ``openai.APIConnectionError``), so it pins that ``normalise_exception``
+    consults ``timeout`` before ``connection``.
+    """
+
+
 _MAPPING = ExceptionMapping(
     auth=(_FakeAuthError,),
     rate_limit=(_FakeRateLimitError,),
+    timeout=(_FakeTimeoutSubclassingConnectionError,),
+    connection=(_FakeConnectionError,),
     content_filter=(_FakeContentFilterError,),
 )
 
@@ -234,6 +250,33 @@ class TestNormaliseException:
         )
         assert isinstance(normalised, ProviderContentFilterError)
 
+    def test_connection_mapping(self) -> None:
+        # An endpoint-unreachable error normalises to ProviderConnectionError
+        # with an actionable, key-preserving hint.
+        normalised = normalise_exception(
+            _FakeConnectionError("connection refused"),
+            provider="local_llm",
+            mapping=_MAPPING,
+        )
+        assert isinstance(normalised, ProviderConnectionError)
+        assert normalised.provider == "local_llm"
+        assert normalised.hint is not None
+        # The hint must steer away from rotating a (possibly fine) key.
+        assert "do not rotate the key" in normalised.hint.lower()
+
+    def test_timeout_subclass_of_connection_resolves_to_timeout(self) -> None:
+        # Ordering guard: a timeout type that *subclasses* the connection
+        # type must resolve to ProviderTimeoutError, never
+        # ProviderConnectionError — a slow response is not an unreachable
+        # endpoint.  This mirrors the real openai/anthropic SDK hierarchy.
+        normalised = normalise_exception(
+            _FakeTimeoutSubclassingConnectionError("slow"),
+            provider="local_llm",
+            mapping=_MAPPING,
+        )
+        assert isinstance(normalised, ProviderTimeoutError)
+        assert not isinstance(normalised, ProviderConnectionError)
+
     def test_unknown_exception_falls_back_to_provider_error(self) -> None:
         normalised = normalise_exception(RuntimeError("boom"), provider="openai", mapping=_MAPPING)
         assert isinstance(normalised, ProviderError)
@@ -244,6 +287,7 @@ class TestNormaliseException:
                 ProviderAuthError,
                 ProviderRateLimitError,
                 ProviderTimeoutError,
+                ProviderConnectionError,
                 ProviderContentFilterError,
             ),
         )
@@ -366,6 +410,43 @@ class TestResilientCall:
                 sleep=_zero_sleep,
             )
         assert calls == 1
+
+    def test_connection_error_is_retried_then_raised(self) -> None:
+        # An endpoint-unreachable error is transient, not terminal — it is
+        # retried within the budget and only surfaces after exhaustion.
+        calls = 0
+
+        def fn() -> str:
+            nonlocal calls
+            calls += 1
+            raise _FakeConnectionError("connection refused")
+
+        with pytest.raises(ProviderConnectionError):
+            resilient_call(
+                fn,
+                provider="local_llm",
+                policy=_make_policy(max_retries=2),
+                sleep=_zero_sleep,
+            )
+        # Initial + 2 retries = 3 total attempts (not terminal like auth).
+        assert calls == 3
+
+    def test_connection_error_recovers_on_retry(self) -> None:
+        # A transient blip that clears on the next attempt returns normally.
+        calls = 0
+
+        def fn() -> str:
+            nonlocal calls
+            calls += 1
+            if calls < 2:
+                raise _FakeConnectionError("connection refused")
+            return "ok"
+
+        result = resilient_call(
+            fn, provider="local_llm", policy=_make_policy(max_retries=3), sleep=_zero_sleep
+        )
+        assert result == "ok"
+        assert calls == 2
 
     def test_raises_after_exhausting_retries(self) -> None:
         calls = 0

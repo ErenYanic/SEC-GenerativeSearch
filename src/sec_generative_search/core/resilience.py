@@ -53,6 +53,7 @@ from enum import Enum
 
 from sec_generative_search.core.exceptions import (
     ProviderAuthError,
+    ProviderConnectionError,
     ProviderContentFilterError,
     ProviderError,
     ProviderRateLimitError,
@@ -252,6 +253,14 @@ class ExceptionMapping:
     caller forgets to extend the tuple.  Callers may override this
     default to disable or extend the mapping.
 
+    ``connection`` captures endpoint-unreachable failures (refused
+    connection, no route to host, DNS failure).  Because SDK timeout
+    types are often *subclasses* of the SDK's connection-error type
+    (e.g. ``openai.APITimeoutError`` derives from
+    ``openai.APIConnectionError``), :func:`normalise_exception` consults
+    ``timeout`` **before** ``connection`` so a slow response is never
+    mislabelled as an unreachable endpoint.
+
     Empty tuples are fine — ``isinstance(exc, ())`` returns ``False``
     and the default branch of :func:`normalise_exception` returns a
     generic :class:`ProviderError`.
@@ -260,6 +269,7 @@ class ExceptionMapping:
     auth: tuple[type[BaseException], ...] = ()
     rate_limit: tuple[type[BaseException], ...] = ()
     timeout: tuple[type[BaseException], ...] = (TimeoutError,)
+    connection: tuple[type[BaseException], ...] = ()
     content_filter: tuple[type[BaseException], ...] = ()
 
 
@@ -299,6 +309,20 @@ def normalise_exception(
             f"{provider} call timed out",
             provider=provider,
             hint="Increase PROVIDER_TIMEOUT or retry with fewer tokens.",
+            details=detail,
+        )
+    # Consulted after ``timeout`` on purpose: SDK timeout types usually
+    # subclass the connection-error type, so a slow response must resolve
+    # to ProviderTimeoutError, not ProviderConnectionError.
+    if mapping.connection and isinstance(exc, mapping.connection):
+        return ProviderConnectionError(
+            f"Could not reach {provider} endpoint",
+            provider=provider,
+            hint=(
+                "Verify the endpoint is running and reachable "
+                "(for local_llm, that the local model server is up); "
+                "retry once it recovers. Do not rotate the key."
+            ),
             details=detail,
         )
     if mapping.content_filter and isinstance(exc, mapping.content_filter):

@@ -40,6 +40,7 @@ from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from openai import (
+    APIConnectionError,
     APITimeoutError,
     AuthenticationError,
     OpenAI,
@@ -93,6 +94,14 @@ logger = get_logger(__name__)
 #   AuthenticationError, PermissionDeniedError -> ProviderAuthError (terminal)
 #   RateLimitError                             -> ProviderRateLimitError
 #   APITimeoutError, builtin TimeoutError      -> ProviderTimeoutError
+#   APIConnectionError                         -> ProviderConnectionError
+#
+# ``APITimeoutError`` subclasses ``APIConnectionError``, so it appears in
+# ``timeout`` and is matched there first (``normalise_exception``
+# consults ``timeout`` before ``connection``) — a slow response stays a
+# timeout, while a genuinely unreachable endpoint (refused / no route /
+# DNS) maps to ProviderConnectionError.  This is the dominant failure of
+# a self-hosted ``local_llm`` endpoint that is not running.
 #
 # Content-filter blocks are surfaced from the response body, not as an
 # exception, so they do not appear in this mapping.
@@ -100,6 +109,7 @@ OPENAI_EXCEPTION_MAPPING = ExceptionMapping(
     auth=(AuthenticationError, PermissionDeniedError),
     rate_limit=(RateLimitError,),
     timeout=(APITimeoutError, TimeoutError),
+    connection=(APIConnectionError,),
 )
 
 

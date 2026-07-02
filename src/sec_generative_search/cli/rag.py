@@ -101,6 +101,7 @@ from sec_generative_search.core.exceptions import (
     DatabaseError,
     GenerationError,
     ProviderAuthError,
+    ProviderConnectionError,
     ProviderError,
     ProviderRateLimitError,
     ProviderTimeoutError,
@@ -150,6 +151,16 @@ rag_app = typer.Typer(
 # ``api.dependencies.ADMIN_USER_ID``; duplicated here so the CLI does not
 # import from ``api/`` (the two surfaces are deliberately decoupled).
 _ADMIN_USER_ID = "__admin__"
+
+# Shared operator hint for an unreachable provider endpoint
+# (``ProviderConnectionError``).  The dominant trigger on the CLI — the
+# operator-on-host surface — is a self-hosted ``local_llm`` server that is
+# not running or a mis-pointed ``LOCAL_LLM_BASE_URL``.
+_LOCAL_ENDPOINT_HINT = (
+    "Verify the endpoint is running and reachable (for local_llm, that the "
+    "local model server is up, e.g. `ollama serve`, and LOCAL_LLM_BASE_URL is "
+    "correct); retry once it recovers."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1015,6 +1026,15 @@ def query(
                 error_code="provider_unavailable",
             )
             raise typer.Exit(code=1) from None
+        except ProviderConnectionError:
+            _print_error(
+                "Provider unavailable",
+                "The upstream provider endpoint could not be reached.",
+                hint=_LOCAL_ENDPOINT_HINT,
+                output=output_format,
+                error_code="provider_unavailable",
+            )
+            raise typer.Exit(code=1) from None
         except ProviderError as exc:
             _print_error(
                 "Provider error",
@@ -1080,6 +1100,15 @@ def query(
             "Provider unavailable",
             "The upstream provider is rate-limited or timed out.",
             hint="Retry after a short backoff; do not rotate the key.",
+            output=output_format,
+            error_code="provider_unavailable",
+        )
+        raise typer.Exit(code=1) from None
+    except ProviderConnectionError:
+        _print_error(
+            "Provider unavailable",
+            "The upstream provider endpoint could not be reached.",
+            hint=_LOCAL_ENDPOINT_HINT,
             output=output_format,
             error_code="provider_unavailable",
         )
@@ -1207,6 +1236,12 @@ def _classify_stream_error(exc: BaseException, provider_name: str) -> tuple[str,
             "Provider unavailable",
             "The upstream provider is rate-limited or timed out.",
             "Retry after a short backoff; do not rotate the key.",
+        )
+    if isinstance(exc, ProviderConnectionError):
+        return (
+            "Provider unavailable",
+            "The upstream provider endpoint could not be reached.",
+            _LOCAL_ENDPOINT_HINT,
         )
     if isinstance(exc, ProviderError):
         return (
@@ -1677,6 +1712,13 @@ def chat(
                     "Provider unavailable",
                     "The upstream provider is rate-limited or timed out.",
                     hint="Retry after a short backoff; do not rotate the key.",
+                )
+                continue
+            except ProviderConnectionError:
+                _print_error(
+                    "Provider unavailable",
+                    "The upstream provider endpoint could not be reached.",
+                    hint=_LOCAL_ENDPOINT_HINT,
                 )
                 continue
             except ProviderError as exc:

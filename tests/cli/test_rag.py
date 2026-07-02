@@ -53,6 +53,7 @@ from sec_generative_search.core.exceptions import (
     ConfigurationError,
     GenerationError,
     ProviderAuthError,
+    ProviderConnectionError,
     ProviderError,
     ProviderRateLimitError,
     ProviderTimeoutError,
@@ -737,6 +738,36 @@ class TestProviderExceptions:
         assert result.exit_code == 1
         assert "Provider unavailable" in result.output
 
+    def test_understand_connection_error(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        # An unreachable endpoint during query understanding surfaces as
+        # "Provider unavailable" with endpoint-focused guidance (chiefly an
+        # unstarted local_llm server), not a key-rotation hint.
+        patched["understand_raises"][0] = ProviderConnectionError("refused")
+        result = runner.invoke(app, ["rag", "query", "q"])
+        assert result.exit_code == 1
+        out = _stripped(result.output)
+        assert "Provider unavailable" in out
+        assert "could not be reached" in out
+        assert "local_llm" in out
+
+    def test_generate_connection_error(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        _arm_orchestrator_raises(ProviderConnectionError("no route to host"))
+        result = runner.invoke(app, ["rag", "query", "q", "--skip-plan"])
+        assert result.exit_code == 1
+        out = _stripped(result.output)
+        assert "Provider unavailable" in out
+        assert "local_llm" in out
+
     def test_generate_provider_error(
         self,
         runner: CliRunner,
@@ -1353,6 +1384,28 @@ class TestChatProviderExceptions:
         )
         assert result.exit_code == 0, result.output
         assert "Provider error" in result.output
+        orch = patched["orchestrators"][-1]
+        assert len(orch.stream_calls) == 2
+
+    def test_stream_connection_error_continues_loop(
+        self,
+        runner: CliRunner,
+        app: typer.Typer,
+        patched: dict[str, Any],
+    ) -> None:
+        # An unreachable endpoint mid-stream surfaces inline as "Provider
+        # unavailable" (endpoint-focused) and the REPL keeps running.
+        _arm_stream_raises([ProviderConnectionError("refused"), None])
+        _arm_stream_events([[], [_make_stream_final()]])
+        result = runner.invoke(
+            app,
+            ["rag", "chat", "--skip-plan"],
+            input="first-fails\nsecond-works\n/exit\n",
+        )
+        assert result.exit_code == 0, result.output
+        out = _stripped(result.output)
+        assert "Provider unavailable" in out
+        assert "could not be reached" in out
         orch = patched["orchestrators"][-1]
         assert len(orch.stream_calls) == 2
 

@@ -44,8 +44,10 @@ Security contract (shared by both routes):
             fault.
         - :class:`ProviderAuthError` → 401 ``provider_unauthorized``
             (caller's own key is invalid; not a server fault).
-        - :class:`ProviderRateLimitError` / :class:`ProviderTimeoutError`
-            → 503 ``provider_unavailable``.
+        - :class:`ProviderRateLimitError` / :class:`ProviderTimeoutError` /
+            :class:`ProviderConnectionError` → 503 ``provider_unavailable``
+            (transient — the ``ProviderConnectionError`` case is chiefly an
+            unreachable self-hosted ``local_llm`` endpoint).
         - Every other :class:`ProviderError` → 502 ``provider_error``.
         - The unified envelope's ``message`` / ``hint`` never echoes the raw
             query, the plan body, or the provider key.
@@ -85,6 +87,7 @@ from sec_generative_search.core.exceptions import (
     ConfigurationError,
     GenerationError,
     ProviderAuthError,
+    ProviderConnectionError,
     ProviderError,
     ProviderRateLimitError,
     ProviderTimeoutError,
@@ -290,6 +293,25 @@ async def plan_query(
             error="provider_unavailable",
             message=("The upstream provider is rate-limited or timed out."),
             hint="Retry after a short backoff; do not rotate the key.",
+        ) from exc
+    except ProviderConnectionError as exc:
+        # Endpoint unreachable (refused / no route / DNS) — transient, so
+        # 503 like the rate-limit/timeout case, but a distinct message so
+        # the operator fixes the endpoint (chiefly an unstarted local_llm
+        # server) rather than rotating a key.
+        logger.warning(
+            "rag plan endpoint unreachable: provider=%s kind=%s",
+            provider_name,
+            type(exc).__name__,
+        )
+        raise http_error(
+            status_code=503,
+            error="provider_unavailable",
+            message="The upstream provider endpoint could not be reached.",
+            hint=(
+                "Verify the endpoint is running and reachable (for local_llm, "
+                "that the local model server is up); retry once it recovers."
+            ),
         ) from exc
     except ProviderError as exc:
         logger.error(
@@ -739,6 +761,23 @@ async def generate_answer(
             message="The upstream provider is rate-limited or timed out.",
             hint="Retry after a short backoff; do not rotate the key.",
         ) from exc
+    except ProviderConnectionError as exc:
+        # Endpoint unreachable — transient 503 with endpoint-focused
+        # guidance (chiefly an unstarted self-hosted local_llm server).
+        logger.warning(
+            "rag query endpoint unreachable: provider=%s kind=%s",
+            provider_name,
+            type(exc).__name__,
+        )
+        raise http_error(
+            status_code=503,
+            error="provider_unavailable",
+            message="The upstream provider endpoint could not be reached.",
+            hint=(
+                "Verify the endpoint is running and reachable (for local_llm, "
+                "that the local model server is up); retry once it recovers."
+            ),
+        ) from exc
     except ProviderError as exc:
         logger.error(
             "rag query provider error: provider=%s kind=%s",
@@ -887,6 +926,17 @@ def _classify_stream_exception(exc: Exception) -> dict:
             error="provider_unavailable",
             message="The upstream provider is rate-limited or timed out.",
             hint="Retry after a short backoff; do not rotate the key.",
+        )
+    if isinstance(exc, ProviderConnectionError):
+        # Endpoint unreachable — mirrors the /query 503 mapping so a
+        # caller sees the same shape on both surfaces.
+        return _error_payload(
+            error="provider_unavailable",
+            message="The upstream provider endpoint could not be reached.",
+            hint=(
+                "Verify the endpoint is running and reachable (for local_llm, "
+                "that the local model server is up); retry once it recovers."
+            ),
         )
     if isinstance(exc, ProviderError):
         return _error_payload(

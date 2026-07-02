@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from anthropic import (
     Anthropic,
+    APIConnectionError,
     APITimeoutError,
     AuthenticationError,
     PermissionDeniedError,
@@ -82,10 +83,16 @@ logger = get_logger(__name__)
 # that content-filter refusals are *not* represented here — they arrive
 # as valid responses with ``stop_reason="refusal"`` and are raised from
 # the response handler (terminal, bypassing the retry loop).
+#
+# As with the OpenAI SDK, ``APITimeoutError`` subclasses
+# ``APIConnectionError``; ``normalise_exception`` consults ``timeout``
+# before ``connection`` so a slow response stays a timeout and only a
+# genuinely unreachable endpoint maps to ProviderConnectionError.
 ANTHROPIC_EXCEPTION_MAPPING = ExceptionMapping(
     auth=(AuthenticationError, PermissionDeniedError),
     rate_limit=(RateLimitError,),
     timeout=(APITimeoutError, TimeoutError),
+    connection=(APIConnectionError,),
 )
 
 

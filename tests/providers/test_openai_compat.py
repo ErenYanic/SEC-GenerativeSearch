@@ -36,6 +36,7 @@ import pytest
 
 from sec_generative_search.core.exceptions import (
     ProviderAuthError,
+    ProviderConnectionError,
     ProviderContentFilterError,
     ProviderError,
     ProviderRateLimitError,
@@ -75,6 +76,11 @@ class _FakeRateLimit(openai_compat.RateLimitError):
 
 class _FakeAPITimeout(openai_compat.APITimeoutError):
     def __init__(self, message: str = "timed out") -> None:
+        Exception.__init__(self, message)
+
+
+class _FakeAPIConnection(openai_compat.APIConnectionError):
+    def __init__(self, message: str = "connection refused") -> None:
         Exception.__init__(self, message)
 
 
@@ -392,6 +398,26 @@ class TestErrorMapping:
         with pytest.raises(ProviderTimeoutError):
             llm_provider.generate(GenerationRequest(prompt="x", model="demo-chat"))
 
+    def test_connection_error_normalised_and_retried(self, llm_provider: _DemoLLM) -> None:
+        # A refused / unreachable endpoint (the dominant local_llm failure)
+        # normalises to ProviderConnectionError and, being transient, is
+        # retried within the budget.
+        llm_provider._fake_client.chat.completions.create.side_effect = _FakeAPIConnection()
+        with pytest.raises(ProviderConnectionError):
+            llm_provider.generate(GenerationRequest(prompt="x", model="demo-chat"))
+        # Initial + 2 retries = 3 attempts under the fast retry policy.
+        assert llm_provider._fake_client.chat.completions.create.call_count == 3
+
+    def test_timeout_still_wins_over_connection(self, llm_provider: _DemoLLM) -> None:
+        # ``APITimeoutError`` subclasses ``APIConnectionError``; the shared
+        # mapping must still resolve a slow response to ProviderTimeoutError,
+        # never ProviderConnectionError (ordering guard through the real
+        # OPENAI_EXCEPTION_MAPPING).
+        llm_provider._fake_client.chat.completions.create.side_effect = _FakeAPITimeout()
+        with pytest.raises(ProviderTimeoutError) as excinfo:
+            llm_provider.generate(GenerationRequest(prompt="x", model="demo-chat"))
+        assert not isinstance(excinfo.value, ProviderConnectionError)
+
     def test_eventual_success_after_retry(self, llm_provider: _DemoLLM) -> None:
         attempts: list[int] = []
 
@@ -517,6 +543,7 @@ class TestExceptionMapping:
         assert openai_compat.PermissionDeniedError in OPENAI_EXCEPTION_MAPPING.auth
         assert openai_compat.RateLimitError in OPENAI_EXCEPTION_MAPPING.rate_limit
         assert openai_compat.APITimeoutError in OPENAI_EXCEPTION_MAPPING.timeout
+        assert openai_compat.APIConnectionError in OPENAI_EXCEPTION_MAPPING.connection
 
     def test_content_filter_is_response_signal_not_exception(self) -> None:
         # Content-filter is surfaced from the response body, not as an SDK
