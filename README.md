@@ -41,7 +41,7 @@ Filings are fetched from SEC EDGAR, parsed into structured sections, split into 
 ## Features
 
 - **Grounded answers with citations** — answers are generated only from retrieved filing chunks; every `[N]` marker resolves to a specific chunk, and citations pointing at chunks that were not retrieved are dropped, never fabricated.
-- **Bring-your-own LLM provider** — twelve hosted providers via their first-party SDKs (no aggregator middleware), plus a self-hosted **`local_llm`** endpoint (Ollama / llama.cpp-server / vLLM / LM Studio); supply your own key per session, per user, or per operator.
+- **Bring-your-own-key (BYOK)** — twelve hosted providers via their first-party SDKs (no aggregator middleware), plus a keyless self-hosted **`local_llm`** endpoint (Ollama / llama.cpp-server / vLLM / LM Studio); supply your own key — or none, for `local_llm` — per session, per user, or per operator.
 - **Local-by-default retrieval** — the on-device embedder keeps the retrieval step off the network, so the LLM provider is the *only* third party in the default configuration (and a loopback `local_llm` endpoint removes even that).
 - **Streaming chat** — interactive RAG chat over a corpus with cancellable, citation-aware streaming in both CLI and web UI; prior-turn filing chunks never re-enter a later prompt.
 - **Three deployment profiles** — Local (single user), Team (shared server), Cloud (GCP Cloud Run, internet-facing), each with hardened defaults.
