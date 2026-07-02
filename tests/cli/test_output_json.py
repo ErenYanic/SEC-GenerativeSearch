@@ -832,6 +832,43 @@ class TestProviderListJson:
             # mask string.
             assert isinstance(row["key_resolves"], bool)
 
+    def test_local_llm_surfaces_openrouter_style(
+        self,
+        runner: CliRunner,
+        provider_test_app: typer.Typer,
+        patched_provider: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The self-hosted ``local_llm`` provider renders as a free-text-slug
+        LLM row — an empty catalogue advertised via
+        ``supports_arbitrary_models`` (OpenRouter-style), with routing hints
+        dropped (``supports_upstream_routing`` False). Unlike OpenRouter it
+        carries no admin-env var (a self-hosted endpoint needs no
+        credential) and prices FREE (cost-derived from the 0.0 default-model
+        cost), never UNKNOWN."""
+        for env in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"):
+            monkeypatch.delenv(env, raising=False)
+        result = runner.invoke(
+            provider_test_app,
+            ["provider", "list", "--surface", "llm", "-o", "json"],
+        )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        by_name = {row["name"]: row for row in payload["providers"]}
+        assert "local_llm" in by_name, "local_llm must surface on the LLM list"
+        row = by_name["local_llm"]
+        assert row["surface"] == "llm"
+        assert row["supports_arbitrary_models"] is True
+        assert row["supports_upstream_routing"] is False
+        # A self-hosted endpoint has no admin-default env var and no
+        # optional-extras gate (the ``openai`` SDK is a core dependency).
+        assert row["admin_env_var"] is None
+        assert row["requires_extras"] == []
+        # FREE is derived from the 0.0-cost default-model capability —
+        # never the honest-UNKNOWN an arbitrary-slug OpenRouter row reports.
+        assert row["pricing_tier"] == "free"
+        assert by_name["openrouter"]["pricing_tier"] == "unknown"
+
     def test_surface_filter_in_json_mode(
         self,
         runner: CliRunner,

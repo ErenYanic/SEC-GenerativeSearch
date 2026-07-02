@@ -28,6 +28,9 @@ const CATALOGUE: ProviderInfo[] = [
   { name: "openai", surface: "llm", supports_upstream_routing: false },
   { name: "anthropic", surface: "llm", supports_upstream_routing: false },
   { name: "openrouter", surface: "llm", supports_upstream_routing: true },
+  // Self-hosted local endpoint: an LLM-surface provider that drops
+  // routing hints — it must render like every non-routing vendor.
+  { name: "local_llm", surface: "llm", supports_upstream_routing: false },
   // Embedding entries MUST NOT appear in the provider dropdown.
   { name: "local", surface: "embedding", supports_upstream_routing: false },
 ];
@@ -88,6 +91,55 @@ describe("ModelPicker — routing UI gating", () => {
     renderPicker({ value: { provider: "openrouter", model: "" } });
     expect(screen.getByLabelText(/preferred upstream order/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/allow fallbacks/i)).toBeInTheDocument();
+  });
+});
+
+describe("ModelPicker — self-hosted local_llm", () => {
+  // The self-hosted `local_llm` provider surfaces OpenRouter-style: it is an
+  // LLM-surface entry the user picks from the dropdown, its model is a
+  // free-text slug (whatever the local server has pulled), and it drops
+  // routing hints like every non-routing vendor — so the routing UI stays
+  // hidden. The picker is generic over the catalogue, so no bespoke branch
+  // exists for it; these assertions lock that the generic path serves it.
+  it("renders local_llm as a selectable LLM option", () => {
+    renderPicker();
+    const select = screen.getByLabelText(/^provider$/i) as HTMLSelectElement;
+    const optionValues = Array.from(select.options).map((o) => o.value);
+    expect(optionValues).toContain("local_llm");
+  });
+
+  it("does NOT annotate local_llm with `(routing)`", () => {
+    renderPicker();
+    // Only OpenRouter carries the `(routing)` suffix; local_llm is a plain
+    // option label so the operator is not led to expect a routing picker.
+    expect(screen.getByRole("option", { name: "local_llm" })).toBeInTheDocument();
+  });
+
+  it("keeps the routing UI hidden and offers a free-text model slug", () => {
+    renderPicker({ value: { provider: "local_llm", model: "" } });
+    // No routing UI — local_llm advertises supports_upstream_routing=false.
+    expect(screen.queryByLabelText(/preferred upstream order/i)).toBeNull();
+    expect(screen.queryByLabelText(/allow fallbacks/i)).toBeNull();
+    // The model field is a free-text input (not a closed dropdown), so any
+    // slug the local server serves can be typed.
+    const modelInput = screen.getByLabelText(/model slug/i) as HTMLInputElement;
+    expect(modelInput.tagName).toBe("INPUT");
+    expect(modelInput.type).toBe("text");
+  });
+
+  it("never emits routing_hints when a slug is typed for local_llm", async () => {
+    const { onChange } = renderPicker({
+      value: { provider: "local_llm", model: "" },
+    });
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText(/model slug/i), "a");
+    // The emitted value carries provider + model only — no routing_hints,
+    // so the backend never sees a hint it would reject for a non-routing
+    // provider.
+    expect(onChange).toHaveBeenLastCalledWith({
+      provider: "local_llm",
+      model: "a",
+    });
   });
 });
 

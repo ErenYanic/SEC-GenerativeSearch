@@ -293,6 +293,17 @@ class TestListProvidersShape:
                 continue
             assert entry["supports_upstream_routing"] is False, entry
 
+    def test_local_llm_present_and_non_routing(self, api_client: TestClient) -> None:
+        # The self-hosted ``local_llm`` provider is a curated LLM-surface
+        # entry, so it rides this list onto the SPA model-picker dropdown
+        # like every other vendor. It drops upstream-routing hints
+        # (``supports_upstream_routing`` False), so the picker hides the
+        # routing UI for it — same as every non-OpenRouter vendor.
+        response = api_client.get("/api/providers/")
+        by_key = {(p["name"], p["surface"]): p for p in response.json()["providers"]}
+        assert ("local_llm", "llm") in by_key
+        assert by_key[("local_llm", "llm")]["supports_upstream_routing"] is False
+
 
 class TestListProvidersOrdering:
     def test_curated_order_preserved(self, api_client: TestClient) -> None:
@@ -519,6 +530,22 @@ class TestProviderModelsArbitraryProvider:
         response = api_client.get("/api/providers/openrouter/models")
         assert response.status_code == 200
         body = response.json()
+        assert body["models"] == []
+        assert body["total"] == 0
+        assert body["supports_arbitrary_models"] is True
+
+    def test_local_llm_returns_empty_catalogue(self, api_client: TestClient) -> None:
+        # The self-hosted ``local_llm`` provider surfaces OpenRouter-style
+        # — an empty vendored catalogue with ``supports_arbitrary_models``
+        # set — so the SPA renders a free-text slug input for whatever the
+        # local server has pulled. This route is the model-picker's data
+        # source; no new route was added for it (the handler is generic over
+        # :class:`ProviderRegistry`).
+        response = api_client.get("/api/providers/local_llm/models")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["provider"] == "local_llm"
+        assert body["surface"] == "llm"
         assert body["models"] == []
         assert body["total"] == 0
         assert body["supports_arbitrary_models"] is True
