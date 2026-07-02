@@ -10,10 +10,10 @@ This is a **generative** system: a language model writes the answer. That answer
 
 ## Where your data goes (read this first)
 
-Because an LLM generates the answer, **this system is not fully local, and it does not keep your data to yourself.** Being honest about that is more useful than a privacy badge:
+Because an LLM generates the answer, **by default this system is not fully local, and does not keep your data to yourself.** Being honest about that is more useful than a privacy badge:
 
-- **Generation is remote, always.** To answer a question, the system sends your question text **and the retrieved filing excerpts** to whichever LLM provider you configure (OpenAI, Anthropic, Gemini, Mistral, DeepSeek, Grok, Qwen, Kimi, MiniMax, MiMo, Z.ai, or OpenRouter). That provider sees your prompts. **There is no local / self-hosted LLM option yet** — running generation on your own hardware is not a feature today.
-- **Retrieval is local by default.** The default embedder (`google/embeddinggemma-300m`, 768-dim) runs on your own machine, so the *retrieval* step — embedding your query and the filing chunks — does not call out to a third party. This avoids adding a **second** external service on top of the LLM; it does **not** make the pipeline private, because the prompt still leaves your machine at generation time.
+- **Generation goes to an LLM — remote by default.** To answer a question, the system sends your question text **and the retrieved filing excerpts** to whichever LLM provider you configure. By default that is a remote bring-your-own-key vendor (OpenAI, Anthropic, Gemini, Mistral, DeepSeek, Grok, Qwen, Kimi, MiniMax, MiMo, Z.ai, or OpenRouter), and **that provider sees your prompts**. A **self-hosted `local_llm`** option (Ollama / llama.cpp-server / vLLM / LM Studio) lets you point generation at a model server **you** run — loopback by default — so the prompt need not reach any third party. Even then the prompt is still transmitted over the wire to that endpoint: *"local" means a server you control, not that nothing ever leaves the process.*
+- **Retrieval is local by default.** The default embedder (`google/embeddinggemma-300m`, 768-dim) runs on your own machine, so the *retrieval* step — embedding your query and the filing chunks — does not call out to a third party. This avoids adding a **second** external service on top of the LLM; on its own it does **not** make the pipeline private, because with a remote LLM the prompt still leaves your machine at generation time (pairing it with a loopback `local_llm` endpoint is what keeps the prompt on-box).
 - **A hosted embedder is opt-in and widens the exposure.** If you set `EMBEDDING_PROVIDER=openai|gemini|mistral|qwen`, every query and every filing chunk is also sent to that embedding API. Only do this when that exposure is acceptable.
 - **Filings are public.** The filing text itself is public SEC data. What is sensitive is the *pattern* of your activity — which companies, when, and what you asked — which is exactly what reaches the LLM provider.
 
@@ -41,8 +41,8 @@ Filings are fetched from SEC EDGAR, parsed into structured sections, split into 
 ## Features
 
 - **Grounded answers with citations** — answers are generated only from retrieved filing chunks; every `[N]` marker resolves to a specific chunk, and citations pointing at chunks that were not retrieved are dropped, never fabricated.
-- **Bring-your-own LLM provider** — twelve providers supported via their first-party SDKs (no aggregator middleware); supply your own key per session, per user, or per operator.
-- **Local-by-default retrieval** — the on-device embedder keeps the retrieval step off the network, so the LLM provider is the *only* third party in the default configuration.
+- **Bring-your-own LLM provider** — twelve hosted providers via their first-party SDKs (no aggregator middleware), plus a self-hosted **`local_llm`** endpoint (Ollama / llama.cpp-server / vLLM / LM Studio); supply your own key per session, per user, or per operator.
+- **Local-by-default retrieval** — the on-device embedder keeps the retrieval step off the network, so the LLM provider is the *only* third party in the default configuration (and a loopback `local_llm` endpoint removes even that).
 - **Streaming chat** — interactive RAG chat over a corpus with cancellable, citation-aware streaming in both CLI and web UI; prior-turn filing chunks never re-enter a later prompt.
 - **Three deployment profiles** — Local (single user), Team (shared server), Cloud (GCP Cloud Run, internet-facing), each with hardened defaults.
 - **Full web UI** — Next.js 16 + React 19 SPA with strict per-request CSP nonce, Trusted Types, and a per-user encrypted vault for provider keys.
@@ -221,7 +221,7 @@ The admin key never reaches the browser: a server-side Next.js proxy injects it,
 
 ## LLM providers
 
-Twelve providers, each via its first-party SDK. Supply a key and the system uses that provider's default model unless you pick another. **Defaults are reflected from the codebase** (`src/sec_generative_search/providers/`):
+Twelve hosted providers, each via its first-party SDK, plus a self-hosted `local_llm` endpoint. Supply a key and the system uses that provider's default model unless you pick another. **Defaults are reflected from the codebase** (`src/sec_generative_search/providers/`):
 
 | Provider   | Default chat model            | Embedding (if used)          |
 | ---------- | ----------------------------- | ---------------------------- |
@@ -237,9 +237,10 @@ Twelve providers, each via its first-party SDK. Supply a key and the system uses
 | MiMo       | `mimo-v2.5`                   | —                            |
 | Z.ai       | `glm-5`                       | —                            |
 | OpenRouter | `qwen/qwen3.6-plus`           | — (accepts any model slug)   |
+| Local LLM  | `llama3.2` (any slug)         | — (self-hosted, FREE)        |
 | Local      | — (no LLM; embedding only)    | `google/embeddinggemma-300m` |
 
-Keys are never accepted via URL parameters or shell flags. Provide them through an environment variable, the `sec-rag provider set` prompt, or the SPA Provider Settings page (encrypted in the per-user vault).
+`local_llm` targets a self-hosted OpenAI-wire server (`LOCAL_LLM_BASE_URL`, loopback by default; see [Configuration](#configuration)). Keys are never accepted via URL parameters or shell flags. Provide them through an environment variable, the `sec-rag provider set` prompt, or the SPA Provider Settings page (encrypted in the per-user vault).
 
 ---
 
@@ -326,7 +327,7 @@ SEC-GenerativeSearch/
 │   ├── core/                            # Types, exceptions, security primitives, logging, metrics, resilience
 │   ├── pipeline/                        # Fetch, parse, chunk, embed, orchestrate
 │   ├── database/                        # ChromaDB client, SQLite/SQLCipher registry, encrypted vault, backup
-│   ├── providers/                       # Embedder + 12 LLM providers, factory, registry
+│   ├── providers/                       # Embedder + 13 LLM providers (incl. self-hosted local_llm), factory, registry
 │   ├── retrieval/                       # RetrievalService
 │   ├── rag/                             # RAG orchestrator, prompts, citations, evaluation
 │   ├── search/                          # Search facade + evaluation

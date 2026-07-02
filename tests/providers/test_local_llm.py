@@ -50,6 +50,7 @@ from sec_generative_search.providers.local_llm import LocalLLMProvider
 from sec_generative_search.providers.openai_compat import (
     OpenAICompatibleLLMProvider,
 )
+from sec_generative_search.providers.openrouter import OpenRouterRoutingHints
 from sec_generative_search.providers.registry import (
     ProviderRegistry,
     ProviderSurface,
@@ -403,3 +404,269 @@ class TestConnectionFailure:
         assert _LONG_KEY not in str(excinfo.value)
         assert _LONG_KEY not in str(excinfo.value.details or "")
         assert _LONG_KEY not in str(excinfo.value.hint or "")
+
+
+# ---------------------------------------------------------------------------
+# SDK response doubles — shaped like the OpenAI completion / stream chunk
+# objects, bypassing the real SDK.  The exhaustive generation contract is
+# covered in ``test_openai_compat``; these prove the local adapter drives
+# that shared path end-to-end against a *faked local endpoint*.
+# ---------------------------------------------------------------------------
+
+
+def _make_completion(
+    *,
+    text: str = "The 10-K reports revenue of $1.2B.",
+    finish_reason: str = "stop",
+    prompt_tokens: int = 42,
+    completion_tokens: int = 17,
+    model: str = _DEFAULT_MODEL,
+) -> MagicMock:
+    """Build a non-streaming completion shape mirroring the SDK response."""
+    msg = MagicMock()
+    msg.content = text
+    choice = MagicMock()
+    choice.message = msg
+    choice.finish_reason = finish_reason
+    usage = MagicMock()
+    usage.prompt_tokens = prompt_tokens
+    usage.completion_tokens = completion_tokens
+    completion = MagicMock()
+    completion.choices = [choice]
+    completion.usage = usage
+    completion.model = model
+    return completion
+
+
+def _make_text_chunk(content: str, *, model: str = _DEFAULT_MODEL) -> MagicMock:
+    """Build a streaming delta chunk carrying partial text."""
+    delta = MagicMock()
+    delta.content = content
+    choice = MagicMock()
+    choice.delta = delta
+    choice.finish_reason = None
+    chunk = MagicMock()
+    chunk.choices = [choice]
+    chunk.model = model
+    chunk.usage = None
+    return chunk
+
+
+def _make_usage_chunk(
+    prompt_tokens: int, completion_tokens: int, *, model: str = _DEFAULT_MODEL
+) -> MagicMock:
+    """Build the terminal usage-only chunk (empty ``choices``)."""
+    usage = MagicMock()
+    usage.prompt_tokens = prompt_tokens
+    usage.completion_tokens = completion_tokens
+    chunk = MagicMock()
+    chunk.choices = []
+    chunk.model = model
+    chunk.usage = usage
+    return chunk
+
+
+# ---------------------------------------------------------------------------
+# Generation / streaming against a faked local endpoint
+# ---------------------------------------------------------------------------
+
+
+class TestGeneration:
+    """The adapter drives the shared OpenAI-wire path against a fake server.
+
+    A stock Ollama / llama.cpp-server / vLLM / LM Studio install answers on
+    an OpenAI-compatible Chat Completions surface; here the SDK client is a
+    MagicMock, so no live endpoint is required.  These pin that the local
+    adapter forwards the requested (arbitrary) slug and surfaces the
+    endpoint's text + token accounting unchanged.
+    """
+
+    def test_generate_returns_text_and_usage(self, patched_openai: dict[str, Any]) -> None:
+        provider = LocalLLMProvider(_LONG_KEY)
+        client = patched_openai["client"]
+        # The local server serves whatever slug it has pulled — an arbitrary
+        # one here proves the empty catalogue never gates generation.
+        client.chat.completions.create.return_value = _make_completion(model="mistral-nemo")
+        response = provider.generate(
+            GenerationRequest(prompt="What was revenue?", model="mistral-nemo")
+        )
+        assert response.text == "The 10-K reports revenue of $1.2B."
+        assert response.model == "mistral-nemo"
+        assert response.token_usage.input_tokens == 42
+        assert response.token_usage.output_tokens == 17
+        # The arbitrary slug was forwarded verbatim, non-streaming.
+        call_kwargs = client.chat.completions.create.call_args.kwargs
+        assert call_kwargs["model"] == "mistral-nemo"
+        assert call_kwargs["stream"] is False
+
+    def test_generate_stream_yields_deltas_then_usage(self, patched_openai: dict[str, Any]) -> None:
+        provider = LocalLLMProvider(_LONG_KEY)
+        client = patched_openai["client"]
+        client.chat.completions.create.return_value = [
+            _make_text_chunk("Revenue "),
+            _make_text_chunk("grew 12%."),
+            _make_usage_chunk(30, 8),
+        ]
+        chunks = list(
+            provider.generate_stream(GenerationRequest(prompt="Summarise", model="llama3.2"))
+        )
+        # Two text deltas plus the terminal usage-only frame.
+        assert [c.text for c in chunks[:2]] == ["Revenue ", "grew 12%."]
+        assert chunks[-1].token_usage.input_tokens == 30
+        assert chunks[-1].token_usage.output_tokens == 8
+        # Streaming asks for usage in the final frame, like every vendor.
+        call_kwargs = client.chat.completions.create.call_args.kwargs
+        assert call_kwargs["stream"] is True
+        assert call_kwargs["stream_options"] == {"include_usage": True}
+
+
+# ---------------------------------------------------------------------------
+# Endpoint settings wiring — the provider re-reads LocalLLMSettings,
+# fails closed to the loopback default
+# ---------------------------------------------------------------------------
+
+
+class TestEndpointSettings:
+    """The base URL + default model come from ``LOCAL_LLM_*`` settings.
+
+    The endpoint is operator-owned deployment config, so the adapter
+    re-reads :class:`LocalLLMSettings` standalone at construction rather
+    than through the credential resolver chain — and an explicit
+    constructor argument still wins.
+    """
+
+    def test_base_url_from_settings_reaches_client(
+        self, clean_env: pytest.MonkeyPatch, patched_openai: dict[str, Any]
+    ) -> None:
+        # Other backends (llama.cpp-server, vLLM, LM Studio) work by pointing
+        # the base URL at their own loopback OpenAI-compatible port.
+        clean_env.setenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:8080/v1")
+        LocalLLMProvider(_LONG_KEY)
+        assert patched_openai["kwargs"]["base_url"] == "http://127.0.0.1:8080/v1"
+
+    def test_default_model_from_settings_is_used(
+        self, clean_env: pytest.MonkeyPatch, patched_openai: dict[str, Any]
+    ) -> None:
+        clean_env.setenv("LOCAL_LLM_DEFAULT_MODEL", "qwen2.5")
+        provider = LocalLLMProvider(_LONG_KEY)
+        # The instance carries the configured default; the class attribute
+        # stays the shipped default so the registry's class-level probe is
+        # unaffected.
+        assert provider.default_model == "qwen2.5"
+        assert LocalLLMProvider.default_model == _DEFAULT_MODEL
+        # A request with no explicit slug falls through to that default.
+        client = patched_openai["client"]
+        client.chat.completions.create.return_value = _make_completion(model="qwen2.5")
+        provider.generate(GenerationRequest(prompt="hi", model=None))
+        assert client.chat.completions.create.call_args.kwargs["model"] == "qwen2.5"
+
+    def test_explicit_base_url_wins_over_settings(
+        self, clean_env: pytest.MonkeyPatch, patched_openai: dict[str, Any]
+    ) -> None:
+        clean_env.setenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:8080/v1")
+        LocalLLMProvider(_LONG_KEY, base_url="http://127.0.0.1:9999/v1")
+        assert patched_openai["kwargs"]["base_url"] == "http://127.0.0.1:9999/v1"
+
+    def test_non_local_base_url_with_opt_in_is_honoured(
+        self, clean_env: pytest.MonkeyPatch, patched_openai: dict[str, Any]
+    ) -> None:
+        # The operator explicitly acknowledged the prompt leaves the host.
+        clean_env.setenv("LOCAL_LLM_BASE_URL", "http://192.168.1.10:11434/v1")
+        clean_env.setenv("LOCAL_LLM_ALLOW_NON_LOCAL", "true")
+        LocalLLMProvider(_LONG_KEY)
+        assert patched_openai["kwargs"]["base_url"] == "http://192.168.1.10:11434/v1"
+
+
+@pytest.mark.security
+class TestEndpointFailsClosed:
+    """The provider never sends the prompt to an off-policy endpoint.
+
+    ``LocalLLMSettings`` rejects a non-loopback URL (without the opt-in) at
+    settings load — but the provider's standalone re-read must *also* refuse
+    to honour such a value, falling back to the loopback default rather than
+    propagating or, worse, quietly dialling the off-box host.  The base URL
+    decides where the assembled prompt (Tier-3 data) is sent, so this is a
+    security control, not a convenience.
+    """
+
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "http://203.0.113.7:11434/v1",  # public IP
+            "http://192.168.1.10:11434/v1",  # private LAN IP
+            "http://ollama.internal:11434/v1",  # bare hostname
+            "https://api.example.com/v1",  # public hostname
+        ],
+    )
+    def test_non_local_without_opt_in_falls_back_to_loopback(
+        self,
+        clean_env: pytest.MonkeyPatch,
+        patched_openai: dict[str, Any],
+        base_url: str,
+    ) -> None:
+        clean_env.setenv("LOCAL_LLM_BASE_URL", base_url)
+        clean_env.delenv("LOCAL_LLM_ALLOW_NON_LOCAL", raising=False)
+        LocalLLMProvider(_LONG_KEY)
+        # The off-policy host never reaches the SDK client.
+        assert patched_openai["kwargs"]["base_url"] == _LOOPBACK_BASE_URL
+
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "ftp://127.0.0.1/v1",  # non-http(s) scheme
+            "http:///v1",  # no host
+            "not-a-url",  # unparseable
+        ],
+    )
+    def test_malformed_base_url_falls_back_to_loopback(
+        self,
+        clean_env: pytest.MonkeyPatch,
+        patched_openai: dict[str, Any],
+        base_url: str,
+    ) -> None:
+        clean_env.setenv("LOCAL_LLM_BASE_URL", base_url)
+        LocalLLMProvider(_LONG_KEY)
+        assert patched_openai["kwargs"]["base_url"] == _LOOPBACK_BASE_URL
+
+
+# ---------------------------------------------------------------------------
+# Security — routing hints are silently dropped (non-routing provider)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.security
+class TestRoutingHintsDropped:
+    """``local_llm`` does not advertise upstream routing, so it drops hints.
+
+    The registry reports ``supports_upstream_routing=False`` for
+    ``local_llm``, and the OpenAI-compatible base's empty default
+    :meth:`_extra_request_kwargs` hook means a
+    :class:`OpenRouterRoutingHints` supplied on the request must never reach
+    the SDK call (mirrors the non-OpenRouter-vendor lock in
+    ``test_openrouter``).  A self-hosted endpoint has no meta-router to
+    honour them, so forwarding would be a no-op leak at best.
+    """
+
+    def test_generate_drops_routing_hints(self, patched_openai: dict[str, Any]) -> None:
+        provider = LocalLLMProvider(_LONG_KEY)
+        client = patched_openai["client"]
+        client.chat.completions.create.return_value = _make_completion()
+        request = GenerationRequest(
+            prompt="hello",
+            model="llama3.2",
+            routing_hints=OpenRouterRoutingHints(order=("anthropic",)),
+        )
+        provider.generate(request)
+        assert "extra_body" not in client.chat.completions.create.call_args.kwargs
+
+    def test_generate_stream_drops_routing_hints(self, patched_openai: dict[str, Any]) -> None:
+        provider = LocalLLMProvider(_LONG_KEY)
+        client = patched_openai["client"]
+        client.chat.completions.create.return_value = [_make_usage_chunk(5, 3)]
+        request = GenerationRequest(
+            prompt="hello",
+            model="llama3.2",
+            routing_hints=OpenRouterRoutingHints(order=("anthropic",)),
+        )
+        list(provider.generate_stream(request))
+        assert "extra_body" not in client.chat.completions.create.call_args.kwargs
