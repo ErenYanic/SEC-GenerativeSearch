@@ -264,6 +264,60 @@ class TestEdgarIdentityStore:
             assert store.get("session-A") is not None
 
 
+class TestInMemorySessionEdgarIdentityStoreGlobalSweep:
+    """Amortised global sweep of abandoned identities.
+
+    Mirrors ``TestInMemorySessionCredentialStoreGlobalSweep``: because a
+    per-key read would lazily evict the accessed session anyway, every
+    test fires the sweep through a *different* key and inspects the
+    internal ``_entries`` map to prove an abandoned session's PII-bearing
+    EDGAR identity is collected without being touched again.
+    """
+
+    @pytest.mark.security
+    def test_abandoned_identity_evicted_without_being_accessed(self) -> None:
+        clock = _FakeClock()
+        store = InMemorySessionEdgarIdentityStore(ttl_seconds=60, clock=clock)
+        store.set("abandoned", EdgarIdentity.from_strings("Gone", "gone@example.com"))
+        clock.now += 61  # past TTL
+        # Touch a *different* session; the abandoned one is never read.
+        store.set("active", EdgarIdentity.from_strings("Here", "here@example.com"))
+        assert "abandoned" not in store._entries  # collected by the sweep
+        assert store.get("active") is not None
+
+    @pytest.mark.security
+    def test_sweep_bounds_abandoned_entry_count(self) -> None:
+        clock = _FakeClock()
+        store = InMemorySessionEdgarIdentityStore(ttl_seconds=60, clock=clock)
+        for i in range(50):
+            store.set(f"abandoned-{i}", EdgarIdentity.from_strings(f"U{i}", f"u{i}@example.com"))
+        assert len(store._entries) == 50
+        clock.now += 61
+        store.get("nobody")  # single unrelated op fires the sweep
+        assert store._entries == {}
+
+    def test_sweep_spares_live_identity(self) -> None:
+        clock = _FakeClock()
+        store = InMemorySessionEdgarIdentityStore(ttl_seconds=60, clock=clock)
+        store.set("stale", EdgarIdentity.from_strings("Stale", "stale@example.com"))
+        clock.now += 40  # still inside the TTL window
+        store.set("live", EdgarIdentity.from_strings("Live", "live@example.com"))
+        clock.now += 21  # now t=61: "stale" 61s old (expired), "live" 21s (fresh)
+        assert store.get("live") is not None  # fires the sweep, spares "live"
+        assert "stale" not in store._entries  # expired → collected
+
+    @pytest.mark.security
+    def test_sweep_is_caller_driven_not_timed(self) -> None:
+        """No background timer — eviction happens only on a caller op."""
+        clock = _FakeClock()
+        store = InMemorySessionEdgarIdentityStore(ttl_seconds=60, clock=clock)
+        store.set("abandoned", EdgarIdentity.from_strings("Gone", "gone@example.com"))
+        clock.now += 61  # past TTL, but no store method is called
+        assert "abandoned" in store._entries  # nothing ran on its own
+        store.get("trigger")  # the sweep fires only on this call
+        assert "abandoned" not in store._entries
+
+
 # ---------------------------------------------------------------------------
 # Audit-log discipline
 # ---------------------------------------------------------------------------

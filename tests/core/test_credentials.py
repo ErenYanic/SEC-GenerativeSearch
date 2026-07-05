@@ -208,6 +208,81 @@ class TestInMemorySessionCredentialStoreTTL:
         assert store.list_providers("s") == {"openai", "gemini"}
 
 
+class TestInMemorySessionCredentialStoreGlobalSweep:
+    """Amortised global sweep of *abandoned* sessions.
+
+    Per-key lazy eviction only collects a session that is accessed again,
+    so ``store.get(abandoned)`` cannot distinguish "the global sweep
+    dropped it" from "the read path lazily evicted it on this very
+    access".  Every test here therefore triggers the sweep through a
+    *different* key and inspects the internal ``_sessions`` map directly
+    to prove the abandoned session was collected **without ever being
+    touched again** — the property that bounds cleartext-credential
+    residency to the TTL rather than to process lifetime.
+    """
+
+    @pytest.mark.security
+    def test_abandoned_session_evicted_without_being_accessed(self) -> None:
+        clock = _FakeClock()
+        store = InMemorySessionCredentialStore(ttl_seconds=10, clock=clock)
+        store.set("abandoned", "openai", "sk-abandoned-123456")
+        clock.advance(11.0)  # past TTL — the session is now stale
+        # Touch a *different* session; the abandoned one is never read.
+        store.set("active", "openai", "sk-active-98765432")
+        assert "abandoned" not in store._sessions  # collected by the sweep
+        assert store.list_providers("active") == {"openai"}
+
+    @pytest.mark.security
+    def test_sweep_clears_credential_strings_before_delete(self) -> None:
+        """Swept sessions have their key strings wiped, not just unlinked."""
+        clock = _FakeClock()
+        store = InMemorySessionCredentialStore(ttl_seconds=10, clock=clock)
+        store.set("abandoned", "openai", "sk-abandoned-123456")
+        entry = store._sessions["abandoned"]  # capture the entry pre-sweep
+        clock.advance(11.0)
+        store.get("someone-else", "openai")  # triggers the sweep
+        assert "abandoned" not in store._sessions
+        assert entry.credentials == {}  # strings dropped for prompt GC
+
+    @pytest.mark.security
+    def test_sweep_bounds_abandoned_session_count(self) -> None:
+        """A pile of abandoned sessions collapses to zero on one later op."""
+        clock = _FakeClock()
+        store = InMemorySessionCredentialStore(ttl_seconds=10, clock=clock)
+        for i in range(50):
+            store.set(f"abandoned-{i}", "openai", f"sk-{i:016d}")
+        assert len(store._sessions) == 50
+        clock.advance(11.0)
+        store.get("nobody", "openai")  # single unrelated op fires the sweep
+        assert store._sessions == {}
+
+    def test_sweep_spares_live_sessions(self) -> None:
+        """A session touched inside the window survives the sweep that fires
+        when the clock crosses the interval; an older one is collected."""
+        clock = _FakeClock()
+        store = InMemorySessionCredentialStore(ttl_seconds=10, clock=clock)
+        store.set("stale", "openai", "sk-stale-123456789")
+        clock.advance(6.0)  # still inside the TTL window
+        store.set("live", "openai", "sk-live-1234567890")  # touched more recently
+        clock.advance(5.0)  # now t=11: "stale" is 11s old (expired), "live" 5s (fresh)
+        store.get("live", "openai")  # fires the sweep (11s since last sweep)
+        assert "stale" not in store._sessions  # expired → collected
+        assert store.get("live", "openai") == "sk-live-1234567890"  # spared
+
+    @pytest.mark.security
+    def test_sweep_is_caller_driven_not_timed(self) -> None:
+        """No background timer: an expired entry is collected only when a
+        caller next touches the store, never spontaneously.  Deterministic
+        (fake clock) — a timer thread would have evicted it already."""
+        clock = _FakeClock()
+        store = InMemorySessionCredentialStore(ttl_seconds=10, clock=clock)
+        store.set("abandoned", "openai", "sk-abandoned-123456")
+        clock.advance(11.0)  # past TTL, but no store method is called
+        assert "abandoned" in store._sessions  # nothing ran on its own
+        store.get("trigger", "openai")  # the sweep fires only on this call
+        assert "abandoned" not in store._sessions
+
+
 # ---------------------------------------------------------------------------
 # Resolver chain
 # ---------------------------------------------------------------------------

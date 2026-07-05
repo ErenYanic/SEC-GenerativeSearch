@@ -145,7 +145,12 @@ class InMemorySessionCredentialStore:
     session.  Eviction is **lazy** — there is no background thread, by
     deliberate analogy to caller-driven lifecycle management: a leaked
     timer thread holding live credentials is strictly worse than lazy
-    eviction.
+    eviction.  Two lazy tiers run under the lock: per-key eviction on
+    the accessed session (:meth:`_evict_if_expired`) plus an amortised
+    **global** sweep (:meth:`_maybe_sweep_locked`, at most one pass per
+    TTL window) so an *abandoned* session's cleartext keys are collected
+    on the next operation past its TTL rather than lingering until the
+    process restarts.
 
     Concurrency: a single :class:`threading.Lock` serialises every
     mutating and observing operation.  Keys are short, sessions are
@@ -158,8 +163,10 @@ class InMemorySessionCredentialStore:
     - On user logout the route handler MUST call :meth:`clear` so the
       session's credentials are dropped immediately rather than
       lingering until TTL expiry.
-        - The store has no upper bound on the number of sessions.  Higher
-            layers are responsible for capping concurrent sessions if required.
+        - The store bounds itself to *live* sessions only: abandoned
+            sessions are swept at TTL by :meth:`_maybe_sweep_locked`, but
+            there is no cap on genuinely-active concurrent sessions.  Higher
+            layers own rate-limiting session minting if a hard cap is needed.
 
     Audit logging: :meth:`set` and :meth:`delete` emit structured
     audit-log entries with the session-id tail and the masked
@@ -187,10 +194,53 @@ class InMemorySessionCredentialStore:
         self._clock = clock
         self._lock = threading.Lock()
         self._sessions: dict[str, _SessionEntry] = {}
+        # Monotonic timestamp of the last full sweep.  Seeded at
+        # construction so the first sweep cannot fire until one TTL window
+        # has elapsed.  See :meth:`_maybe_sweep_locked`.
+        self._last_sweep = self._clock()
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _maybe_sweep_locked(self) -> None:
+        """Amortised full sweep of expired sessions.  Caller MUST hold the lock.
+
+        Per-key lazy eviction (:meth:`_evict_if_expired`) only collects a
+        session that is *accessed again*.  An abandoned session — the
+        browser tab that never comes back — would otherwise keep its
+        cleartext provider keys resident in RAM until the process
+        restarts, silently widening the live-host-compromise window past
+        the sliding TTL the Data Classification table advertises, and
+        leaving the session count unbounded (a slow memory-exhaustion
+        vector under Scenario C).
+
+        This closes that gap without a background thread (the deliberate
+        constraint in the class docstring stands): every public operation
+        already takes ``self._lock``; piggybacked on it, at most **one**
+        ``O(sessions)`` pass runs per TTL window, triggered by whichever
+        operation first crosses the interval.  Time-based rather than
+        op-count-based so residency is bounded by wall-clock, not by
+        traffic volume — a mostly-idle server still collects abandoned
+        sessions on the next touch after the window elapses.  An
+        abandoned session is therefore evicted within ``2 * ttl_seconds``
+        of its last use (expiry at ``ttl``, swept on the next op up to one
+        further ``ttl`` later).
+        """
+        now = self._clock()
+        if (now - self._last_sweep) < self._ttl_seconds:
+            return
+        self._last_sweep = now
+        expired = [
+            key_id
+            for key_id, entry in self._sessions.items()
+            if (now - entry.last_touched) > self._ttl_seconds
+        ]
+        for key_id in expired:
+            # Clear the credential strings before del so they become
+            # collectable immediately (mirrors :meth:`_evict_if_expired`).
+            self._sessions[key_id].credentials.clear()
+            del self._sessions[key_id]
 
     def _evict_if_expired(self, key_id: str) -> None:
         """Drop the session entry if its TTL has elapsed.
@@ -219,6 +269,7 @@ class InMemorySessionCredentialStore:
 
     def get(self, key_id: str, provider: str) -> str | None:
         with self._lock:
+            self._maybe_sweep_locked()
             self._evict_if_expired(key_id)
             entry = self._sessions.get(key_id)
             if entry is None:
@@ -237,6 +288,7 @@ class InMemorySessionCredentialStore:
                 "api_key must be a non-empty string. Use delete() to remove a stored credential."
             )
         with self._lock:
+            self._maybe_sweep_locked()
             self._evict_if_expired(key_id)
             entry = self._sessions.get(key_id)
             if entry is None:
@@ -256,6 +308,7 @@ class InMemorySessionCredentialStore:
 
     def delete(self, key_id: str, provider: str) -> bool:
         with self._lock:
+            self._maybe_sweep_locked()
             self._evict_if_expired(key_id)
             entry = self._sessions.get(key_id)
             if entry is None:
@@ -275,6 +328,7 @@ class InMemorySessionCredentialStore:
 
     def list_providers(self, key_id: str) -> set[str]:
         with self._lock:
+            self._maybe_sweep_locked()
             self._evict_if_expired(key_id)
             entry = self._sessions.get(key_id)
             if entry is None:
@@ -283,6 +337,7 @@ class InMemorySessionCredentialStore:
 
     def clear(self, key_id: str) -> int:
         with self._lock:
+            self._maybe_sweep_locked()
             entry = self._sessions.pop(key_id, None)
             if entry is None:
                 return 0

@@ -176,7 +176,9 @@ class InMemorySessionEdgarIdentityStore:
 
     Mirrors :class:`InMemorySessionCredentialStore` deliberately:
 
-        - Sliding TTL, lazy eviction (no background thread).
+        - Sliding TTL, lazy eviction (no background thread): per-key on
+          access plus an amortised global sweep (:meth:`_maybe_sweep_locked`)
+          so abandoned sessions' PII identities do not linger past TTL.
         - Single :class:`threading.Lock` serialises every operation.
         - Opaque ``session_id`` strings — caller owns minting.
         - Audit log emits only the masked session-id tail; the identity
@@ -205,10 +207,40 @@ class InMemorySessionEdgarIdentityStore:
         self._clock = clock
         self._lock = threading.Lock()
         self._entries: dict[str, _IdentityEntry] = {}
+        # Monotonic timestamp of the last full sweep — seeded at
+        # construction so the first sweep cannot fire before one TTL
+        # window elapses.  See :meth:`_maybe_sweep_locked`.
+        self._last_sweep = self._clock()
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _maybe_sweep_locked(self) -> None:
+        """Amortised full sweep of expired identities.  Caller MUST hold the lock.
+
+        Mirrors :meth:`InMemorySessionCredentialStore._maybe_sweep_locked`.
+        Per-key eviction (:meth:`_evict_if_expired`) only collects a
+        session that is *accessed again*; an abandoned session would
+        otherwise keep its (PII-bearing) EDGAR name + email resident in
+        RAM until the process restarts, and leave the entry count
+        unbounded.  This runs at most one ``O(sessions)`` pass per TTL
+        window, piggybacked on the lock every public operation already
+        takes — no background thread (the deliberate constraint in the
+        class docstring stands).  An abandoned entry is therefore evicted
+        within ``2 * ttl_seconds`` of its last use.
+        """
+        now = self._clock()
+        if (now - self._last_sweep) < self._ttl_seconds:
+            return
+        self._last_sweep = now
+        expired = [
+            key_id
+            for key_id, entry in self._entries.items()
+            if (now - entry.last_touched) > self._ttl_seconds
+        ]
+        for key_id in expired:
+            del self._entries[key_id]
 
     def _evict_if_expired(self, key_id: str) -> None:
         """Drop the entry if its TTL has elapsed.  Caller MUST hold the lock."""
@@ -229,6 +261,7 @@ class InMemorySessionEdgarIdentityStore:
         session does not roll over to TTL eviction.
         """
         with self._lock:
+            self._maybe_sweep_locked()
             self._evict_if_expired(key_id)
             entry = self._entries.get(key_id)
             if entry is None:
@@ -243,6 +276,7 @@ class InMemorySessionEdgarIdentityStore:
         email are NEVER logged.
         """
         with self._lock:
+            self._maybe_sweep_locked()
             self._entries[key_id] = _IdentityEntry(
                 identity=identity,
                 last_touched=self._clock(),
@@ -255,6 +289,7 @@ class InMemorySessionEdgarIdentityStore:
     def delete(self, key_id: str) -> bool:
         """Remove the stored identity.  Returns ``True`` iff one was removed."""
         with self._lock:
+            self._maybe_sweep_locked()
             entry = self._entries.pop(key_id, None)
         removed = entry is not None
         if removed:
