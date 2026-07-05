@@ -44,6 +44,7 @@ from sec_generative_search.core.resilience import (
     ExceptionMapping,
     ResilientCallPolicy,
     RetryPolicy,
+    normalise_exception,
     resilient_call,
 )
 from sec_generative_search.core.types import (
@@ -324,34 +325,58 @@ class GeminiProvider(_GeminiClientMixin, BaseLLMProvider):
         output_tokens = 0
         final_finish_reason = "STOP"
 
-        for chunk in stream:
-            self._check_prompt_feedback(chunk)
+        # Iteration runs outside ``_call`` (it spans many SDK network
+        # round-trips), so the loop mirrors ``_call``'s translation: a
+        # mid-stream ``errors.APIError`` is routed through
+        # ``_translate_api_error`` and any other SDK failure through
+        # ``normalise_exception`` — otherwise the raw SDK type escapes the
+        # orchestrator's ``except ProviderError`` and is misclassified as
+        # an internal error.  Classification only, no retry after partial
+        # output.
+        try:
+            for chunk in stream:
+                self._check_prompt_feedback(chunk)
 
-            finish_reason = self._finish_reason(chunk)
-            if finish_reason:
-                if finish_reason in _CONTENT_FILTER_FINISH_REASONS:
-                    raise ProviderContentFilterError(
-                        f"{self.provider_name} safety filter blocked mid-stream ({finish_reason})",
-                        provider=self.provider_name,
-                        hint="Reformulate the prompt or route to a different provider.",
+                finish_reason = self._finish_reason(chunk)
+                if finish_reason:
+                    if finish_reason in _CONTENT_FILTER_FINISH_REASONS:
+                        raise ProviderContentFilterError(
+                            f"{self.provider_name} safety filter blocked mid-stream "
+                            f"({finish_reason})",
+                            provider=self.provider_name,
+                            hint="Reformulate the prompt or route to a different provider.",
+                        )
+                    final_finish_reason = finish_reason
+
+                text = self._extract_text(chunk)
+                if text:
+                    yield GenerationResponse(
+                        text=text,
+                        model=model_slug,
+                        token_usage=TokenUsage(),
+                        finish_reason="stop",
                     )
-                final_finish_reason = finish_reason
 
-            text = self._extract_text(chunk)
-            if text:
-                yield GenerationResponse(
-                    text=text,
-                    model=model_slug,
-                    token_usage=TokenUsage(),
-                    finish_reason="stop",
-                )
-
-            usage = getattr(chunk, "usage_metadata", None)
-            if usage is not None:
-                input_tokens = getattr(usage, "prompt_token_count", input_tokens) or input_tokens
-                output_tokens = (
-                    getattr(usage, "candidates_token_count", output_tokens) or output_tokens
-                )
+                usage = getattr(chunk, "usage_metadata", None)
+                if usage is not None:
+                    input_tokens = (
+                        getattr(usage, "prompt_token_count", input_tokens) or input_tokens
+                    )
+                    output_tokens = (
+                        getattr(usage, "candidates_token_count", output_tokens) or output_tokens
+                    )
+        except ProviderError:
+            # Already normalised (the content-filter block above, or a
+            # ``ProviderError`` raised deeper in) — re-raise as-is.
+            raise
+        except errors.APIError as exc:
+            raise _translate_api_error(exc, provider=self.provider_name) from exc
+        except Exception as exc:  # non-APIError SDK failure mid-stream
+            raise normalise_exception(
+                exc,
+                provider=self.provider_name,
+                mapping=GEMINI_EXCEPTION_MAPPING,
+            ) from exc
 
         yield GenerationResponse(
             text="",

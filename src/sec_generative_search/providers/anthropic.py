@@ -42,12 +42,14 @@ from anthropic import (
 
 from sec_generative_search.core.exceptions import (
     ProviderContentFilterError,
+    ProviderError,
 )
 from sec_generative_search.core.logging import get_logger
 from sec_generative_search.core.resilience import (
     ExceptionMapping,
     ResilientCallPolicy,
     RetryPolicy,
+    normalise_exception,
     resilient_call,
 )
 from sec_generative_search.core.types import (
@@ -234,50 +236,70 @@ class AnthropicProvider(BaseLLMProvider):
         output_tokens = 0
         final_stop_reason = "end_turn"
 
-        for event in stream:
-            event_type = getattr(event, "type", "")
+        # Iteration runs outside ``_call`` (it spans many SDK network
+        # round-trips), so wrap the loop to normalise a mid-stream SDK
+        # failure to the same ``ProviderError`` subclass the opening call
+        # would have produced — a raw ``anthropic.APIConnectionError`` /
+        # ``RateLimitError`` raised mid-iteration must not escape the
+        # orchestrator's ``except ProviderError``.  Classification only,
+        # no retry after partial output.
+        try:
+            for event in stream:
+                event_type = getattr(event, "type", "")
 
-            if event_type == "message_start":
-                message = getattr(event, "message", None)
-                if message is not None:
-                    usage = getattr(message, "usage", None)
+                if event_type == "message_start":
+                    message = getattr(event, "message", None)
+                    if message is not None:
+                        usage = getattr(message, "usage", None)
+                        if usage is not None:
+                            input_tokens = getattr(usage, "input_tokens", 0) or 0
+                            output_tokens = getattr(usage, "output_tokens", 0) or 0
+                    continue
+
+                if event_type == "content_block_delta":
+                    delta = getattr(event, "delta", None)
+                    delta_text = getattr(delta, "text", "") if delta is not None else ""
+                    if delta_text:
+                        yield GenerationResponse(
+                            text=delta_text,
+                            model=model_slug,
+                            token_usage=TokenUsage(),
+                            finish_reason="stop",
+                        )
+                    continue
+
+                if event_type == "message_delta":
+                    delta = getattr(event, "delta", None)
+                    stop_reason = getattr(delta, "stop_reason", None) if delta is not None else None
+                    if stop_reason == "refusal":
+                        raise ProviderContentFilterError(
+                            f"{self.provider_name} safety filter refused mid-stream",
+                            provider=self.provider_name,
+                            hint="Reformulate the prompt or route to a different provider.",
+                        )
+                    if stop_reason:
+                        final_stop_reason = stop_reason
+                    usage = getattr(event, "usage", None)
                     if usage is not None:
-                        input_tokens = getattr(usage, "input_tokens", 0) or 0
-                        output_tokens = getattr(usage, "output_tokens", 0) or 0
-                continue
+                        output_tokens = (
+                            getattr(usage, "output_tokens", output_tokens) or output_tokens
+                        )
+                    continue
 
-            if event_type == "content_block_delta":
-                delta = getattr(event, "delta", None)
-                delta_text = getattr(delta, "text", "") if delta is not None else ""
-                if delta_text:
-                    yield GenerationResponse(
-                        text=delta_text,
-                        model=model_slug,
-                        token_usage=TokenUsage(),
-                        finish_reason="stop",
-                    )
-                continue
-
-            if event_type == "message_delta":
-                delta = getattr(event, "delta", None)
-                stop_reason = getattr(delta, "stop_reason", None) if delta is not None else None
-                if stop_reason == "refusal":
-                    raise ProviderContentFilterError(
-                        f"{self.provider_name} safety filter refused mid-stream",
-                        provider=self.provider_name,
-                        hint="Reformulate the prompt or route to a different provider.",
-                    )
-                if stop_reason:
-                    final_stop_reason = stop_reason
-                usage = getattr(event, "usage", None)
-                if usage is not None:
-                    output_tokens = getattr(usage, "output_tokens", output_tokens) or output_tokens
-                continue
-
-            # ``message_stop`` (and any unknown event types) ends the
-            # conversation — nothing to yield here.
-            if event_type == "message_stop":
-                break
+                # ``message_stop`` (and any unknown event types) ends the
+                # conversation — nothing to yield here.
+                if event_type == "message_stop":
+                    break
+        except ProviderError:
+            # Already normalised (the refusal block above, or a deeper
+            # ``ProviderError``) — re-raise so a terminal type stays terminal.
+            raise
+        except Exception as exc:  # SDK-raised mid-stream
+            raise normalise_exception(
+                exc,
+                provider=self.provider_name,
+                mapping=ANTHROPIC_EXCEPTION_MAPPING,
+            ) from exc
 
         yield GenerationResponse(
             text="",

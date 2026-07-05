@@ -17,13 +17,17 @@ Retrieval latency is exercised in :mod:`tests.search` against the real
 from __future__ import annotations
 
 from collections.abc import Iterator
+from unittest.mock import MagicMock
 
 import pytest
 
-from sec_generative_search.core.exceptions import ProviderAuthError
+from sec_generative_search.core.exceptions import ProviderAuthError, ProviderConnectionError
 from sec_generative_search.core.metrics import Metrics, get_metrics, reset_metrics
+from sec_generative_search.core.provider_health import get_provider_health, reset_provider_health
 from sec_generative_search.core.types import TokenUsage
+from sec_generative_search.providers import openai_compat
 from sec_generative_search.providers.base import GenerationRequest, GenerationResponse
+from sec_generative_search.providers.openai_compat import OpenAICompatibleLLMProvider
 from sec_generative_search.rag.orchestrator import RAGOrchestrator
 from sec_generative_search.rag.query_understanding import QueryPlan
 from tests.rag.conftest import FakeLLMProvider, FakeRetrievalService
@@ -32,8 +36,10 @@ from tests.rag.conftest import FakeLLMProvider, FakeRetrievalService
 @pytest.fixture(autouse=True)
 def _reset_metrics_singleton() -> Iterator[None]:
     reset_metrics()
+    reset_provider_health()
     yield
     reset_metrics()
+    reset_provider_health()
 
 
 def _build_orchestrator(
@@ -58,6 +64,40 @@ class _RaisingLLM(FakeLLMProvider):
     def generate_stream(self, request: GenerationRequest) -> Iterator[GenerationResponse]:
         raise ProviderAuthError("bad key", provider=self.provider_name)
         yield  # pragma: no cover - unreachable, makes this a generator
+
+
+class _FakeOpenAIConnectionError(openai_compat.APIConnectionError):
+    """SDK connection error that skips the heavy ``httpx.Response`` ctor."""
+
+    def __init__(self, message: str = "connection dropped mid-stream") -> None:
+        Exception.__init__(self, message)
+
+
+class _MidStreamDropAdapter(OpenAICompatibleLLMProvider):
+    """A *real* OpenAI-compatible adapter used to exercise the F2 seam.
+
+    Its ``generate_stream`` is entirely inherited — the failure is
+    injected purely at the SDK-client boundary, so the test drives the
+    genuine mid-stream normalisation path, not a hand-rolled double.
+    """
+
+    provider_name = "midstream-vendor"
+    default_model = "demo-chat"
+
+
+def _one_delta_then_drop() -> Iterator[MagicMock]:
+    """SDK stream: one usable delta chunk, then a mid-stream connection drop."""
+    delta = MagicMock()
+    delta.content = "partial"
+    choice = MagicMock()
+    choice.delta = delta
+    choice.finish_reason = None
+    chunk = MagicMock()
+    chunk.choices = [choice]
+    chunk.model = "demo-chat"
+    chunk.usage = None
+    yield chunk
+    raise _FakeOpenAIConnectionError()
 
 
 class TestGenerationMetrics:
@@ -176,3 +216,43 @@ class TestProviderFailureMetrics:
             )
             == 1.0
         )
+
+    def test_real_adapter_midstream_drop_feeds_failure_telemetry(
+        self, fake_retrieval, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end F2 lock: a *real* adapter whose SDK stream drops
+        mid-flight surfaces a normalised ``ProviderConnectionError`` — so
+        the orchestrator's ``except ProviderError`` fires and feeds both
+        the provider-failure metric and the passive-health circuit,
+        instead of the raw SDK type escaping as an unclassified error.
+        """
+        pytest.importorskip("prometheus_client")
+
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = _one_delta_then_drop()
+        monkeypatch.setattr(openai_compat, "OpenAI", lambda **_kwargs: fake_client)
+        adapter = _MidStreamDropAdapter("sk-demo-key-ABCDEFGH")  # pragma: allowlist secret
+        orch = _build_orchestrator(retrieval=fake_retrieval, llm=adapter)
+
+        # The mid-stream SDK drop propagates as a normalised ProviderError,
+        # not the raw ``openai.APIConnectionError``.
+        with pytest.raises(ProviderConnectionError):
+            list(orch.generate_stream(QueryPlan(raw_query="Q")))
+
+        # Telemetry blind spot closed: the failure counter is keyed by the
+        # normalised exception class name.
+        metrics = get_metrics()
+        assert (
+            _sample(
+                metrics,
+                "sec_provider_failures_total",
+                provider="midstream-vendor",
+                error_type="ProviderConnectionError",
+            )
+            == 1.0
+        )
+
+        # Passive-health circuit fed the same content-free outcome.
+        health = {s.provider: s for s in get_provider_health().snapshot()}
+        assert health["midstream-vendor"].last_error_type == "ProviderConnectionError"
+        assert health["midstream-vendor"].total_failures == 1

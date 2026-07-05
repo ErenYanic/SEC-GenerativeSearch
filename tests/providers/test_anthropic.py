@@ -27,6 +27,7 @@ import pytest
 
 from sec_generative_search.core.exceptions import (
     ProviderAuthError,
+    ProviderConnectionError,
     ProviderContentFilterError,
     ProviderError,
     ProviderRateLimitError,
@@ -68,6 +69,11 @@ class _FakeRateLimit(anthropic_mod.RateLimitError):
 
 class _FakeAPITimeout(anthropic_mod.APITimeoutError):
     def __init__(self, message: str = "timed out") -> None:
+        Exception.__init__(self, message)
+
+
+class _FakeAPIConnection(anthropic_mod.APIConnectionError):
+    def __init__(self, message: str = "connection refused") -> None:
         Exception.__init__(self, message)
 
 
@@ -343,6 +349,72 @@ class TestGenerateStream:
         )
         # Empty delta dropped; one text frame plus the final usage frame.
         assert [r.text for r in out] == ["real text", ""]
+
+
+# ---------------------------------------------------------------------------
+# Mid-stream SDK failure normalisation (F2)
+#
+# Iterating the returned event stream spans network round-trips outside
+# the ``_call`` wrapper.  A connection drop / in-flight rate-limit mid
+# iteration MUST normalise to the same ``ProviderError`` subclass the
+# opening call would have produced, else the raw SDK type escapes the
+# orchestrator's ``except ProviderError`` and is misclassified.
+# ---------------------------------------------------------------------------
+
+
+def _stream_then_raise(events: list[Any], exc: BaseException) -> Iterator[Any]:
+    """Yield *events*, then raise *exc* — an SDK stream failing mid-flight."""
+    yield from events
+    raise exc
+
+
+class TestMidStreamFailureNormalised:
+    def test_connection_error_mid_stream_normalised(self, provider: AnthropicProvider) -> None:
+        provider._fake_client.messages.create.return_value = _stream_then_raise(
+            [_start_event(), _delta_event("par")], _FakeAPIConnection()
+        )
+        gen = provider.generate_stream(GenerationRequest(prompt="x", model="claude-haiku-4-5"))
+        assert next(gen).text == "par"
+        with pytest.raises(ProviderConnectionError):
+            next(gen)
+
+    def test_rate_limit_mid_stream_normalised(self, provider: AnthropicProvider) -> None:
+        provider._fake_client.messages.create.return_value = _stream_then_raise(
+            [_start_event(), _delta_event("hi")], _FakeRateLimit()
+        )
+        gen = provider.generate_stream(GenerationRequest(prompt="x", model="claude-haiku-4-5"))
+        assert next(gen).text == "hi"
+        with pytest.raises(ProviderRateLimitError):
+            next(gen)
+
+    def test_timeout_mid_stream_wins_over_connection(self, provider: AnthropicProvider) -> None:
+        # ``APITimeoutError`` subclasses ``APIConnectionError``; a slow
+        # read mid-stream must resolve to ProviderTimeoutError.
+        provider._fake_client.messages.create.return_value = _stream_then_raise(
+            [_start_event()], _FakeAPITimeout()
+        )
+        gen = provider.generate_stream(GenerationRequest(prompt="x", model="claude-haiku-4-5"))
+        with pytest.raises(ProviderTimeoutError) as excinfo:
+            next(gen)
+        assert not isinstance(excinfo.value, ProviderConnectionError)
+
+    def test_unknown_error_mid_stream_falls_back(self, provider: AnthropicProvider) -> None:
+        provider._fake_client.messages.create.return_value = _stream_then_raise(
+            [_start_event()], RuntimeError("boom")
+        )
+        gen = provider.generate_stream(GenerationRequest(prompt="x", model="claude-haiku-4-5"))
+        with pytest.raises(ProviderError):
+            next(gen)
+
+    def test_mid_stream_failure_not_retried(self, provider: AnthropicProvider) -> None:
+        provider._fake_client.messages.create.return_value = _stream_then_raise(
+            [_start_event(), _delta_event("a")], _FakeRateLimit()
+        )
+        gen = provider.generate_stream(GenerationRequest(prompt="x", model="claude-haiku-4-5"))
+        next(gen)
+        with pytest.raises(ProviderRateLimitError):
+            next(gen)
+        assert provider._fake_client.messages.create.call_count == 1
 
 
 # ---------------------------------------------------------------------------

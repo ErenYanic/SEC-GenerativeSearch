@@ -50,12 +50,14 @@ from openai import (
 
 from sec_generative_search.core.exceptions import (
     ProviderContentFilterError,
+    ProviderError,
 )
 from sec_generative_search.core.logging import get_logger
 from sec_generative_search.core.resilience import (
     ExceptionMapping,
     ResilientCallPolicy,
     RetryPolicy,
+    normalise_exception,
     resilient_call,
 )
 from sec_generative_search.core.types import (
@@ -315,42 +317,61 @@ class OpenAICompatibleLLMProvider(_OpenAIClientMixin, BaseLLMProvider):
         # Iteration runs outside ``_call`` because it spans many SDK
         # network round-trips; if a chunk raises, surface the exception
         # without retry.  This matches the API contract — partial
-        # output has already been observed by the caller.
-        for chunk in stream:
-            choices = getattr(chunk, "choices", None) or []
-            if not choices:
-                # Final usage-only chunk has empty ``choices``.
-                usage = getattr(chunk, "usage", None)
-                if usage is not None:
-                    yield GenerationResponse(
-                        text="",
-                        model=getattr(chunk, "model", model_slug),
-                        token_usage=TokenUsage(
-                            input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-                            output_tokens=getattr(usage, "completion_tokens", 0) or 0,
-                        ),
-                        finish_reason="stop",
+        # output has already been observed by the caller.  The loop is
+        # still wrapped so a mid-stream SDK failure (a dropped
+        # connection, an in-flight rate-limit) is normalised to the same
+        # ``ProviderError`` subclass the initial ``_call`` would have
+        # produced — otherwise the raw SDK type escapes the orchestrator's
+        # ``except ProviderError`` and is misclassified as an internal
+        # error.  Classification only; the no-retry-after-partial-output
+        # contract stays intact.
+        try:
+            for chunk in stream:
+                choices = getattr(chunk, "choices", None) or []
+                if not choices:
+                    # Final usage-only chunk has empty ``choices``.
+                    usage = getattr(chunk, "usage", None)
+                    if usage is not None:
+                        yield GenerationResponse(
+                            text="",
+                            model=getattr(chunk, "model", model_slug),
+                            token_usage=TokenUsage(
+                                input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+                                output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+                            ),
+                            finish_reason="stop",
+                        )
+                    continue
+                choice = choices[0]
+                finish_reason = choice.finish_reason or "stop"
+                if finish_reason == "content_filter":
+                    raise ProviderContentFilterError(
+                        f"{self.provider_name} safety filter blocked the response",
+                        provider=self.provider_name,
+                        hint="Reformulate the prompt or route to a different provider.",
                     )
-                continue
-            choice = choices[0]
-            finish_reason = choice.finish_reason or "stop"
-            if finish_reason == "content_filter":
-                raise ProviderContentFilterError(
-                    f"{self.provider_name} safety filter blocked the response",
-                    provider=self.provider_name,
-                    hint="Reformulate the prompt or route to a different provider.",
+                delta_text = getattr(choice.delta, "content", None) or ""
+                if not delta_text and finish_reason == "stop":
+                    # Empty deltas are common; emit only when there is real
+                    # text to convey or a non-default finish reason.
+                    continue
+                yield GenerationResponse(
+                    text=delta_text,
+                    model=getattr(chunk, "model", model_slug),
+                    token_usage=TokenUsage(),
+                    finish_reason=finish_reason,
                 )
-            delta_text = getattr(choice.delta, "content", None) or ""
-            if not delta_text and finish_reason == "stop":
-                # Empty deltas are common; emit only when there is real
-                # text to convey or a non-default finish reason.
-                continue
-            yield GenerationResponse(
-                text=delta_text,
-                model=getattr(chunk, "model", model_slug),
-                token_usage=TokenUsage(),
-                finish_reason=finish_reason,
-            )
+        except ProviderError:
+            # Already normalised (e.g. the content-filter block above, or
+            # a ``ProviderError`` raised deeper in) — re-raise as-is so a
+            # terminal type stays terminal.
+            raise
+        except Exception as exc:  # SDK-raised mid-stream
+            raise normalise_exception(
+                exc,
+                provider=self.provider_name,
+                mapping=OPENAI_EXCEPTION_MAPPING,
+            ) from exc
 
     # ------------------------------------------------------------------
     # Token counting

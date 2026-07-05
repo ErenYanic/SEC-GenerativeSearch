@@ -362,6 +362,84 @@ class TestGenerateStream:
         assert kwargs["model"] == "gemini-2.5-pro"
 
 
+# ---------------------------------------------------------------------------
+# Mid-stream SDK failure normalisation (F2)
+#
+# The genai stream is iterated outside ``_call``, so a mid-iteration
+# ``errors.APIError`` must be translated through the same
+# ``_translate_api_error`` the opening call uses, and any other SDK
+# failure through ``normalise_exception``.  Otherwise the raw SDK type
+# escapes the orchestrator's ``except ProviderError`` and is
+# misclassified as ``internal_error``.
+# ---------------------------------------------------------------------------
+
+
+def _stream_then_raise(chunks: list[Any], exc: BaseException) -> Iterator[Any]:
+    """Yield *chunks*, then raise *exc* — an SDK stream failing mid-flight."""
+    yield from chunks
+    raise exc
+
+
+class TestMidStreamFailureNormalised:
+    def test_rate_limit_api_error_mid_stream_translated(self, provider: GeminiProvider) -> None:
+        provider._fake_client.models.generate_content_stream.return_value = _stream_then_raise(
+            [_stream_chunk(text="par")], _FakeClientError(429)
+        )
+        gen = provider.generate_stream(GenerationRequest(prompt="x", model="gemini-2.5-flash"))
+        assert next(gen).text == "par"
+        with pytest.raises(ProviderRateLimitError):
+            next(gen)
+
+    def test_auth_api_error_mid_stream_translated(self, provider: GeminiProvider) -> None:
+        # 401 is terminal — the translation still applies mid-stream.
+        provider._fake_client.models.generate_content_stream.return_value = _stream_then_raise(
+            [_stream_chunk(text="par")], _FakeClientError(401)
+        )
+        gen = provider.generate_stream(GenerationRequest(prompt="x", model="gemini-2.5-flash"))
+        assert next(gen).text == "par"
+        with pytest.raises(ProviderAuthError):
+            next(gen)
+
+    def test_server_api_error_mid_stream_translated(self, provider: GeminiProvider) -> None:
+        # 503 falls outside the known buckets → generic ProviderError,
+        # still a ``ProviderError`` the orchestrator can classify.
+        provider._fake_client.models.generate_content_stream.return_value = _stream_then_raise(
+            [_stream_chunk(text="par")], _FakeServerError(503)
+        )
+        gen = provider.generate_stream(GenerationRequest(prompt="x", model="gemini-2.5-flash"))
+        assert next(gen).text == "par"
+        with pytest.raises(ProviderError):
+            next(gen)
+
+    def test_timeout_mid_stream_normalised(self, provider: GeminiProvider) -> None:
+        # A stdlib ``TimeoutError`` (not an ``errors.APIError``) routes
+        # through the mapping to ProviderTimeoutError.
+        provider._fake_client.models.generate_content_stream.return_value = _stream_then_raise(
+            [], TimeoutError("slow")
+        )
+        gen = provider.generate_stream(GenerationRequest(prompt="x", model="gemini-2.5-flash"))
+        with pytest.raises(ProviderTimeoutError):
+            next(gen)
+
+    def test_unknown_error_mid_stream_falls_back(self, provider: GeminiProvider) -> None:
+        provider._fake_client.models.generate_content_stream.return_value = _stream_then_raise(
+            [], RuntimeError("boom")
+        )
+        gen = provider.generate_stream(GenerationRequest(prompt="x", model="gemini-2.5-flash"))
+        with pytest.raises(ProviderError):
+            next(gen)
+
+    def test_mid_stream_failure_not_retried(self, provider: GeminiProvider) -> None:
+        provider._fake_client.models.generate_content_stream.return_value = _stream_then_raise(
+            [_stream_chunk(text="a")], _FakeClientError(429)
+        )
+        gen = provider.generate_stream(GenerationRequest(prompt="x", model="gemini-2.5-flash"))
+        next(gen)
+        with pytest.raises(ProviderRateLimitError):
+            next(gen)
+        assert provider._fake_client.models.generate_content_stream.call_count == 1
+
+
 def test_generate_stream_returns_iterator(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = MagicMock()
     fake.models.generate_content_stream.return_value = iter(

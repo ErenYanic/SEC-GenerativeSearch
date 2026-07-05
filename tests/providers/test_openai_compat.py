@@ -363,6 +363,95 @@ class TestGenerateStream:
 
 
 # ---------------------------------------------------------------------------
+# Mid-stream SDK failure normalisation (F2)
+#
+# The initial ``chat.completions.create`` call is wrapped by ``_call``,
+# but iterating the returned stream spans further network round-trips
+# *outside* that wrapper.  A connection drop / in-flight rate-limit that
+# surfaces mid-iteration MUST still be normalised to the same
+# ``ProviderError`` subclass the opening call would have produced —
+# otherwise the raw SDK type escapes the orchestrator's
+# ``except ProviderError`` and is misclassified as ``internal_error``,
+# feeding the client the wrong retry signal and skipping the
+# provider-failure metric + passive-health circuit.
+# ---------------------------------------------------------------------------
+
+
+def _stream_then_raise(chunks: list[Any], exc: BaseException) -> Iterator[Any]:
+    """Yield *chunks*, then raise *exc* — an SDK stream failing mid-flight."""
+    yield from chunks
+    raise exc
+
+
+class TestMidStreamFailureNormalised:
+    def test_connection_error_mid_stream_normalised(self, llm_provider: _DemoLLM) -> None:
+        # A dropped connection after partial output normalises to
+        # ProviderConnectionError (the dominant local_llm-dies-mid-answer
+        # case Phase 18.5 mapped for the pre-stream path).
+        llm_provider._fake_client.chat.completions.create.return_value = _stream_then_raise(
+            [_make_chunk(content="par")], _FakeAPIConnection()
+        )
+        gen = llm_provider.generate_stream(GenerationRequest(prompt="x", model="demo-chat"))
+        assert next(gen).text == "par"
+        with pytest.raises(ProviderConnectionError):
+            next(gen)
+
+    def test_rate_limit_mid_stream_normalised(self, llm_provider: _DemoLLM) -> None:
+        llm_provider._fake_client.chat.completions.create.return_value = _stream_then_raise(
+            [_make_chunk(content="hi")], _FakeRateLimit()
+        )
+        gen = llm_provider.generate_stream(GenerationRequest(prompt="x", model="demo-chat"))
+        assert next(gen).text == "hi"
+        with pytest.raises(ProviderRateLimitError):
+            next(gen)
+
+    def test_timeout_mid_stream_normalised(self, llm_provider: _DemoLLM) -> None:
+        # ``APITimeoutError`` subclasses ``APIConnectionError``; the
+        # ``timeout``-before-``connection`` ordering must hold mid-stream
+        # too, so a slow read stays a timeout.
+        llm_provider._fake_client.chat.completions.create.return_value = _stream_then_raise(
+            [], _FakeAPITimeout()
+        )
+        gen = llm_provider.generate_stream(GenerationRequest(prompt="x", model="demo-chat"))
+        with pytest.raises(ProviderTimeoutError) as excinfo:
+            next(gen)
+        assert not isinstance(excinfo.value, ProviderConnectionError)
+
+    def test_unknown_error_mid_stream_falls_back_to_provider_error(
+        self, llm_provider: _DemoLLM
+    ) -> None:
+        llm_provider._fake_client.chat.completions.create.return_value = _stream_then_raise(
+            [], RuntimeError("transport blew up")
+        )
+        gen = llm_provider.generate_stream(GenerationRequest(prompt="x", model="demo-chat"))
+        with pytest.raises(ProviderError):
+            next(gen)
+
+    def test_mid_stream_failure_is_not_retried(self, llm_provider: _DemoLLM) -> None:
+        # Partial output has already been observed by the caller; the
+        # no-retry-after-partial-output contract means the stream is
+        # created exactly once, never re-opened on the mid-stream failure.
+        llm_provider._fake_client.chat.completions.create.return_value = _stream_then_raise(
+            [_make_chunk(content="a")], _FakeRateLimit()
+        )
+        gen = llm_provider.generate_stream(GenerationRequest(prompt="x", model="demo-chat"))
+        next(gen)
+        with pytest.raises(ProviderRateLimitError):
+            next(gen)
+        assert llm_provider._fake_client.chat.completions.create.call_count == 1
+
+    def test_error_message_does_not_leak_key(self, llm_provider: _DemoLLM) -> None:
+        llm_provider._fake_client.chat.completions.create.return_value = _stream_then_raise(
+            [], _FakeAPIConnection()
+        )
+        gen = llm_provider.generate_stream(GenerationRequest(prompt="x", model="demo-chat"))
+        with pytest.raises(ProviderConnectionError) as excinfo:
+            next(gen)
+        assert _LONG_KEY not in str(excinfo.value)
+        assert _KEY_TAIL not in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
 # Error normalisation through resilient_call
 # ---------------------------------------------------------------------------
 
