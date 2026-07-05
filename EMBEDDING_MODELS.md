@@ -64,7 +64,7 @@
 
 ## Selecting the embedder
 
-Set at setup via environment (see `docs/CONFIGURATION.md`):
+Set at setup via environment:
 
 - `EMBEDDING_PROVIDER` — one of the providers above (`local` by default).
 - `EMBEDDING_MODEL_NAME` — a model from that provider's row set.

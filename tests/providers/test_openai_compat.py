@@ -387,7 +387,7 @@ class TestMidStreamFailureNormalised:
     def test_connection_error_mid_stream_normalised(self, llm_provider: _DemoLLM) -> None:
         # A dropped connection after partial output normalises to
         # ProviderConnectionError (the dominant local_llm-dies-mid-answer
-        # case Phase 18.5 mapped for the pre-stream path).
+        # case already covered by the pre-stream path).
         llm_provider._fake_client.chat.completions.create.return_value = _stream_then_raise(
             [_make_chunk(content="par")], _FakeAPIConnection()
         )
