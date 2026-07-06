@@ -500,13 +500,19 @@ class ProviderRegistry:
             return False
 
         try:
-            provider.validate_key()
-        except ProviderAuthError:
-            return False
-        # Every other exception (ProviderRateLimitError, ProviderTimeoutError,
-        # ProviderContentFilterError, generic ProviderError, transport
-        # errors) propagates intentionally — see the docstring.
-        return True
+            try:
+                provider.validate_key()
+            except ProviderAuthError:
+                return False
+            # Every other exception (ProviderRateLimitError, ProviderTimeoutError,
+            # ProviderContentFilterError, generic ProviderError, transport
+            # errors) propagates intentionally — see the docstring.
+            return True
+        finally:
+            # The provider instance is local to this call — release its SDK
+            # client's connection pool and credential-bearing transport
+            # deterministically rather than at GC.
+            provider.close()
 
     # ------------------------------------------------------------------
     # Internal helpers

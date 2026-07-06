@@ -881,3 +881,45 @@ class TestRegistryReturnsRedactedReprs:
         assert _FAKE_KEY not in text
         # ``mask_secret`` exposes the trailing four characters only.
         assert _FAKE_KEY[-4:] in text
+
+
+@pytest.mark.security
+class TestValidateKeyClosesClient:
+    """``validate_key`` closes the provider it constructs on every path.
+
+    The instance is local to the call; closing it in a ``finally`` releases
+    the SDK client's connection pool and credential-bearing transport
+    deterministically rather than at GC.  Covers both the API ``/validate``
+    route and the CLI ``provider validate`` — both flow through here.
+    """
+
+    def test_closes_on_accept(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        closed: list[bool] = []
+        monkeypatch.setattr(OpenAIProvider, "validate_key", lambda self: True)
+        monkeypatch.setattr(OpenAIProvider, "close", lambda self: closed.append(True))
+        assert ProviderRegistry.validate_key("openai", ProviderSurface.LLM, _FAKE_KEY) is True
+        assert closed == [True]
+
+    def test_closes_on_auth_rejection(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        closed: list[bool] = []
+
+        def fake(self: OpenAIProvider) -> bool:
+            raise ProviderAuthError("invalid", provider="openai", hint="check the key")
+
+        monkeypatch.setattr(OpenAIProvider, "validate_key", fake)
+        monkeypatch.setattr(OpenAIProvider, "close", lambda self: closed.append(True))
+        assert ProviderRegistry.validate_key("openai", ProviderSurface.LLM, _FAKE_KEY) is False
+        assert closed == [True]
+
+    def test_closes_when_error_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        closed: list[bool] = []
+
+        def fake(self: OpenAIProvider) -> bool:
+            raise ProviderRateLimitError("429", provider="openai")
+
+        monkeypatch.setattr(OpenAIProvider, "validate_key", fake)
+        monkeypatch.setattr(OpenAIProvider, "close", lambda self: closed.append(True))
+        with pytest.raises(ProviderRateLimitError):
+            ProviderRegistry.validate_key("openai", ProviderSurface.LLM, _FAKE_KEY)
+        # The finally closes the client even though the error propagated.
+        assert closed == [True]

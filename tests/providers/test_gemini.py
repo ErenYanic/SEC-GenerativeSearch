@@ -647,3 +647,31 @@ class TestSecretSafety:
         for record in caplog.records:
             assert _LONG_KEY not in record.getMessage()
             assert _LONG_KEY not in str(record.args)
+
+
+# ---------------------------------------------------------------------------
+# Security — per-request client teardown
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.security
+class TestClientTeardown:
+    """``close()`` reaches the genai client so its transport is torn down.
+
+    The genai ``Client`` exposes no observable ``is_closed`` flag (unlike the
+    OpenAI / Anthropic wrappers), so closure is asserted by forwarding to the
+    client's own ``close()``. The per-request build sites close the provider
+    in a ``finally`` to release the credential-bearing transport at
+    end-of-request rather than at GC.
+    """
+
+    def test_close_forwards_to_genai_client(self, provider: GeminiProvider) -> None:
+        provider.close()
+        provider._fake_client.close.assert_called_once_with()
+
+    def test_close_on_real_client_is_quiet(self) -> None:
+        prov = GeminiProvider(_LONG_KEY)
+        # Real genai client; close must not raise and stays idempotent when
+        # called again from a route / thread ``finally``.
+        assert prov.close() is None
+        assert prov.close() is None

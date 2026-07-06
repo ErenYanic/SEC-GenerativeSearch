@@ -440,45 +440,52 @@ async def plan_query(
             hint="Install the provider's optional extras and restart the API.",
         ) from None
 
+    # Close the per-request SDK client on every exit path (success,
+    # provider error, or an unexpected raise) so its httpx connection pool
+    # and the credential-bearing transport are torn down deterministically
+    # rather than at GC.
     try:
-        plan = understand_query(
-            body.query,
-            llm=llm,
+        try:
+            plan = understand_query(
+                body.query,
+                llm=llm,
+                model=model,
+                structured_output_supported=capability.structured_output,
+            )
+        except ProviderError as exc:
+            # Terminal auth (401), transient (503) and generic-provider (502)
+            # failures collapse onto the shared ladder.  ``phase`` names the
+            # failing stage in the generic message; the auth rung is distinct
+            # from the route-level 401 ``unauthorised`` (invalid ``X-API-Key``).
+            _raise_provider_http_error(
+                exc,
+                provider_name=provider_name,
+                surface="plan",
+                phase="query understanding",
+            )
+
+        # Audit-log MUST NOT carry the raw query — the plan IS the query
+        # reformulated, so the response body has it; logs are a different
+        # surface and stay metadata-only.  The query is logged via
+        # ``redact_for_log`` only at debug level (inside ``understand_query``).
+        audit_log(
+            "rag_plan",
+            client_ip=_client_ip(request),
+            endpoint="POST /api/rag/plan",
+            detail=(
+                f"provider={provider_name} model={model or '<provider default>'} "
+                f"lang={plan.detected_language} tickers={len(plan.tickers)} "
+                f"forms={len(plan.form_types)} mode={plan.suggested_answer_mode.value}"
+            ),
+        )
+
+        return RagPlanResponse(
+            plan=_plan_to_schema(plan),
+            provider=provider_name,
             model=model,
-            structured_output_supported=capability.structured_output,
         )
-    except ProviderError as exc:
-        # Terminal auth (401), transient (503) and generic-provider (502)
-        # failures collapse onto the shared ladder.  ``phase`` names the
-        # failing stage in the generic message; the auth rung is distinct
-        # from the route-level 401 ``unauthorised`` (invalid ``X-API-Key``).
-        _raise_provider_http_error(
-            exc,
-            provider_name=provider_name,
-            surface="plan",
-            phase="query understanding",
-        )
-
-    # Audit-log MUST NOT carry the raw query — the plan IS the query
-    # reformulated, so the response body has it; logs are a different
-    # surface and stay metadata-only.  The query is logged via
-    # ``redact_for_log`` only at debug level (inside ``understand_query``).
-    audit_log(
-        "rag_plan",
-        client_ip=_client_ip(request),
-        endpoint="POST /api/rag/plan",
-        detail=(
-            f"provider={provider_name} model={model or '<provider default>'} "
-            f"lang={plan.detected_language} tickers={len(plan.tickers)} "
-            f"forms={len(plan.form_types)} mode={plan.suggested_answer_mode.value}"
-        ),
-    )
-
-    return RagPlanResponse(
-        plan=_plan_to_schema(plan),
-        provider=provider_name,
-        model=model,
-    )
+    finally:
+        llm.close()
 
 
 # ---------------------------------------------------------------------------
@@ -822,74 +829,84 @@ async def generate_answer(
     plan = _plan_from_schema(body.plan)
     llm = _build_llm_for_request(request, provider_name)
 
-    orchestrator = RAGOrchestrator(retrieval=retrieval, llm=llm)
-
-    # ``body.mode`` is already pattern-validated at the schema layer
-    # (one of the four AnswerMode values).  ``from_string`` is still
-    # the canonical lift — handles the explicit ``None`` case (orchestrator
-    # falls back to ``plan.suggested_answer_mode``) and stays consistent
-    # with the orchestrator's own internal lifts.
-    effective_mode = (
-        AnswerMode.from_string(body.mode, default=plan.suggested_answer_mode)
-        if body.mode is not None
-        else None
-    )
-
-    history = _history_from_schema(body.history)
-    # Validate routing-hint compatibility before opening the orchestrator.
-    # ``_resolve_routing_hints_api`` raises HTTPException(400) for the
-    # invalid-combination case so the caller sees a do-not-retry error
-    # rather than a silently-no-op generation.
-    routing_hints = _resolve_routing_hints_api(provider_name, body.routing_hints)
-
+    # Close the per-request SDK client on every exit path (success, the
+    # routing-hint 400, provider/generation error, or any other raise) so
+    # its httpx connection pool and credential-bearing transport are torn
+    # down deterministically rather than at GC. The non-streaming route
+    # owns the client for its whole lifetime, so a single ``finally`` here
+    # is sufficient — unlike ``/stream`` where the producer thread outlives
+    # the handler and owns the close.
     try:
-        result = orchestrator.generate(
-            plan,
-            mode=effective_mode,
-            model=model or None,
-            max_output_tokens=body.max_output_tokens,
-            history=history,
-            prefer_structured_output=capability.structured_output,
-            max_per_section=body.max_per_section,
-            max_per_filing=body.max_per_filing,
-            rerank_over_fetch_factor=body.rerank_over_fetch_factor,
-            routing_hints=routing_hints,
-        )
-    except (ProviderError, GenerationError) as exc:
-        # The full provider ladder plus ``GenerationError`` (citation
-        # parser / orchestrator hit an unrecoverable state, e.g. a
-        # malformed structured-output payload the inline fallback cannot
-        # rescue → 502; the upstream output, not the caller's input, is at
-        # fault) collapse onto the shared classifier.
-        _raise_provider_http_error(
-            exc,
-            provider_name=provider_name,
-            surface="query",
-            phase="generation",
+        orchestrator = RAGOrchestrator(retrieval=retrieval, llm=llm)
+
+        # ``body.mode`` is already pattern-validated at the schema layer
+        # (one of the four AnswerMode values).  ``from_string`` is still
+        # the canonical lift — handles the explicit ``None`` case (orchestrator
+        # falls back to ``plan.suggested_answer_mode``) and stays consistent
+        # with the orchestrator's own internal lifts.
+        effective_mode = (
+            AnswerMode.from_string(body.mode, default=plan.suggested_answer_mode)
+            if body.mode is not None
+            else None
         )
 
-    refused = not result.retrieved_chunks and not result.citations
-    audit_mode = (
-        effective_mode.value if effective_mode is not None else plan.suggested_answer_mode.value
-    )
+        history = _history_from_schema(body.history)
+        # Validate routing-hint compatibility before opening the orchestrator.
+        # ``_resolve_routing_hints_api`` raises HTTPException(400) for the
+        # invalid-combination case so the caller sees a do-not-retry error
+        # rather than a silently-no-op generation.
+        routing_hints = _resolve_routing_hints_api(provider_name, body.routing_hints)
 
-    audit_log(
-        "rag_query",
-        client_ip=_client_ip(request),
-        endpoint="POST /api/rag/query",
-        detail=(
-            f"provider={provider_name} model={model or '<provider default>'} "
-            f"lang={plan.detected_language} tickers={len(plan.tickers)} "
-            f"forms={len(plan.form_types)} mode={audit_mode} "
-            f"prompt_version={result.prompt_version} "
-            f"chunks={len(result.retrieved_chunks)} citations={len(result.citations)} "
-            f"history_turns={len(body.history)} "
-            f"or_hints={_format_routing_hints_audit(routing_hints)} "
-            f"refused={refused}"
-        ),
-    )
+        try:
+            result = orchestrator.generate(
+                plan,
+                mode=effective_mode,
+                model=model or None,
+                max_output_tokens=body.max_output_tokens,
+                history=history,
+                prefer_structured_output=capability.structured_output,
+                max_per_section=body.max_per_section,
+                max_per_filing=body.max_per_filing,
+                rerank_over_fetch_factor=body.rerank_over_fetch_factor,
+                routing_hints=routing_hints,
+            )
+        except (ProviderError, GenerationError) as exc:
+            # The full provider ladder plus ``GenerationError`` (citation
+            # parser / orchestrator hit an unrecoverable state, e.g. a
+            # malformed structured-output payload the inline fallback cannot
+            # rescue → 502; the upstream output, not the caller's input, is at
+            # fault) collapse onto the shared classifier.
+            _raise_provider_http_error(
+                exc,
+                provider_name=provider_name,
+                surface="query",
+                phase="generation",
+            )
 
-    return _result_to_response(result, refused=refused, capability=capability)
+        refused = not result.retrieved_chunks and not result.citations
+        audit_mode = (
+            effective_mode.value if effective_mode is not None else plan.suggested_answer_mode.value
+        )
+
+        audit_log(
+            "rag_query",
+            client_ip=_client_ip(request),
+            endpoint="POST /api/rag/query",
+            detail=(
+                f"provider={provider_name} model={model or '<provider default>'} "
+                f"lang={plan.detected_language} tickers={len(plan.tickers)} "
+                f"forms={len(plan.form_types)} mode={audit_mode} "
+                f"prompt_version={result.prompt_version} "
+                f"chunks={len(result.retrieved_chunks)} citations={len(result.citations)} "
+                f"history_turns={len(body.history)} "
+                f"or_hints={_format_routing_hints_audit(routing_hints)} "
+                f"refused={refused}"
+            ),
+        )
+
+        return _result_to_response(result, refused=refused, capability=capability)
+    finally:
+        llm.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1000,6 +1017,7 @@ def _classify_stream_exception(exc: Exception) -> dict:
 def _run_orchestrator_in_thread(
     orchestrator: RAGOrchestrator,
     *,
+    llm: BaseLLMProvider,
     plan: QueryPlan,
     mode: AnswerMode | None,
     model: str | None,
@@ -1032,6 +1050,14 @@ def _run_orchestrator_in_thread(
         - Both cases run under ``finally`` so a ``return`` from inside
           the orchestrator (refusal short-circuit) still closes the
           consumer cleanly.
+
+    Client lifetime: the producer thread owns *llm* — the SDK
+    client is used only inside ``generate_stream`` — so it is closed in
+    the producer's ``finally``, i.e. exactly when the stream is exhausted
+    (or fails), on the same thread that used it.  Closing here rather than
+    in the route handler avoids a race where a client disconnect tears
+    the async consumer down while the producer is mid-iteration and still
+    holding the transport open.
     """
 
     def producer() -> None:
@@ -1052,7 +1078,15 @@ def _run_orchestrator_in_thread(
         except Exception as exc:
             loop.call_soon_threadsafe(queue.put_nowait, exc)
         finally:
-            loop.call_soon_threadsafe(queue.put_nowait, _SSE_DONE_SENTINEL)
+            # Close the client *before* the sentinel so a fully-consumed
+            # stream guarantees teardown has run.  ``close()`` is contractually
+            # quiet, but wrap it anyway: the done-sentinel MUST be pushed even
+            # if a future close() regressed and raised — otherwise the consumer
+            # awaits the queue forever and the stream hangs.
+            try:
+                llm.close()
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, _SSE_DONE_SENTINEL)
 
     threading.Thread(
         target=producer,
@@ -1120,41 +1154,53 @@ async def stream_answer(
 
     plan = _plan_from_schema(body.plan)
     llm = _build_llm_for_request(request, provider_name)
-    orchestrator = RAGOrchestrator(retrieval=retrieval, llm=llm)
+    # Pre-stream setup runs synchronously (no ``await``), so the only way
+    # out before the producer thread starts is a raise — chiefly the
+    # routing-hint 400.  On the success path the client MUST stay open (the
+    # producer thread owns it and closes it when the stream ends, see
+    # ``_run_orchestrator_in_thread``); a pre-stream failure means that
+    # thread never starts, so close the client here. ``except`` — not
+    # ``finally`` — because ``finally`` would close it on the success path
+    # too, before a single delta is streamed.
+    try:
+        orchestrator = RAGOrchestrator(retrieval=retrieval, llm=llm)
 
-    effective_mode = (
-        AnswerMode.from_string(body.mode, default=plan.suggested_answer_mode)
-        if body.mode is not None
-        else None
-    )
-    audit_mode = (
-        effective_mode.value if effective_mode is not None else plan.suggested_answer_mode.value
-    )
+        effective_mode = (
+            AnswerMode.from_string(body.mode, default=plan.suggested_answer_mode)
+            if body.mode is not None
+            else None
+        )
+        audit_mode = (
+            effective_mode.value if effective_mode is not None else plan.suggested_answer_mode.value
+        )
 
-    # Audit-log emission happens *before* the stream opens: SSE responses
-    # cannot raise after the body starts, so logging at the start makes
-    # the route's intent visible even if the connection drops mid-stream.
-    # Counts of chunks / citations / refused are unknown at this point;
-    # the producer thread emits a follow-up ``rag_stream_completed`` line
-    # carrying those once the orchestrator finishes.
-    history = _history_from_schema(body.history)
-    # Same fail-closed guard as ``/query`` — refuse hints against any
-    # provider that does not advertise ``supports_upstream_routing`` so a
-    # mis-paired hint never opens the SSE stream.
-    routing_hints = _resolve_routing_hints_api(provider_name, body.routing_hints)
+        # Audit-log emission happens *before* the stream opens: SSE responses
+        # cannot raise after the body starts, so logging at the start makes
+        # the route's intent visible even if the connection drops mid-stream.
+        # Counts of chunks / citations / refused are unknown at this point;
+        # the producer thread emits a follow-up ``rag_stream_completed`` line
+        # carrying those once the orchestrator finishes.
+        history = _history_from_schema(body.history)
+        # Same fail-closed guard as ``/query`` — refuse hints against any
+        # provider that does not advertise ``supports_upstream_routing`` so a
+        # mis-paired hint never opens the SSE stream.
+        routing_hints = _resolve_routing_hints_api(provider_name, body.routing_hints)
 
-    audit_log(
-        "rag_stream",
-        client_ip=_client_ip(request),
-        endpoint="POST /api/rag/stream",
-        detail=(
-            f"provider={provider_name} model={model or '<provider default>'} "
-            f"lang={plan.detected_language} tickers={len(plan.tickers)} "
-            f"forms={len(plan.form_types)} mode={audit_mode} "
-            f"history_turns={len(body.history)} "
-            f"or_hints={_format_routing_hints_audit(routing_hints)}"
-        ),
-    )
+        audit_log(
+            "rag_stream",
+            client_ip=_client_ip(request),
+            endpoint="POST /api/rag/stream",
+            detail=(
+                f"provider={provider_name} model={model or '<provider default>'} "
+                f"lang={plan.detected_language} tickers={len(plan.tickers)} "
+                f"forms={len(plan.form_types)} mode={audit_mode} "
+                f"history_turns={len(body.history)} "
+                f"or_hints={_format_routing_hints_audit(routing_hints)}"
+            ),
+        )
+    except Exception:
+        llm.close()
+        raise
 
     async def event_stream() -> AsyncIterator[str]:
         """Async generator that interleaves orchestrator events + heartbeats."""
@@ -1164,6 +1210,7 @@ async def stream_answer(
 
         _run_orchestrator_in_thread(
             orchestrator,
+            llm=llm,
             plan=plan,
             mode=effective_mode,
             model=model or None,

@@ -29,6 +29,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Literal, final
 
+from sec_generative_search.core.logging import get_logger
 from sec_generative_search.core.security import mask_secret
 from sec_generative_search.core.types import (
     Chunk,
@@ -50,6 +51,9 @@ __all__ = [
     "GenerationResponse",
     "RerankResult",
 ]
+
+
+logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +200,43 @@ class _ProviderBase(ABC):
     @final
     def __str__(self) -> str:
         return self.__repr__()
+
+    def close(self) -> None:
+        """Release the provider's network client, if it owns one.
+
+        Every hosted adapter constructs an SDK client (``OpenAI`` /
+        ``Anthropic`` / ``genai.Client``) that owns an
+        :mod:`httpx` connection pool; that pool — and the
+        credential-bearing transport it holds — is otherwise released
+        only at garbage collection, which is non-deterministic under a
+        reference cycle.  Closing it at the end of a request gives
+        deterministic file-descriptor and transport teardown and shrinks
+        the window in which the cleartext key sits in process memory.
+
+        The client attribute is always ``self._client`` where present;
+        providers with no network client (the on-device
+        :class:`~sec_generative_search.providers.local.LocalEmbeddingProvider`)
+        inherit a safe no-op.  Idempotent and quiet: closing an
+        already-closed or client-less provider never raises, so the call
+        is safe inside a ``finally``.
+        """
+        client = getattr(self, "_client", None)
+        client_close = getattr(client, "close", None)
+        if not callable(client_close):
+            return
+        try:
+            client_close()
+        except Exception:
+            # close() is called from route / producer-thread ``finally``
+            # blocks: a failed transport teardown is not actionable and must
+            # not shadow the request's own exception path.
+            logger.debug("provider client close failed", exc_info=True)
+
+    def __enter__(self) -> _ProviderBase:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
 
     @abstractmethod
     def validate_key(self) -> bool:

@@ -62,6 +62,10 @@ class _StubLLM:
     """Minimal stand-in returned by the patched ``build_llm_provider``."""
 
     provider_name: str = "openai"
+    closed: bool = False
+
+    def close(self) -> None:
+        self.closed = True
 
 
 @dataclass
@@ -71,6 +75,7 @@ class _StubUnderstandRecorder:
     plan: QueryPlan | None = None
     raise_with: Exception | None = None
     calls: list[dict[str, Any]] = field(default_factory=list)
+    last_llm: Any = None
 
     def __call__(
         self,
@@ -81,6 +86,9 @@ class _StubUnderstandRecorder:
         structured_output_supported: bool = False,
         **kwargs: Any,
     ) -> QueryPlan:
+        # Retain the built LLM so tests can assert the route closed it
+        # after query understanding.
+        self.last_llm = llm
         self.calls.append(
             {
                 "query": query,
@@ -573,3 +581,33 @@ class TestRagPlanRateLimitClassification:
             statuses.append(r.status_code)
         assert statuses.count(200) == 3
         assert 429 in statuses
+
+
+@pytest.mark.security
+class TestRagPlanClientLifecycle:
+    """The plan route closes the per-request LLM on every exit path."""
+
+    def test_client_closed_after_success(self, rag_app_factory) -> None:
+        app, _build, understand = rag_app_factory(plan=_sample_plan())
+        client = TestClient(app, base_url="https://testserver")
+        response = client.post(
+            "/api/rag/plan",
+            json={"query": "What are AAPL's iPhone segment risks?"},
+            headers={"X-Provider-Key-openai": "sk-key-123"},  # pragma: allowlist secret
+        )
+        assert response.status_code == 200
+        assert understand.last_llm.closed is True
+
+    def test_client_closed_after_provider_error(self, rag_app_factory) -> None:
+        app, _build, understand = rag_app_factory(
+            understand_raise=ProviderRateLimitError("upstream limited"),
+        )
+        client = TestClient(app, base_url="https://testserver")
+        response = client.post(
+            "/api/rag/plan",
+            json={"query": "any"},
+            headers={"X-Provider-Key-openai": "sk-key-123"},  # pragma: allowlist secret
+        )
+        assert response.status_code == 503
+        # The finally still runs even though query-understanding raised.
+        assert understand.last_llm.closed is True

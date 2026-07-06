@@ -573,3 +573,32 @@ class TestSecretSafety:
         for record in caplog.records:
             assert _LONG_KEY not in record.getMessage()
             assert _LONG_KEY not in str(record.args)
+
+
+# ---------------------------------------------------------------------------
+# Security — per-request client teardown
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.security
+class TestClientTeardown:
+    """``close()`` deterministically tears down the real Anthropic transport.
+
+    The per-request build sites close the provider in a ``finally`` so the
+    credential-bearing httpx pool is released at end-of-request rather than at
+    GC. Uses a *real* ``Anthropic`` client (not the mocked fixture) so the
+    teardown is genuinely observable.
+    """
+
+    def test_close_closes_real_transport(self) -> None:
+        prov = AnthropicProvider(_LONG_KEY)
+        assert prov._client.is_closed() is False
+        prov.close()
+        assert prov._client.is_closed() is True
+
+    def test_close_is_idempotent_and_quiet(self) -> None:
+        prov = AnthropicProvider(_LONG_KEY)
+        prov.close()
+        # Called from route / producer-thread ``finally`` — must not raise.
+        assert prov.close() is None
+        assert prov._client.is_closed() is True

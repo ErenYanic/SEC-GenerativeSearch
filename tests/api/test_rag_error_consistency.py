@@ -115,6 +115,10 @@ _GENERATION_CASES: list[tuple[str, Any, _ExpectedEnvelope]] = [
 @dataclass
 class _StubLLM:
     provider_name: str = "openai"
+    closed: bool = False
+
+    def close(self) -> None:
+        self.closed = True
 
 
 @dataclass

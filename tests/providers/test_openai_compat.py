@@ -708,6 +708,44 @@ class TestStreamingEdgeCases:
 
 
 # ---------------------------------------------------------------------------
+# Security — per-request client teardown
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.security
+class TestClientTeardown:
+    """``close()`` must deterministically tear down the *real* SDK transport.
+
+    The per-request LLM build sites (and ``validate``) close the provider in a
+    ``finally`` so the httpx connection pool — and the credential-bearing
+    transport it holds — is released at end-of-request rather than lingering
+    until garbage collection. These tests build a *real* ``OpenAI`` client
+    (not the mocked fixture) so they exercise the shared
+    ``_OpenAIClientMixin`` every OpenAI-wire vendor inherits — including
+    ``local_llm`` and ``openrouter``.
+    """
+
+    def test_close_closes_real_openai_transport(self) -> None:
+        provider = _DemoLLM(_LONG_KEY)
+        assert provider._client.is_closed() is False
+        provider.close()
+        assert provider._client.is_closed() is True
+
+    def test_close_is_idempotent_and_quiet(self) -> None:
+        provider = _DemoLLM(_LONG_KEY)
+        provider.close()
+        # A second close is called from route / producer-thread ``finally``
+        # blocks — it must never raise.
+        assert provider.close() is None
+        assert provider._client.is_closed() is True
+
+    def test_context_manager_closes_real_transport(self) -> None:
+        with _DemoLLM(_LONG_KEY) as provider:
+            assert provider._client.is_closed() is False
+        assert provider._client.is_closed() is True
+
+
+# ---------------------------------------------------------------------------
 # Iterator typing — ``generate_stream`` must yield an Iterator
 # ---------------------------------------------------------------------------
 

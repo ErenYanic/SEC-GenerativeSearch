@@ -355,6 +355,82 @@ class TestRequestResponseDataclasses:
 
 
 # ---------------------------------------------------------------------------
+# close() / context-manager — deterministic client teardown
+# ---------------------------------------------------------------------------
+
+
+class _RecordingClient:
+    """Stand-in for an SDK client's httpx pool that records teardown."""
+
+    def __init__(self) -> None:
+        self.is_closed = False
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.is_closed = True
+
+
+class _RaisingClient:
+    """Client whose close() raises — proves ``provider.close()`` is quiet."""
+
+    def close(self) -> None:
+        raise RuntimeError("transport teardown boom")
+
+
+class _ClientOwningLLM(_FakeLLM):
+    """``_FakeLLM`` that owns a ``_client`` like every hosted adapter."""
+
+    provider_name = "fake-llm-with-client"
+
+    def __init__(self, api_key: str, client: object) -> None:
+        super().__init__(api_key)
+        self._client = client
+
+
+class TestProviderClose:
+    def test_close_releases_owned_client(self) -> None:
+        client = _RecordingClient()
+        provider = _ClientOwningLLM(_LONG_KEY, client)
+        provider.close()
+        assert client.is_closed is True
+        assert client.close_calls == 1
+
+    def test_context_manager_closes_on_exit(self) -> None:
+        client = _RecordingClient()
+        with _ClientOwningLLM(_LONG_KEY, client) as provider:
+            assert provider is not None
+            assert client.is_closed is False
+        assert client.is_closed is True
+
+    def test_context_manager_closes_even_on_exception(self) -> None:
+        client = _RecordingClient()
+        with pytest.raises(ValueError, match="boom"), _ClientOwningLLM(_LONG_KEY, client):
+            raise ValueError("boom")
+        assert client.is_closed is True
+
+    def test_close_is_noop_without_client(self) -> None:
+        # The on-device embedder owns a torch model, not an httpx client;
+        # the inherited close() must be a safe no-op there.
+        provider = _FakeLLM(_LONG_KEY)
+        assert not hasattr(provider, "_client")
+        assert provider.close() is None  # must not raise
+
+    def test_close_is_idempotent(self) -> None:
+        client = _RecordingClient()
+        provider = _ClientOwningLLM(_LONG_KEY, client)
+        provider.close()
+        provider.close()
+        assert client.close_calls == 2  # each call forwards; never raises
+
+    def test_close_is_quiet_when_client_close_raises(self) -> None:
+        # close() is called from route/thread ``finally`` blocks — a failed
+        # transport teardown must never mask the request's own exception.
+        provider = _ClientOwningLLM(_LONG_KEY, _RaisingClient())
+        assert provider.close() is None  # swallowed, not propagated
+
+
+# ---------------------------------------------------------------------------
 # Security — raw key must never appear in logs emitted by the base layer
 # ---------------------------------------------------------------------------
 

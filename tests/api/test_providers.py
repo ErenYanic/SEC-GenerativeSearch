@@ -42,6 +42,11 @@ class _StubProvider:
             raise ProviderError("transport blew up")
         raise AssertionError(f"unknown stub behaviour: {self._behaviour}")
 
+    def close(self) -> None:
+        # ``ProviderRegistry.validate_key`` closes the provider it constructs
+        # in a ``finally``; the stub mirrors the no-network contract.
+        self._closed = True
+
 
 @pytest.fixture
 def stub_provider(monkeypatch: pytest.MonkeyPatch):

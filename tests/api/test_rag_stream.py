@@ -72,6 +72,10 @@ from sec_generative_search.rag.query_understanding import QueryPlan
 @dataclass
 class _StubLLM:
     provider_name: str = "openai"
+    closed: bool = False
+
+    def close(self) -> None:
+        self.closed = True
 
 
 @dataclass
@@ -1035,3 +1039,64 @@ class TestRagStreamRoutingHints:
             for line in audit
         )
         assert all(sentinel not in line for line in audit)
+
+
+@pytest.mark.security
+class TestRagStreamClientLifecycle:
+    """The streaming route closes the per-request LLM once the stream ends.
+
+    Unlike ``/query``, the SDK client outlives the handler — it is used by
+    the producer thread, which owns the close in its ``finally``.
+    The producer closes the client *before* pushing the done-sentinel, so a
+    fully-consumed ``response.text`` guarantees the close has run.
+    """
+
+    def test_client_closed_after_stream_completes(self, rag_stream_app_factory) -> None:
+        events = [StreamEvent(delta="Hello "), StreamEvent(final=_default_final_result())]
+        app, _build, orch = rag_stream_app_factory(events=events)
+        client = TestClient(app, base_url="https://testserver")
+        response = client.post(
+            "/api/rag/stream",
+            json={"plan": _sample_plan_payload()},
+            headers={"X-Provider-Key-openai": "sk-key-123"},  # pragma: allowlist secret
+        )
+        assert response.status_code == 200
+        _ = response.text  # drain the stream fully
+        assert orch.llm.closed is True
+
+    def test_client_closed_after_midstream_failure(self, rag_stream_app_factory) -> None:
+        app, _build, orch = rag_stream_app_factory(
+            events=[StreamEvent(delta="partial ")],
+            raise_after=ProviderRateLimitError("upstream limited"),
+        )
+        client = TestClient(app, base_url="https://testserver")
+        response = client.post(
+            "/api/rag/stream",
+            json={"plan": _sample_plan_payload()},
+            headers={"X-Provider-Key-openai": "sk-key-123"},  # pragma: allowlist secret
+        )
+        assert response.status_code == 200  # SSE opened; failure is an in-stream event
+        frames = _parse_sse_frames(response.text)
+        assert any(name == "error" for name, _ in frames)
+        # The producer's finally closes the client even on a mid-stream raise.
+        assert orch.llm.closed is True
+
+    def test_client_closed_when_prestream_routing_hint_rejected(
+        self, rag_stream_app_factory
+    ) -> None:
+        # Pre-stream 400 (routing hints against a non-routing provider) raises
+        # before the producer thread starts; the route's ``except`` guard must
+        # still close the client.
+        app, _build, orch = rag_stream_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        response = client.post(
+            "/api/rag/stream",
+            json={
+                "plan": _sample_plan_payload(),
+                "provider": "openai",  # not routing-capable
+                "routing_hints": {"order": ["anthropic"]},
+            },
+            headers={"X-Provider-Key-openai": "sk-key-123"},  # pragma: allowlist secret
+        )
+        assert response.status_code == 400
+        assert orch.llm.closed is True

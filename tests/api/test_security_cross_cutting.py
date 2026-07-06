@@ -173,6 +173,9 @@ class _StubValidateProvider:
     def validate_key(self) -> bool:
         return True
 
+    def close(self) -> None:
+        ...
+
 
 @pytest.fixture
 def _patch_validate_registry(monkeypatch: pytest.MonkeyPatch):

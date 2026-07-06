@@ -76,6 +76,10 @@ from sec_generative_search.rag.query_understanding import QueryPlan
 @dataclass
 class _StubLLM:
     provider_name: str = "openai"
+    closed: bool = False
+
+    def close(self) -> None:
+        self.closed = True
 
 
 @dataclass
@@ -1237,3 +1241,55 @@ class TestRagQueryRoutingHintsSecurityContract:
         )
         assert response.status_code == 400
         assert sentinel not in response.text
+
+
+@pytest.mark.security
+class TestRagQueryClientLifecycle:
+    """The route closes the per-request LLM on every exit path.
+
+    Deterministic teardown releases the SDK client's connection pool + the
+    credential-bearing transport at end-of-request rather than at GC.
+    """
+
+    def test_client_closed_after_success(self, rag_query_app_factory) -> None:
+        app, _build, orch = rag_query_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        response = client.post(
+            "/api/rag/query",
+            json={"plan": _sample_plan_payload()},
+            headers={"X-Provider-Key-openai": "sk-key-123"},  # pragma: allowlist secret
+        )
+        assert response.status_code == 200
+        assert orch.llm.closed is True
+
+    def test_client_closed_after_provider_error(self, rag_query_app_factory) -> None:
+        app, _build, orch = rag_query_app_factory(
+            generate_raise=ProviderRateLimitError("upstream limited"),
+        )
+        client = TestClient(app, base_url="https://testserver")
+        response = client.post(
+            "/api/rag/query",
+            json={"plan": _sample_plan_payload()},
+            headers={"X-Provider-Key-openai": "sk-key-123"},  # pragma: allowlist secret
+        )
+        assert response.status_code == 503
+        # The finally still runs even though generation raised.
+        assert orch.llm.closed is True
+
+    def test_client_closed_after_routing_hint_rejection(self, rag_query_app_factory) -> None:
+        # ``_resolve_routing_hints_api`` raises 400 *after* the LLM is built
+        # (and the orchestrator stub has captured it) but *before* generation
+        # — the finally must still close it.
+        app, _build, orch = rag_query_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        response = client.post(
+            "/api/rag/query",
+            json={
+                "plan": _sample_plan_payload(),
+                "provider": "openai",  # not routing-capable
+                "routing_hints": {"order": ["anthropic-claude"]},
+            },
+            headers={"X-Provider-Key-openai": "sk-key-123"},  # pragma: allowlist secret
+        )
+        assert response.status_code == 400
+        assert orch.llm.closed is True
