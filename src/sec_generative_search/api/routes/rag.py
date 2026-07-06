@@ -57,10 +57,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 from fastapi import APIRouter, Depends, Request
 from starlette.responses import StreamingResponse
@@ -185,6 +187,204 @@ def _plan_to_schema(plan: QueryPlan) -> QueryPlanSchema:
     )
 
 
+# ---------------------------------------------------------------------------
+# Shared provider-error ladder + capability probe (used by all three RAG
+# surfaces: /plan, /query, /stream)
+# ---------------------------------------------------------------------------
+#
+# The three routes must classify an upstream failure identically — a caller
+# that hits ``/query`` and falls back to ``/stream`` for the same key must
+# see the same ``error`` code, status, and wording.  Centralising the table
+# removes drift from the earlier inlined copies.  The HTTP raise path
+# (:func:`_raise_provider_http_error`) and the SSE payload builder
+# (:func:`_classify_stream_exception`) both consume this one table.
+
+
+@dataclass(frozen=True)
+class _ProviderErrorSpec:
+    """One rung of the provider/generation exception ladder.
+
+    ``message`` may carry a single ``{phase}`` placeholder — the only
+    wording that differs across surfaces (``/plan`` reports the failing
+    stage as ``"query understanding"``; ``/query`` and ``/stream`` report
+    ``"generation"``).  ``include_details`` gates the ``{provider, kind}``
+    ``details`` mapping onto the HTTP envelope only (the SSE ``error``
+    event carries no ``details`` field).  ``log_level`` is ``None`` for the
+    terminal auth rung (which the routes deliberately do not log) and a
+    :mod:`logging` level otherwise; every emitted line is content-free
+    (rule **C**) — the provider slug and exception class name only.
+    """
+
+    status_code: int
+    error: str
+    message: str
+    hint: str
+    log_level: int | None
+    log_label: str
+    include_details: bool = False
+
+
+# Ordered ladder — first ``isinstance`` match wins.  Order is load-bearing:
+# the transient subclasses (rate-limit / timeout / connection) and the
+# terminal ``ProviderAuthError`` MUST precede their common ``ProviderError``
+# base, or every subclass would collapse onto the generic 502 rung.
+# ``GenerationError`` is a sibling of ``ProviderError`` (not a subclass), so
+# it is matched on its own; only ``/query`` + ``/stream`` route it here
+# (``understand_query`` on ``/plan`` never raises it).
+_PROVIDER_ERROR_LADDER: tuple[
+    tuple[type[Exception] | tuple[type[Exception], ...], _ProviderErrorSpec], ...
+] = (
+    (
+        ProviderAuthError,
+        _ProviderErrorSpec(
+            status_code=401,
+            error="provider_unauthorized",
+            message="The upstream provider rejected the supplied API key.",
+            hint="Verify or rotate the provider key (header / session / admin env).",
+            log_level=None,
+            log_label="",
+        ),
+    ),
+    (
+        (ProviderRateLimitError, ProviderTimeoutError),
+        _ProviderErrorSpec(
+            status_code=503,
+            error="provider_unavailable",
+            message="The upstream provider is rate-limited or timed out.",
+            hint="Retry after a short backoff; do not rotate the key.",
+            log_level=logging.WARNING,
+            log_label="upstream transient",
+        ),
+    ),
+    (
+        ProviderConnectionError,
+        _ProviderErrorSpec(
+            status_code=503,
+            error="provider_unavailable",
+            message="The upstream provider endpoint could not be reached.",
+            hint=(
+                "Verify the endpoint is running and reachable (for local_llm, "
+                "that the local model server is up); retry once it recovers."
+            ),
+            log_level=logging.WARNING,
+            log_label="endpoint unreachable",
+        ),
+    ),
+    (
+        ProviderError,
+        _ProviderErrorSpec(
+            status_code=502,
+            error="provider_error",
+            message="The upstream provider returned an error during {phase}.",
+            hint="Inspect the audit log; do not rotate the key on a non-auth error.",
+            log_level=logging.ERROR,
+            log_label="provider error",
+            include_details=True,
+        ),
+    ),
+    (
+        GenerationError,
+        _ProviderErrorSpec(
+            status_code=502,
+            error="generation_error",
+            message="The orchestrator could not assemble a valid answer.",
+            hint="Retry the request; if the failure persists, switch model or provider.",
+            log_level=logging.ERROR,
+            log_label="generation error",
+        ),
+    ),
+)
+
+
+def _match_provider_error(exc: Exception) -> _ProviderErrorSpec | None:
+    """Return the ladder rung for ``exc``, or ``None`` if it is off-ladder.
+
+    ``None`` lets each consumer pick its own fallback: the HTTP surfaces
+    re-raise (the global handler maps it to a generic 500), while the SSE
+    builder emits an ``internal_error`` event.
+    """
+    for types, spec in _PROVIDER_ERROR_LADDER:
+        if isinstance(exc, types):
+            return spec
+    return None
+
+
+def _probe_capability(provider_name: str, model: str) -> ProviderCapability:
+    """Resolve the LLM capability for ``provider_name`` / ``model``, fail-fast.
+
+    Shared by all three RAG surfaces so an unknown provider or model
+    surfaces the same 400 envelope everywhere.  The probe is O(1),
+    credential-free and network-free (rule **R**) — a registry lookup
+    only, done before any LLM is built so a bad slug does not surface as
+    an obscure ``KeyError`` from the construction call site.  ``KeyError``
+    → unknown provider slug; ``ValueError`` → unknown *embedding* slug,
+    which on the LLM surface would be a registry bug but is surfaced as
+    400 (not 500) so a future registry edit fails caller-visibly.
+    """
+    try:
+        return ProviderRegistry.get_capability(
+            provider_name,
+            ProviderSurface.LLM,
+            model=model or None,
+        )
+    except KeyError as exc:
+        raise http_error(
+            status_code=400,
+            error="unknown_provider",
+            message=str(exc),
+            hint="Use ProviderRegistry.list_providers(LLM) to see registered slugs.",
+        ) from None
+    except ValueError as exc:
+        raise http_error(
+            status_code=400,
+            error="unknown_model",
+            message=str(exc),
+            hint="Omit the model field to use the provider default.",
+        ) from None
+
+
+def _raise_provider_http_error(
+    exc: Exception,
+    *,
+    provider_name: str,
+    surface: str,
+    phase: str,
+) -> NoReturn:
+    """Map a provider/generation exception onto the shared HTTP envelope.
+
+    Single source of truth for the ``/plan`` + ``/query`` error ladder;
+    :func:`_classify_stream_exception` consumes the same table for the
+    SSE surface.  ``surface`` (``"plan"`` / ``"query"``) tags the
+    content-free operational log line; ``phase`` (``"query understanding"``
+    / ``"generation"``) fills the generic ``ProviderError`` message.  An
+    off-ladder exception re-raises unchanged so it reaches the global
+    handler exactly as it did before the ladder was consolidated — callers
+    only route ladder types here, so this branch is defensive.
+    """
+    spec = _match_provider_error(exc)
+    if spec is None:
+        raise exc
+    if spec.log_level is not None:
+        logger.log(
+            spec.log_level,
+            "rag %s %s: provider=%s kind=%s",
+            surface,
+            spec.log_label,
+            provider_name,
+            type(exc).__name__,
+        )
+    details = (
+        {"provider": provider_name, "kind": type(exc).__name__} if spec.include_details else None
+    )
+    raise http_error(
+        status_code=spec.status_code,
+        error=spec.error,
+        message=spec.message.format(phase=phase),
+        details=details,
+        hint=spec.hint,
+    ) from exc
+
+
 @router.post(
     "/plan",
     response_model=RagPlanResponse,
@@ -210,30 +410,7 @@ async def plan_query(
     # Reject unknown providers up front with a 400 — building the LLM
     # otherwise raises an obscure ``KeyError`` from the registry on the
     # same call site.  The capability probe is O(1) and credential-free.
-    try:
-        capability = ProviderRegistry.get_capability(
-            provider_name,
-            ProviderSurface.LLM,
-            model=model or None,
-        )
-    except KeyError as exc:
-        raise http_error(
-            status_code=400,
-            error="unknown_provider",
-            message=str(exc),
-            hint="Use ProviderRegistry.list_providers(LLM) to see registered slugs.",
-        ) from None
-    except ValueError as exc:
-        # ``get_capability`` raises ValueError only for an unknown
-        # *embedding* slug; reaching here on the LLM surface would be a
-        # registry bug, but we surface 400 rather than 500 so a future
-        # registry edit fails caller-visibly.
-        raise http_error(
-            status_code=400,
-            error="unknown_model",
-            message=str(exc),
-            hint="Omit the model field to use the provider default.",
-        ) from None
+    capability = _probe_capability(provider_name, model)
 
     # Build the LLM via the request-scoped resolver chain (header →
     # session → encrypted-user → admin-env).  ``ConfigurationError``
@@ -270,62 +447,17 @@ async def plan_query(
             model=model,
             structured_output_supported=capability.structured_output,
         )
-    except ProviderAuthError as exc:
-        # The caller's own key was rejected by the upstream provider —
-        # 401 so the UI can prompt them to rotate their key.  Distinct
-        # from the route-level 401 ``unauthorised`` (which signals an
-        # invalid ``X-API-Key``).
-        raise http_error(
-            status_code=401,
-            error="provider_unauthorized",
-            message=("The upstream provider rejected the supplied API key."),
-            hint=("Verify or rotate the provider key (header / session / admin env)."),
-        ) from exc
-    except (ProviderRateLimitError, ProviderTimeoutError) as exc:
-        # Transient — same redaction logic as the validate route.
-        logger.warning(
-            "rag plan upstream transient: provider=%s kind=%s",
-            provider_name,
-            type(exc).__name__,
-        )
-        raise http_error(
-            status_code=503,
-            error="provider_unavailable",
-            message=("The upstream provider is rate-limited or timed out."),
-            hint="Retry after a short backoff; do not rotate the key.",
-        ) from exc
-    except ProviderConnectionError as exc:
-        # Endpoint unreachable (refused / no route / DNS) — transient, so
-        # 503 like the rate-limit/timeout case, but a distinct message so
-        # the operator fixes the endpoint (chiefly an unstarted local_llm
-        # server) rather than rotating a key.
-        logger.warning(
-            "rag plan endpoint unreachable: provider=%s kind=%s",
-            provider_name,
-            type(exc).__name__,
-        )
-        raise http_error(
-            status_code=503,
-            error="provider_unavailable",
-            message="The upstream provider endpoint could not be reached.",
-            hint=(
-                "Verify the endpoint is running and reachable (for local_llm, "
-                "that the local model server is up); retry once it recovers."
-            ),
-        ) from exc
     except ProviderError as exc:
-        logger.error(
-            "rag plan provider error: provider=%s kind=%s",
-            provider_name,
-            type(exc).__name__,
+        # Terminal auth (401), transient (503) and generic-provider (502)
+        # failures collapse onto the shared ladder.  ``phase`` names the
+        # failing stage in the generic message; the auth rung is distinct
+        # from the route-level 401 ``unauthorised`` (invalid ``X-API-Key``).
+        _raise_provider_http_error(
+            exc,
+            provider_name=provider_name,
+            surface="plan",
+            phase="query understanding",
         )
-        raise http_error(
-            status_code=502,
-            error="provider_error",
-            message=("The upstream provider returned an error during query understanding."),
-            details={"provider": provider_name, "kind": type(exc).__name__},
-            hint=("Inspect the audit log; do not rotate the key on a non-auth error."),
-        ) from exc
 
     # Audit-log MUST NOT carry the raw query — the plan IS the query
     # reformulated, so the response body has it; logs are a different
@@ -685,26 +817,7 @@ async def generate_answer(
 
     # Reject unknown providers up front with a 400 — same contract as
     # the plan route.  The capability probe is O(1) and credential-free.
-    try:
-        capability = ProviderRegistry.get_capability(
-            provider_name,
-            ProviderSurface.LLM,
-            model=model or None,
-        )
-    except KeyError as exc:
-        raise http_error(
-            status_code=400,
-            error="unknown_provider",
-            message=str(exc),
-            hint="Use ProviderRegistry.list_providers(LLM) to see registered slugs.",
-        ) from None
-    except ValueError as exc:
-        raise http_error(
-            status_code=400,
-            error="unknown_model",
-            message=str(exc),
-            hint="Omit the model field to use the provider default.",
-        ) from None
+    capability = _probe_capability(provider_name, model)
 
     plan = _plan_from_schema(body.plan)
     llm = _build_llm_for_request(request, provider_name)
@@ -742,67 +855,18 @@ async def generate_answer(
             rerank_over_fetch_factor=body.rerank_over_fetch_factor,
             routing_hints=routing_hints,
         )
-    except ProviderAuthError as exc:
-        raise http_error(
-            status_code=401,
-            error="provider_unauthorized",
-            message="The upstream provider rejected the supplied API key.",
-            hint="Verify or rotate the provider key (header / session / admin env).",
-        ) from exc
-    except (ProviderRateLimitError, ProviderTimeoutError) as exc:
-        logger.warning(
-            "rag query upstream transient: provider=%s kind=%s",
-            provider_name,
-            type(exc).__name__,
+    except (ProviderError, GenerationError) as exc:
+        # The full provider ladder plus ``GenerationError`` (citation
+        # parser / orchestrator hit an unrecoverable state, e.g. a
+        # malformed structured-output payload the inline fallback cannot
+        # rescue → 502; the upstream output, not the caller's input, is at
+        # fault) collapse onto the shared classifier.
+        _raise_provider_http_error(
+            exc,
+            provider_name=provider_name,
+            surface="query",
+            phase="generation",
         )
-        raise http_error(
-            status_code=503,
-            error="provider_unavailable",
-            message="The upstream provider is rate-limited or timed out.",
-            hint="Retry after a short backoff; do not rotate the key.",
-        ) from exc
-    except ProviderConnectionError as exc:
-        # Endpoint unreachable — transient 503 with endpoint-focused
-        # guidance (chiefly an unstarted self-hosted local_llm server).
-        logger.warning(
-            "rag query endpoint unreachable: provider=%s kind=%s",
-            provider_name,
-            type(exc).__name__,
-        )
-        raise http_error(
-            status_code=503,
-            error="provider_unavailable",
-            message="The upstream provider endpoint could not be reached.",
-            hint=(
-                "Verify the endpoint is running and reachable (for local_llm, "
-                "that the local model server is up); retry once it recovers."
-            ),
-        ) from exc
-    except ProviderError as exc:
-        logger.error(
-            "rag query provider error: provider=%s kind=%s",
-            provider_name,
-            type(exc).__name__,
-        )
-        raise http_error(
-            status_code=502,
-            error="provider_error",
-            message="The upstream provider returned an error during generation.",
-            details={"provider": provider_name, "kind": type(exc).__name__},
-            hint="Inspect the audit log; do not rotate the key on a non-auth error.",
-        ) from exc
-    except GenerationError as exc:
-        # Citation parser / orchestrator hit an unrecoverable state
-        # (e.g. malformed structured-output payload that even the inline
-        # fallback cannot rescue).  Surface as 502 — the upstream
-        # output, not the caller's input, is at fault.
-        logger.error("rag query generation error: %s", type(exc).__name__)
-        raise http_error(
-            status_code=502,
-            error="generation_error",
-            message="The orchestrator could not assemble a valid answer.",
-            hint="Retry the request; if the failure persists, switch model or provider.",
-        ) from exc
 
     refused = not result.retrieved_chunks and not result.citations
     audit_mode = (
@@ -911,51 +975,25 @@ def _error_payload(*, error: str, message: str, hint: str | None = None) -> dict
 def _classify_stream_exception(exc: Exception) -> dict:
     """Map an orchestrator-side exception to an SSE error payload.
 
-    Mirrors the HTTP error map of :func:`generate_answer` so a caller
-    cannot get one shape from ``/query`` and a different one from
-    ``/stream`` for the same upstream failure.
+    Consumes the same :data:`_PROVIDER_ERROR_LADDER` as the HTTP raise
+    path (:func:`_raise_provider_http_error`) so a caller cannot get one
+    shape from ``/query`` and a different one from ``/stream`` for the
+    same upstream failure.  The ``phase`` is always ``"generation"`` here —
+    the SSE surface mirrors ``/query``.  An off-ladder exception yields the
+    generic ``internal_error`` envelope without echoing the exception text
+    (internal messages routinely contain file paths, SQL, etc.).
     """
-    if isinstance(exc, ProviderAuthError):
+    spec = _match_provider_error(exc)
+    if spec is None:
         return _error_payload(
-            error="provider_unauthorized",
-            message="The upstream provider rejected the supplied API key.",
-            hint="Verify or rotate the provider key (header / session / admin env).",
+            error="internal_error",
+            message="The server encountered an unexpected error while streaming.",
+            hint="Retry the request; if the failure persists, contact the operator.",
         )
-    if isinstance(exc, (ProviderRateLimitError, ProviderTimeoutError)):
-        return _error_payload(
-            error="provider_unavailable",
-            message="The upstream provider is rate-limited or timed out.",
-            hint="Retry after a short backoff; do not rotate the key.",
-        )
-    if isinstance(exc, ProviderConnectionError):
-        # Endpoint unreachable — mirrors the /query 503 mapping so a
-        # caller sees the same shape on both surfaces.
-        return _error_payload(
-            error="provider_unavailable",
-            message="The upstream provider endpoint could not be reached.",
-            hint=(
-                "Verify the endpoint is running and reachable (for local_llm, "
-                "that the local model server is up); retry once it recovers."
-            ),
-        )
-    if isinstance(exc, ProviderError):
-        return _error_payload(
-            error="provider_error",
-            message="The upstream provider returned an error during generation.",
-            hint="Inspect the audit log; do not rotate the key on a non-auth error.",
-        )
-    if isinstance(exc, GenerationError):
-        return _error_payload(
-            error="generation_error",
-            message="The orchestrator could not assemble a valid answer.",
-            hint="Retry the request; if the failure persists, switch model or provider.",
-        )
-    # Unknown — return a generic envelope without echoing the exception
-    # text (internal messages routinely contain file paths, SQL, etc.).
     return _error_payload(
-        error="internal_error",
-        message="The server encountered an unexpected error while streaming.",
-        hint="Retry the request; if the failure persists, contact the operator.",
+        error=spec.error,
+        message=spec.message.format(phase="generation"),
+        hint=spec.hint,
     )
 
 
@@ -1078,26 +1116,7 @@ async def stream_answer(
     # 4xx response here lets the client distinguish "your request was
     # bad" (don't retry) from "the upstream blew up mid-generation"
     # (maybe retry).
-    try:
-        capability = ProviderRegistry.get_capability(
-            provider_name,
-            ProviderSurface.LLM,
-            model=model or None,
-        )
-    except KeyError as exc:
-        raise http_error(
-            status_code=400,
-            error="unknown_provider",
-            message=str(exc),
-            hint="Use ProviderRegistry.list_providers(LLM) to see registered slugs.",
-        ) from None
-    except ValueError as exc:
-        raise http_error(
-            status_code=400,
-            error="unknown_model",
-            message=str(exc),
-            hint="Omit the model field to use the provider default.",
-        ) from None
+    capability = _probe_capability(provider_name, model)
 
     plan = _plan_from_schema(body.plan)
     llm = _build_llm_for_request(request, provider_name)
