@@ -173,8 +173,7 @@ class _StubValidateProvider:
     def validate_key(self) -> bool:
         return True
 
-    def close(self) -> None:
-        ...
+    def close(self) -> None: ...
 
 
 @pytest.fixture
