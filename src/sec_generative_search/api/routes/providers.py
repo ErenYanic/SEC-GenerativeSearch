@@ -196,7 +196,7 @@ async def list_provider_models(
     tags=["providers"],
     summary="Validate a provider API key",
 )
-async def validate_provider(
+def validate_provider(
     body: ProviderValidateRequest,
 ) -> ProviderValidateResponse:
     """Round-trip a candidate key against the upstream provider.

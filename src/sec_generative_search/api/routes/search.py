@@ -87,7 +87,7 @@ def _hit_from_result(result: RetrievalResult) -> SearchHit:
     tags=["search"],
     summary="Retrieve filing chunks for a natural-language query",
 )
-async def search_filings(
+def search_filings(
     request: Request,
     body: SearchRequest,
     service: RetrievalService = Depends(get_retrieval_service),

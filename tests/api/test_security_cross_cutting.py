@@ -106,6 +106,11 @@ _EDGAR_EMAIL = "leak-sentinel@example.invalid"
 class _StubLLM:
     provider_name: str = "openai"
 
+    def close(self) -> None:
+        """No-op teardown — the F5(a) contract requires every provider
+        double to expose ``close()`` (the ``/stream`` producer thread calls
+        it in its ``finally``)."""
+
 
 @dataclass
 class _StubOrchestrator:

@@ -142,7 +142,7 @@ def _database_error(exc: DatabaseError) -> Exception:
     response_model=FilingListResponse,
     summary="List ingested filings",
 )
-async def list_filings(
+def list_filings(
     registry: MetadataRegistry = Depends(get_registry),
     ticker: str | None = Query(
         default=None,
@@ -201,7 +201,7 @@ async def list_filings(
     response_model=FilingSchema,
     summary="Get a single filing by accession number",
 )
-async def get_filing(
+def get_filing(
     accession: str = Path(
         ...,
         max_length=20,
@@ -244,7 +244,7 @@ async def get_filing(
     summary="Delete a single filing",
     dependencies=admin_route_dependencies(),
 )
-async def delete_filing(
+def delete_filing(
     request: Request,
     accession: str = Path(
         ...,
@@ -303,7 +303,7 @@ async def delete_filing(
     summary="Delete filings by accession-number list",
     dependencies=admin_route_dependencies(),
 )
-async def delete_by_ids(
+def delete_by_ids(
     request: Request,
     body: DeleteByIdsRequest,
     registry: MetadataRegistry = Depends(get_registry),
@@ -363,7 +363,7 @@ async def delete_by_ids(
     summary="Bulk delete filings by ticker / form_type filter",
     dependencies=admin_route_dependencies(),
 )
-async def bulk_delete(
+def bulk_delete(
     request: Request,
     body: BulkDeleteRequest,
     registry: MetadataRegistry = Depends(get_registry),
@@ -436,7 +436,7 @@ async def bulk_delete(
     summary="Clear every filing from both stores",
     dependencies=admin_route_dependencies(),
 )
-async def clear_all(
+def clear_all(
     request: Request,
     confirm: bool = Query(
         default=False,

@@ -204,15 +204,13 @@ def _plan_to_schema(plan: QueryPlan) -> QueryPlanSchema:
 class _ProviderErrorSpec:
     """One rung of the provider/generation exception ladder.
 
-    ``message`` may carry a single ``{phase}`` placeholder — the only
-    wording that differs across surfaces (``/plan`` reports the failing
-    stage as ``"query understanding"``; ``/query`` and ``/stream`` report
-    ``"generation"``).  ``include_details`` gates the ``{provider, kind}``
+    ``message`` may carry a single placeholder whose wording differs across
+    surfaces.  ``include_details`` gates the ``{provider, kind}``
     ``details`` mapping onto the HTTP envelope only (the SSE ``error``
     event carries no ``details`` field).  ``log_level`` is ``None`` for the
     terminal auth rung (which the routes deliberately do not log) and a
-    :mod:`logging` level otherwise; every emitted line is content-free
-    (rule **C**) — the provider slug and exception class name only.
+    :mod:`logging` level otherwise; every emitted line carries only the
+    provider slug and exception class name.
     """
 
     status_code: int
@@ -354,10 +352,8 @@ def _raise_provider_http_error(
 
     Single source of truth for the ``/plan`` + ``/query`` error ladder;
     :func:`_classify_stream_exception` consumes the same table for the
-    SSE surface.  ``surface`` (``"plan"`` / ``"query"``) tags the
-    content-free operational log line; ``phase`` (``"query understanding"``
-    / ``"generation"``) fills the generic ``ProviderError`` message.  An
-    off-ladder exception re-raises unchanged so it reaches the global
+    SSE surface.  ``surface`` (``"plan"`` / ``"query"``) tags the log line.
+    An off-ladder exception re-raises unchanged so it reaches the global
     handler exactly as it did before the ladder was consolidated — callers
     only route ladder types here, so this branch is defensive.
     """
@@ -391,7 +387,7 @@ def _raise_provider_http_error(
     tags=["rag"],
     summary="Run query-understanding and return an editable plan",
 )
-async def plan_query(
+def plan_query(
     request: Request,
     body: RagPlanRequest,
 ) -> RagPlanResponse:
@@ -454,9 +450,9 @@ async def plan_query(
             )
         except ProviderError as exc:
             # Terminal auth (401), transient (503) and generic-provider (502)
-            # failures collapse onto the shared ladder.  ``phase`` names the
-            # failing stage in the generic message; the auth rung is distinct
-            # from the route-level 401 ``unauthorised`` (invalid ``X-API-Key``).
+            # failures collapse onto the shared ladder.  The auth rung is
+            # distinct from the route-level 401 ``unauthorised`` (invalid
+            # ``X-API-Key``).
             _raise_provider_http_error(
                 exc,
                 provider_name=provider_name,
@@ -718,7 +714,7 @@ def _result_to_response(
     :func:`~sec_generative_search.core.types.estimate_cost` helper —
     ``None`` when the model's cost is unknown (arbitrary-slug providers /
     overlay-only models).  The figure rides the response body only; it is
-    never recorded to a metric or log line (rule **C**).
+    never recorded to a metric or log line.
     """
     usage = result.token_usage
     return RagQueryResponse(
@@ -792,12 +788,26 @@ def _resolve_provider_and_model_query(body: RagQueryRequest) -> tuple[str, str]:
     tags=["rag"],
     summary="Generate an answer for an approved QueryPlan (non-streaming)",
 )
-async def generate_answer(
+def generate_answer(
     request: Request,
     body: RagQueryRequest,
     retrieval: RetrievalService = Depends(get_retrieval_service),
 ) -> RagQueryResponse:
     """Run :meth:`RAGOrchestrator.generate` against the supplied plan.
+
+    Declared **sync** (``def``) so FastAPI dispatches it to the anyio
+    threadpool.  :meth:`RAGOrchestrator.generate` is a blocking chain —
+    local-embedder inference (torch), a ChromaDB query, then a blocking
+    LLM SDK call with ``resilient_call`` retry/backoff (10-60 s under a
+    transient upstream).  Running that on the single event loop of the
+    single worker would freeze ``/api/health`` liveness probes
+    (risking a probe-timeout container restart mid-generation), SSE
+    heartbeats, and every other tenant's request.  Off-loading to the
+    threadpool bounds unrelated-endpoint latency to normal single-request
+    latency; the network waits release the GIL.  The per-request SDK
+    client is still closed in the ``finally`` below, and the
+    correlation-ID ContextVar is copied into the worker thread so the
+    audit line still carries the bound ID.
 
     The route is a thin adapter — every business rule (context budgeting,
     comparative fan-out, prompt assembly with the
@@ -947,7 +957,7 @@ def _final_payload(
     the call's token usage and the resolved model's exact per-MTok cost via
     :func:`~sec_generative_search.core.types.estimate_cost`, ``None`` for an
     unknown-cost model.  Cost rides the event body only, never a metric or
-    log line (rule **C**).
+    log line.
     """
     usage = result.token_usage
     return {
@@ -995,10 +1005,10 @@ def _classify_stream_exception(exc: Exception) -> dict:
     Consumes the same :data:`_PROVIDER_ERROR_LADDER` as the HTTP raise
     path (:func:`_raise_provider_http_error`) so a caller cannot get one
     shape from ``/query`` and a different one from ``/stream`` for the
-    same upstream failure.  The ``phase`` is always ``"generation"`` here —
-    the SSE surface mirrors ``/query``.  An off-ladder exception yields the
-    generic ``internal_error`` envelope without echoing the exception text
-    (internal messages routinely contain file paths, SQL, etc.).
+    same upstream failure.  The SSE surface mirrors ``/query``.  An
+    off-ladder exception yields the generic ``internal_error`` envelope
+    without echoing the exception text (internal messages routinely contain
+    file paths, SQL, etc.).
     """
     spec = _match_provider_error(exc)
     if spec is None:
@@ -1108,29 +1118,16 @@ async def stream_answer(
 ) -> StreamingResponse:
     """Stream the orchestrator output as Server-Sent Events.
 
-    Event contract (one frame per event, RFC-compliant ``event: <name>\\ndata: <json>``):
-
-        - ``delta`` — ``{"text": "..."}`` per streamed chunk from the
-          LLM.  Clients append these as they arrive to render the
-          incrementally-built answer.
-        - ``citation`` — one frame per cited chunk, emitted between the
-          last ``delta`` and the ``final`` event so the UI can render
-          the source panel as soon as deltas finish.  Payload mirrors
-          :class:`CitationSchema`.
-        - ``final`` — terminal event carrying the full assembled answer
-          plus traceability (``provider`` / ``model`` / ``prompt_version``
-          / ``token_usage`` / ``latency_seconds`` / ``streamed`` /
-          ``refused``).  ``citations`` is intentionally omitted here —
+    This route stays sync so blocking retrieval and generation work runs in
+    the threadpool.
           they were already streamed as their own events.
         - ``error`` — emitted in place of the trailing events when the
           orchestrator raises after the SSE response is open.  Payload
           matches the unified HTTP error envelope shape so the same
           parser handles both surfaces.
         - ``heartbeat`` — emitted every 15s of inter-event silence.
-          The frame is ``event: heartbeat\\ndata: {}`` so a client that
-          ignores unknown events still receives a TCP-level write that
-          keeps proxies from severing the connection.
-
+        # Audit logs stay metadata-only; the raw query is returned in the
+        # response body.
     Pre-stream errors (unknown provider, missing key, ProviderAuthError
     raised during LLM construction) surface as the regular HTTP error
     envelope on a 4xx / 5xx status — the SSE response only opens when
@@ -1142,6 +1139,10 @@ async def stream_answer(
     :func:`_build_llm_for_request` so a misconfiguration cannot surface
     as ``provider_key_required`` from one and ``unknown_provider`` from
     the other.
+
+    This handler stays async because the SSE body uses asyncio primitives
+    and the blocking orchestrator already runs off-loop in
+    :func:`_run_orchestrator_in_thread`.
     """
     provider_name, model = _resolve_provider_and_model_query(body)
 
@@ -1181,9 +1182,9 @@ async def stream_answer(
         # the producer thread emits a follow-up ``rag_stream_completed`` line
         # carrying those once the orchestrator finishes.
         history = _history_from_schema(body.history)
-        # Same fail-closed guard as ``/query`` — refuse hints against any
-        # provider that does not advertise ``supports_upstream_routing`` so a
-        # mis-paired hint never opens the SSE stream.
+        # Refuse hints against any provider that does not advertise
+        # ``supports_upstream_routing`` so a mis-paired hint never opens the
+        # SSE stream.
         routing_hints = _resolve_routing_hints_api(provider_name, body.routing_hints)
 
         audit_log(
