@@ -7,26 +7,38 @@ of the ``add_middleware`` block as outermost-to-innermost — the
 
 Components in this module:
 
+    - :class:`CorrelationIdMiddleware` — pure ASGI; binds a per-request
+      correlation ID and echoes it as ``X-Request-ID``.
     - :class:`SecurityHeadersMiddleware` — pure ASGI; appends fixed
       response headers (CSP, X-Frame-Options, ...).
     - :class:`ContentSizeLimitMiddleware` — pure ASGI; rejects oversize
       bodies before they reach a handler, defends against chunked
       transfer encoding mid-stream.
-    - :class:`InsecureTransportWarningMiddleware` — logs a one-shot
-      warning when authenticated traffic arrives over plain HTTP.
-        - :class:`RateLimitMiddleware` — per-IP sliding-window limiter with
-            a separate per-``session_id`` window enforced on top of the per-IP
-            window for the provider-validation route. Both windows must allow
-            the request; exhausting either returns 429.
+    - :class:`RateLimitMiddleware` — pure ASGI; per-IP sliding-window
+      limiter with a separate per-``session_id`` window enforced on top
+      of the per-IP window for the provider-validation route (both must
+      allow; exhausting either returns 429).  It also carries the
+      one-shot **insecure-transport warning** (folded in from a former
+      standalone ``BaseHTTPMiddleware`` layer — a whole middleware for a
+      single log line was over-structure): it logs once when
+      authenticated traffic arrives over plain HTTP.
 
 CORS is supplied by Starlette's :class:`CORSMiddleware` directly; we do
 not wrap it.
 
 Security notes:
 
-    - All four bespoke middlewares are dependency-free outside the
-      Python standard library, FastAPI, and ``core.logging``.  Do not
-      add provider, database, or chromadb imports here.
+    - Every bespoke middleware is **pure ASGI** — no
+      ``BaseHTTPMiddleware`` remains, so none pays the per-request
+      task-group + memory-stream hop, and the correlation-ID
+      ``ContextVar`` stays visible to the same task that runs the route.
+    - All bespoke middlewares are dependency-free outside the Python
+      standard library, Starlette, and ``core.logging``.  Do not add
+      provider, database, or chromadb imports here.
+    - The per-route rate-limit / body-cap policy is resolved **once per
+      request** and cached on the ASGI ``scope`` (:func:`_resolve_policy_cached`)
+      so the rate limiter and the content-size limiter share the single
+      :func:`~sec_generative_search.api.policies.resolve_policy` scan.
     - The error responses sent from middleware MUST carry the same
       :data:`~sec_generative_search.api.errors.ErrorEnvelope` shape as
       handler-raised errors so downstream consumers do not need to
@@ -41,13 +53,12 @@ import time
 from collections import defaultdict, deque
 from typing import Any
 
-from fastapi import Request, Response
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.requests import cookie_parser
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from sec_generative_search.api.errors import envelope
-from sec_generative_search.api.policies import resolve_policy
+from sec_generative_search.api.policies import RoutePolicy, resolve_policy
 from sec_generative_search.config.settings import get_settings
 from sec_generative_search.core.correlation import (
     new_correlation_id,
@@ -82,13 +93,42 @@ __all__ = [
     "REQUEST_ID_HEADER",
     "ContentSizeLimitMiddleware",
     "CorrelationIdMiddleware",
-    "InsecureTransportWarningMiddleware",
     "RateLimitMiddleware",
     "SecurityHeadersMiddleware",
 ]
 
 
 logger = get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Per-request policy cache
+# ---------------------------------------------------------------------------
+
+
+# Scope key under which the resolved :class:`RoutePolicy` is memoised so
+# the rate limiter and the content-size limiter share a single
+# :func:`~sec_generative_search.api.policies.resolve_policy` scan per
+# request instead of one each.  Namespaced to avoid colliding with any
+# ASGI-server or framework key on the scope.
+_POLICY_SCOPE_KEY = "sec_generative_search.route_policy"
+
+
+def _resolve_policy_cached(scope: Scope) -> RoutePolicy:
+    """Resolve — and memoise on ``scope`` — the per-route policy.
+
+    Whichever bespoke middleware runs first (the rate limiter, outermost
+    of the two) populates the cache; the inner content-size limiter reads
+    it back.  Order-independent: if the cache is empty (e.g. a request
+    that reached the content-size limiter for a non-``/api/`` path the
+    rate limiter skipped without resolving) it resolves and caches here.
+    """
+    cached = scope.get(_POLICY_SCOPE_KEY)
+    if cached is not None:
+        return cached
+    policy = resolve_policy(scope.get("path", ""), scope.get("method", ""))
+    scope[_POLICY_SCOPE_KEY] = policy
+    return policy
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +234,10 @@ _SECURITY_HEADERS: tuple[tuple[bytes, bytes], ...] = (
     (b"permissions-policy", _PERMISSIONS_POLICY.encode()),
 )
 
+# Header names we force onto every response — computed once at import
+# time rather than rebuilt per response inside the send hook.
+_FORCED_SECURITY_HEADER_NAMES: frozenset[bytes] = frozenset(name for name, _ in _SECURITY_HEADERS)
+
 
 class SecurityHeadersMiddleware:
     """Append a fixed set of security headers to every HTTP response.
@@ -218,8 +262,7 @@ class SecurityHeadersMiddleware:
                 # Filter out any header we are about to set so the final
                 # response carries exactly one of each (callers that try
                 # to override are silently corrected, not duplicated).
-                forced_names = {name for name, _ in _SECURITY_HEADERS}
-                headers = [(n, v) for n, v in headers if n not in forced_names]
+                headers = [(n, v) for n, v in headers if n not in _FORCED_SECURITY_HEADER_NAMES]
                 headers.extend(_SECURITY_HEADERS)
                 message["headers"] = headers
             await send(message)
@@ -269,11 +312,10 @@ class ContentSizeLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
-        # Resolve the per-route cap and clamp by the global ceiling
-        # so a tighter constructor-supplied bound always wins.
-        path = scope.get("path", "")
-        method = scope.get("method", "")
-        policy_max = resolve_policy(path, method).max_body_bytes
+        # Resolve the per-route cap (once per request, shared with the
+        # rate limiter via the scope cache) and clamp by the global
+        # ceiling so a tighter constructor-supplied bound always wins.
+        policy_max = _resolve_policy_cached(scope).max_body_bytes
         effective_max = min(policy_max, self._max_bytes)
 
         headers = dict(scope.get("headers", []))
@@ -363,62 +405,6 @@ class ContentSizeLimitMiddleware:
 
 
 # ---------------------------------------------------------------------------
-# Insecure transport warning
-# ---------------------------------------------------------------------------
-
-
-class InsecureTransportWarningMiddleware(BaseHTTPMiddleware):
-    """Log once when authenticated traffic arrives over plain HTTP.
-
-    Triggers only when authentication or per-session EDGAR credentials
-    are configured (i.e. a non-local deployment) and the
-    ``X-Forwarded-Proto`` header indicates ``http``.  The warning is
-    suppressed in local dev because there is nothing to defend against
-    when no secret leaves the machine.
-    """
-
-    def __init__(self, app: ASGIApp) -> None:
-        super().__init__(app)
-        self._warned = False
-        self._lock = threading.Lock()
-
-    async def dispatch(
-        self,
-        request: Request,
-        call_next: RequestResponseEndpoint,
-    ) -> Response:
-        self._maybe_warn(request)
-        return await call_next(request)
-
-    def _maybe_warn(self, request: Request) -> None:
-        # Cheap fast-path before we take the lock or read settings.
-        if self._warned:
-            return
-        settings = get_settings()
-        api = settings.api
-        if not (api.key or api.admin_key or api.edgar_session_required):
-            return
-
-        forwarded_proto = request.headers.get("x-forwarded-proto")
-        if forwarded_proto is None:
-            return
-        proto = forwarded_proto.split(",", 1)[0].strip().lower()
-        if proto != "http":
-            return
-
-        with self._lock:
-            if self._warned:
-                return
-            self._warned = True
-            logger.warning(
-                "Insecure transport detected (X-Forwarded-Proto=http) while "
-                "authentication or per-session EDGAR credentials are enabled. "
-                "Scenarios B/C require TLS — terminate HTTPS at the reverse "
-                "proxy or launch uvicorn with --ssl-certfile/--ssl-keyfile."
-            )
-
-
-# ---------------------------------------------------------------------------
 # Rate limiting (per-IP sliding window)
 # ---------------------------------------------------------------------------
 
@@ -493,19 +479,77 @@ def _classify_path(path: str, method: str) -> str | None:
     return resolve_policy(path, method).rate_category
 
 
-class RateLimitMiddleware(BaseHTTPMiddleware):
-    """Per-IP sliding-window limiter with optional per-session keying.
+def _rate_category_for_scope(scope: Scope) -> str | None:
+    """Scope-level twin of :func:`_classify_path` using the policy cache.
 
-    Buckets are keyed by ``request.client.host``.  A ``0`` limit
-    disables that category.
+    Same semantics as ``_classify_path`` (``None`` = exempt / non-``/api/``)
+    but resolves the category through :func:`_resolve_policy_cached` so the
+    single per-request table scan is shared with the content-size limiter.
+    Non-``/api/`` paths short-circuit *without* touching the cache — the
+    content-size limiter resolves its own policy for those.
+    """
+    path = scope.get("path", "")
+    if not path.startswith("/api/") and path != "/api":
+        return None
+    return _resolve_policy_cached(scope).rate_category
+
+
+def _client_ip_from_scope(scope: Scope) -> str:
+    """Return the peer host from the ASGI ``scope`` (``"unknown"`` if absent).
+
+    ``scope["client"]`` is a ``(host, port)`` tuple or ``None`` — the
+    pure-ASGI equivalent of ``request.client.host``.
+    """
+    client = scope.get("client")
+    if client:
+        return client[0]
+    return "unknown"
+
+
+def _session_id_from_scope(scope: Scope) -> str | None:
+    """Extract the raw ``session_id`` cookie value from the ASGI ``scope``.
+
+    Reads the first ``cookie`` header and parses it with Starlette's own
+    :func:`cookie_parser` — byte-for-byte the semantics
+    ``request.cookies`` used before this middleware went pure-ASGI. The
+    value is *not* shape-validated here (the rate limiter keys on
+    whatever the client sent, exactly as before); a missing/empty cookie
+    yields ``None`` so the caller falls back to the per-IP window alone.
+    """
+    for name, value in scope.get("headers", []):
+        if name == b"cookie":
+            sid = cookie_parser(value.decode("latin-1")).get(_session_cookie_name())
+            return sid or None
+    return None
+
+
+class RateLimitMiddleware:
+    """Pure-ASGI per-IP sliding-window limiter with optional per-session keying.
+
+    Buckets are keyed by the peer host (``scope["client"]``).  A ``0``
+    limit disables that category.
 
     The validate category additionally enforces a per-``session_id``
     sliding window on top of the per-IP bucket: both must allow the
     request. A shared NAT cannot consume the per-IP bucket on behalf of
     one tenant, and a single session cannot brute-force key validation
-    across many origins. Requests without a shape-valid ``session_id``
-    cookie skip the per-session check and rely on the per-IP bucket
-    alone.
+    across many origins. Requests without a ``session_id`` cookie skip
+    the per-session check and rely on the per-IP bucket alone.
+
+    This layer also carries the **one-shot insecure-transport warning**
+    (folded in from a former standalone ``BaseHTTPMiddleware``): it logs
+    once, before the rate-limit gate, when authentication or per-session
+    EDGAR credentials are configured and traffic arrives over plain HTTP
+    (``X-Forwarded-Proto: http``). The check is observational and runs on
+    every request — including exempt and 429-rejected ones — so a
+    misconfigured deployment is flagged regardless of the outcome.
+
+    Pure ASGI: no ``BaseHTTPMiddleware`` task-group / memory-stream hop.
+    A 429 is emitted with a :class:`~starlette.responses.JSONResponse`
+    whose ``http.response.start`` still flows back out through the
+    outer :class:`SecurityHeadersMiddleware` and
+    :class:`CorrelationIdMiddleware`, so the rejection carries the full
+    security-header set and the bound ``X-Request-ID``.
     """
 
     def __init__(
@@ -522,7 +566,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         session_rpm: int = 20,
         login_rpm: int = 5,
     ) -> None:
-        super().__init__(app)
+        self.app = app
         self._buckets: dict[str, _SlidingWindow] = {}
         for category, rpm in (
             ("search", search_rpm),
@@ -541,6 +585,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self._validate_session_bucket: _SlidingWindow | None = (
             _SlidingWindow(validate_per_session_rpm) if validate_per_session_rpm > 0 else None
         )
+        # One-shot insecure-transport warning state (folded in).
+        self._insecure_warned = False
+        self._insecure_lock = threading.Lock()
 
     def reset(self) -> None:
         for bucket in self._buckets.values():
@@ -548,44 +595,86 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if self._validate_session_bucket is not None:
             self._validate_session_bucket.reset()
 
-    async def dispatch(
-        self,
-        request: Request,
-        call_next: RequestResponseEndpoint,
-    ) -> Response:
-        category = _classify_path(request.url.path, request.method)
-        if category is None or category not in self._buckets:
-            return await call_next(request)
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
+        # Observational one-shot warning, before the gate so it fires
+        # even on exempt / rejected requests.
+        self._maybe_warn_insecure_transport(scope)
+
+        category = _rate_category_for_scope(scope)
+        if category is None or category not in self._buckets:
+            await self.app(scope, receive, send)
+            return
+
+        method = scope.get("method", "")
+        path = scope.get("path", "")
         bucket = self._buckets[category]
-        client_ip = request.client.host if request.client else "unknown"
+        client_ip = _client_ip_from_scope(scope)
 
         allowed, retry_after = bucket.is_allowed(client_ip)
         if not allowed:
-            return self._reject(category, request, client_ip, bucket.limit, retry_after)
+            await self._reject(category, method, path, client_ip, bucket.limit, retry_after)(
+                scope, receive, send
+            )
+            return
 
         # Per-session check piggy-backs on the per-IP gate above for the
         # validate route only. We do not log on success; rejection uses
         # the same structured 429 envelope as every other rate-limit response.
         if category == "validate" and self._validate_session_bucket is not None:
-            sid = request.cookies.get(_session_cookie_name())
-            if sid is not None and sid:
+            sid = _session_id_from_scope(scope)
+            if sid:
                 allowed_s, retry_s = self._validate_session_bucket.is_allowed(sid)
                 if not allowed_s:
-                    return self._reject(
+                    await self._reject(
                         "validate",
-                        request,
+                        method,
+                        path,
                         f"session={sid[:6]}...",
                         self._validate_session_bucket.limit,
                         retry_s,
-                    )
+                    )(scope, receive, send)
+                    return
 
-        return await call_next(request)
+        await self.app(scope, receive, send)
+
+    def _maybe_warn_insecure_transport(self, scope: Scope) -> None:
+        # Cheap fast-path before we read settings or take the lock.
+        if self._insecure_warned:
+            return
+        api = get_settings().api
+        if not (api.key or api.admin_key or api.edgar_session_required):
+            return
+
+        forwarded_proto: str | None = None
+        for name, value in scope.get("headers", []):
+            if name == b"x-forwarded-proto":
+                forwarded_proto = value.decode("latin-1")
+                break
+        if forwarded_proto is None:
+            return
+        if forwarded_proto.split(",", 1)[0].strip().lower() != "http":
+            return
+
+        with self._insecure_lock:
+            if self._insecure_warned:
+                return
+            self._insecure_warned = True
+            logger.warning(
+                "Insecure transport detected (X-Forwarded-Proto=http) while "
+                "authentication or per-session EDGAR credentials are enabled. "
+                "Scenarios B/C require TLS — terminate HTTPS at the reverse "
+                "proxy or launch uvicorn with --ssl-certfile/--ssl-keyfile."
+            )
 
     def _reject(
         self,
         category: str,
-        request: Request,
+        method: str,
+        path: str,
         key_label: str,
         limit: int,
         retry_after: int,
@@ -594,8 +683,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             "Rate limit exceeded: %s from %s on %s %s (limit=%d/min)",
             category,
             key_label,
-            request.method,
-            request.url.path,
+            method,
+            path,
             limit,
         )
         return JSONResponse(

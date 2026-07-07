@@ -39,7 +39,6 @@ from sec_generative_search.api.errors import install_error_handlers
 from sec_generative_search.api.middleware import (
     ContentSizeLimitMiddleware,
     CorrelationIdMiddleware,
-    InsecureTransportWarningMiddleware,
     RateLimitMiddleware,
     SecurityHeadersMiddleware,
 )
@@ -301,7 +300,9 @@ def create_app() -> FastAPI:
     # ------------------------------------------------------------------
     # Middleware stack — read top-to-bottom as outermost-to-innermost.
     # ASGI middleware is applied LIFO: the *last* ``add_middleware``
-    # call is the *first* to see an inbound request.
+    # call is the *first* to see an inbound request. Every layer is
+    # pure ASGI (no ``BaseHTTPMiddleware`` task-group / memory-stream
+    # hop remains).
     #
     # Order rationale (outer → inner):
     #
@@ -314,12 +315,14 @@ def create_app() -> FastAPI:
     #   3. SecurityHeadersMiddleware — touches every response, including
     #                                  rate-limit and 413 responses.
     #   4. RateLimitMiddleware       — rejects abusive callers before we
-    #                                  pay the cost of body parsing.
-    #   5. ContentSizeLimitMiddleware — cheap reject on the body stream.
-    #   6. InsecureTransportWarning  — closest to the route layer; only
-    #                                  needs to observe, not modify.
+    #                                  pay the cost of body parsing; also
+    #                                  carries the one-shot insecure-transport
+    #                                  warning (folded in from a former
+    #                                  standalone layer).
+    #   5. ContentSizeLimitMiddleware — cheap reject on the body stream;
+    #                                  shares the rate limiter's cached
+    #                                  per-route policy resolution.
     # ------------------------------------------------------------------
-    app.add_middleware(InsecureTransportWarningMiddleware)
     app.add_middleware(ContentSizeLimitMiddleware)
     app.add_middleware(
         RateLimitMiddleware,

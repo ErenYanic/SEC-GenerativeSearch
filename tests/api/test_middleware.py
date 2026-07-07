@@ -179,3 +179,116 @@ class TestMiddlewareOrdering:
         assert last is not None and last.status_code == 429
         assert last.headers.get("x-frame-options") == "DENY"
         assert last.headers.get("content-security-policy") is not None
+
+    def test_correlation_id_present_on_rate_limited_response(self, api_client_factory) -> None:
+        # The pure-ASGI RateLimitMiddleware emits its 429 via a
+        # JSONResponse whose http.response.start still flows back out
+        # through the outermost CorrelationIdMiddleware. The rejection
+        # MUST carry the bound X-Request-ID.
+        client = api_client_factory()
+        last = None
+        for _ in range(40):
+            last = client.post("/api/session")
+            if last.status_code == 429:
+                break
+        assert last is not None and last.status_code == 429
+        assert last.headers.get("x-request-id") is not None
+
+
+@pytest.mark.security
+class TestPureAsgiMiddlewareStack:
+    """Every bespoke middleware is pure ASGI, and the standalone
+    insecure-transport layer has been folded into RateLimitMiddleware."""
+
+    def test_no_middleware_subclasses_basehttpmiddleware(self) -> None:
+        from starlette.middleware.base import BaseHTTPMiddleware
+
+        from sec_generative_search.api import middleware as mw
+
+        for cls in (
+            mw.CorrelationIdMiddleware,
+            mw.SecurityHeadersMiddleware,
+            mw.ContentSizeLimitMiddleware,
+            mw.RateLimitMiddleware,
+        ):
+            assert not issubclass(cls, BaseHTTPMiddleware), cls.__name__
+            # A pure-ASGI middleware exposes the wrapped app and the
+            # (scope, receive, send) callable — never a `dispatch`.
+            assert not hasattr(cls, "dispatch"), cls.__name__
+
+    def test_standalone_insecure_transport_middleware_removed(self) -> None:
+        # The class was folded into RateLimitMiddleware; leaving a stale
+        # export around would tempt a future re-wire of a dead layer.
+        from sec_generative_search.api import middleware as mw
+
+        assert not hasattr(mw, "InsecureTransportWarningMiddleware")
+        assert "InsecureTransportWarningMiddleware" not in mw.__all__
+
+
+class TestSinglePolicyResolution:
+    """The per-route policy table is scanned once per request and
+    shared between the rate limiter and the content-size limiter via the
+    scope cache."""
+
+    def test_resolve_policy_called_once_per_request(
+        self, api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from sec_generative_search.api import middleware as mw
+        from sec_generative_search.api.policies import resolve_policy as real_resolve
+
+        calls: list[tuple[str, str]] = []
+
+        def counting(path: str, method: str):
+            calls.append((path, method))
+            return real_resolve(path, method)
+
+        monkeypatch.setattr(mw, "resolve_policy", counting)
+
+        response = api_client.get("/api/health")
+        assert response.status_code == 200
+        # The scope cache collapses the scan count to 1.
+        assert len(calls) == 1, calls
+
+
+@pytest.mark.security
+class TestInsecureTransportWarning:
+    """The one-shot insecure-transport warning, folded into the rate
+    limiter. It fires exactly once when authenticated traffic arrives
+    over plain HTTP, and stays silent otherwise."""
+
+    @staticmethod
+    def _spy_warnings(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        from sec_generative_search.api import middleware as mw
+
+        recorded: list[str] = []
+
+        def spy(msg, *args, **kwargs) -> None:
+            recorded.append(str(msg))
+
+        monkeypatch.setattr(mw.logger, "warning", spy)
+        return recorded
+
+    def test_warns_once_over_plain_http_when_auth_enabled(
+        self, api_client_factory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        recorded = self._spy_warnings(monkeypatch)
+        client = api_client_factory(API_KEY="rotated-test-key")  # pragma: allowlist secret
+        for _ in range(3):
+            client.get("/api/health", headers={"X-Forwarded-Proto": "http"})
+        insecure = [m for m in recorded if "Insecure transport detected" in m]
+        assert len(insecure) == 1  # one-shot across the three probes
+
+    def test_silent_over_https(self, api_client_factory, monkeypatch: pytest.MonkeyPatch) -> None:
+        recorded = self._spy_warnings(monkeypatch)
+        client = api_client_factory(API_KEY="rotated-test-key")  # pragma: allowlist secret
+        client.get("/api/health", headers={"X-Forwarded-Proto": "https"})
+        assert not [m for m in recorded if "Insecure transport detected" in m]
+
+    def test_silent_when_no_auth_configured(
+        self, api_client, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Local dev: no API key / admin key / EDGAR-session requirement,
+        # so plain HTTP is expected and MUST NOT warn.
+        recorded = self._spy_warnings(monkeypatch)
+        api_client.get("/api/health", headers={"X-Forwarded-Proto": "http"})
+        assert not [m for m in recorded if "Insecure transport detected" in m]
