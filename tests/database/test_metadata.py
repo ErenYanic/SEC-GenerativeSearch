@@ -247,6 +247,72 @@ class TestListFilings:
         result = registry.list_filings(ticker="AAPL", form_type="10-K")
         assert [r.accession_number for r in result] == ["ACC-1"]
 
+    def test_limit_bounds_returned_rows(self, registry: MetadataRegistry) -> None:
+        for i in range(5):
+            fid = FilingIdentifier("AAPL", "10-K", date(2024, 1, i + 1), f"ACC-{i}")
+            registry.register_filing(fid, chunk_count=1)
+
+        page = registry.list_filings(limit=2)
+        assert len(page) == 2
+        # Newest first (filing_date DESC): 2024-01-05, 2024-01-04.
+        assert [r.filing_date for r in page] == ["2024-01-05", "2024-01-04"]
+
+    def test_offset_walks_pages_without_overlap_or_gap(self, registry: MetadataRegistry) -> None:
+        for i in range(5):
+            fid = FilingIdentifier("AAPL", "10-K", date(2024, 1, i + 1), f"ACC-{i}")
+            registry.register_filing(fid, chunk_count=1)
+
+        full = registry.list_filings()
+        paged: list[str] = []
+        for offset in (0, 2, 4):
+            paged.extend(r.accession_number for r in registry.list_filings(limit=2, offset=offset))
+        # Walking the corpus two rows at a time reproduces the full order
+        # exactly — no row skipped, none duplicated.
+        assert paged == [r.accession_number for r in full]
+
+    def test_id_tiebreaker_keeps_pagination_stable_on_equal_filing_date(
+        self, registry: MetadataRegistry
+    ) -> None:
+        # Three filings share one filing_date (distinct ticker/accession),
+        # so ordering must fall through to the deterministic ``id``
+        # tie-breaker rather than an arbitrary storage order.
+        for i, ticker in enumerate(("AAA", "BBB", "CCC")):
+            fid = FilingIdentifier(ticker, "10-K", date(2024, 1, 1), f"ACC-{i}")
+            registry.register_filing(fid, chunk_count=1)
+
+        full = [r.accession_number for r in registry.list_filings()]
+        # filing_date ties → id DESC (registration order 0,1,2 → ids 1,2,3).
+        assert full == ["ACC-2", "ACC-1", "ACC-0"]
+
+        page1 = registry.list_filings(limit=2, offset=0)
+        page2 = registry.list_filings(limit=2, offset=2)
+        assert [r.accession_number for r in page1] == ["ACC-2", "ACC-1"]
+        assert [r.accession_number for r in page2] == ["ACC-0"]
+
+    def test_sort_by_column_ascending(self, registry: MetadataRegistry) -> None:
+        registry.register_filing(
+            FilingIdentifier("MSFT", "10-K", date(2024, 1, 1), "ACC-M"), chunk_count=1
+        )
+        registry.register_filing(
+            FilingIdentifier("AAPL", "10-K", date(2024, 1, 2), "ACC-A"), chunk_count=1
+        )
+        result = registry.list_filings(sort_by="ticker", order="asc")
+        assert [r.ticker for r in result] == ["AAPL", "MSFT"]
+
+    def test_unknown_sort_by_raises_value_error(self, registry: MetadataRegistry) -> None:
+        with pytest.raises(ValueError, match="Unsortable column"):
+            registry.list_filings(sort_by="id")  # not an exposed sort column
+
+    def test_invalid_order_raises_value_error(self, registry: MetadataRegistry) -> None:
+        with pytest.raises(ValueError, match="Invalid sort order"):
+            registry.list_filings(order="sideways")
+
+    def test_negative_limit_or_offset_raises_value_error(self, registry: MetadataRegistry) -> None:
+        with pytest.raises(ValueError, match="limit must be non-negative"):
+            registry.list_filings(limit=-1)
+        with pytest.raises(ValueError, match="offset must be non-negative"):
+            registry.list_filings(offset=-1)
+
 
 class TestListOldestFilings:
     def test_orders_by_ingested_at_ascending(self, registry: MetadataRegistry) -> None:
@@ -632,6 +698,29 @@ class TestSQLInjectionSafety:
         stored_filing: FilingIdentifier,
     ) -> None:
         assert registry.is_duplicate("' OR '1'='1") is False
+
+    def test_sort_by_injection_is_rejected_not_executed(
+        self,
+        registry: MetadataRegistry,
+        stored_filing: FilingIdentifier,
+    ) -> None:
+        # The ``ORDER BY`` column is the one clause built by f-string, so
+        # its input must never reach the SQL text. A crafted ``sort_by``
+        # is rejected against the whitelist *before* any query runs — it
+        # is never interpolated, so the DROP cannot execute.
+        with pytest.raises(ValueError, match="Unsortable column"):
+            registry.list_filings(sort_by="filing_date; DROP TABLE filings; --")
+        # Table still intact.
+        assert registry.count() == 1
+
+    def test_order_injection_is_rejected_not_executed(
+        self,
+        registry: MetadataRegistry,
+        stored_filing: FilingIdentifier,
+    ) -> None:
+        with pytest.raises(ValueError, match="Invalid sort order"):
+            registry.list_filings(order="ASC; DROP TABLE filings; --")
+        assert registry.count() == 1
         assert registry.get_filing("' UNION SELECT * FROM filings --") is None
 
     def test_count_injection_returns_zero(

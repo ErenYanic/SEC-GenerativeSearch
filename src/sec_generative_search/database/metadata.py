@@ -52,6 +52,20 @@ from sec_generative_search.database.migrations import (
 logger = get_logger(__name__)
 
 
+# Columns a caller may sort ``list_filings`` by, mapped to their literal
+# SQL identifiers.  The mapping is the trust boundary for the sort clause:
+# the ``ORDER BY`` column is only ever a *value* of this dict, never raw
+# caller input, so no untrusted string reaches the SQL text.  A ``sort_by``
+# outside these keys is rejected with ``ValueError`` before any query runs.
+_SORTABLE_FILING_COLUMNS: dict[str, str] = {
+    "filing_date": "filing_date",
+    "ticker": "ticker",
+    "form_type": "form_type",
+    "chunk_count": "chunk_count",
+    "ingested_at": "ingested_at",
+}
+
+
 def _get_sqlite_module(encryption_key: str | None) -> types.ModuleType:
     """Return the appropriate SQLite driver module.
 
@@ -360,12 +374,30 @@ class MetadataRegistry:
             CREATE INDEX IF NOT EXISTS idx_filings_ingested_at
             ON filings (ingested_at)
         """
+        # ``filing_date`` is the default ``list_filings`` sort key.  The
+        # index lets SQLite satisfy ``ORDER BY filing_date DESC, id DESC``
+        # (the deterministic pagination order) with a reverse index scan
+        # instead of a full-table sort per request.  ``ticker`` /
+        # ``(ticker, form_type)`` filters are already served by the
+        # implicit autoindex behind ``UNIQUE(ticker, form_type,
+        # filing_date)`` (leftmost-prefix), so no separate ticker index is
+        # warranted — a second index there would be pure write
+        # amplification.  Created in this idempotent block (not a
+        # ``MIGRATIONS`` entry) because the migration loop runs *before*
+        # ``filings`` is created, so an index-on-``filings`` migration
+        # would fail on a brand-new database; this mirrors the existing
+        # ``idx_filings_ingested_at`` treatment.
+        filing_date_index_sql = """
+            CREATE INDEX IF NOT EXISTS idx_filings_filing_date
+            ON filings (filing_date)
+        """
         try:
             with self._lock, self._conn:
                 bootstrap_schema_version(self._conn)
                 apply_pending_migrations(self._conn)
                 self._conn.execute(filings_sql)
                 self._conn.execute(index_sql)
+                self._conn.execute(filing_date_index_sql)
                 self._conn.execute(task_history_sql)
         except DatabaseError:
             # Bootstrap or migration apply already produced an actionable
@@ -770,20 +802,64 @@ class MetadataRegistry:
         self,
         ticker: str | None = None,
         form_type: str | None = None,
+        *,
+        sort_by: str = "filing_date",
+        order: str = "desc",
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[FilingRecord]:
         """
-        List ingested filings with optional filters.
+        List ingested filings with optional filters, sort, and pagination.
+
+        Sorting and pagination are pushed into SQL: the caller-chosen
+        ``ORDER BY … LIMIT … OFFSET`` runs in the database (backed by
+        ``idx_filings_filing_date`` for the default sort) rather than
+        materialising the whole table and slicing in Python.
+
+        A monotonic ``id`` tie-breaker is appended to every sort so the
+        total order is strict and *stable across page requests* — without
+        it, rows sharing a ``filing_date`` could be silently skipped or
+        duplicated between ``offset`` windows.
 
         Args:
             ticker: Filter by ticker symbol (case-insensitive).
             form_type: Filter by form type (case-insensitive).
+            sort_by: Column to order by; must be a key of
+                :data:`_SORTABLE_FILING_COLUMNS`. Defaults to
+                ``"filing_date"``.
+            order: ``"asc"`` or ``"desc"`` (case-insensitive). Defaults to
+                ``"desc"``.
+            limit: Maximum rows to return. ``None`` (the default) returns
+                every matching row — the historical unpaginated shape.
+            offset: Rows to skip before collecting ``limit`` rows. Ignored
+                when both ``limit`` is ``None`` and ``offset`` is ``0``.
 
         Returns:
-            List of FilingRecord objects, ordered by filing_date descending.
+            List of FilingRecord objects in the requested order.
 
         Raises:
+            ValueError: If ``sort_by`` is not a sortable column, ``order``
+                is not ``asc``/``desc``, or ``limit``/``offset`` is
+                negative. These are caller programming errors, kept
+                distinct from the ``DatabaseError`` raised on a driver
+                failure so a bad argument is never re-typed as a DB fault.
             DatabaseError: If the query fails.
         """
+        column = _SORTABLE_FILING_COLUMNS.get(sort_by)
+        if column is None:
+            raise ValueError(
+                f"Unsortable column {sort_by!r}; choose one of {sorted(_SORTABLE_FILING_COLUMNS)}."
+            )
+        normalised_order = order.lower()
+        if normalised_order not in ("asc", "desc"):
+            raise ValueError(f"Invalid sort order {order!r}; use 'asc' or 'desc'.")
+        if limit is not None and limit < 0:
+            raise ValueError(f"limit must be non-negative, got {limit}.")
+        if offset < 0:
+            raise ValueError(f"offset must be non-negative, got {offset}.")
+
+        direction = "DESC" if normalised_order == "desc" else "ASC"
+
         sql = "SELECT * FROM filings WHERE 1=1"
         params: list = []
 
@@ -794,7 +870,20 @@ class MetadataRegistry:
             sql += " AND form_type = ?"
             params.append(form_type.upper())
 
-        sql += " ORDER BY filing_date DESC"
+        # ``column`` and ``direction`` are drawn from the whitelist /
+        # validated set above — never raw caller input — so the f-string
+        # carries no injection surface. The ``id`` tie-breaker shares the
+        # primary direction so the ordering is a single-direction index
+        # scan.
+        sql += f" ORDER BY {column} {direction}, id {direction}"
+
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params.extend((limit, offset))
+        elif offset:
+            # SQLite requires a LIMIT for OFFSET; ``-1`` means "no limit".
+            sql += " LIMIT -1 OFFSET ?"
+            params.append(offset)
 
         try:
             with self._lock:

@@ -69,6 +69,11 @@ class _StubRegistry:
         self,
         ticker: str | None = None,
         form_type: str | None = None,
+        *,
+        sort_by: str = "filing_date",
+        order: str = "desc",
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[FilingRecord]:
         if self.raise_on_list:
             raise DatabaseError("simulated", details="stub")
@@ -77,8 +82,15 @@ class _StubRegistry:
             out = [r for r in out if r.ticker == ticker]
         if form_type:
             out = [r for r in out if r.form_type == form_type]
-        # Mirror the registry ordering (filing_date DESC).
-        out.sort(key=lambda r: r.filing_date, reverse=True)
+        # Mirror the real registry: sort in SQL-equivalent order with a
+        # deterministic ``id`` tie-breaker, then apply limit/offset.
+        reverse = order == "desc"
+        out.sort(key=lambda r: r.id, reverse=reverse)
+        out.sort(key=lambda r: getattr(r, sort_by), reverse=reverse)
+        if offset:
+            out = out[offset:]
+        if limit is not None:
+            out = out[:limit]
         return out
 
 
@@ -257,6 +269,65 @@ class TestListFilings:
         client = TestClient(app, base_url="https://testserver")
         response = client.get("/api/filings/?sort_by=invalid")
         assert response.status_code == 422
+
+    def _paging_records(self) -> list[FilingRecord]:
+        # Five filings with descending-distinct dates so the default sort
+        # order is unambiguous for the paging assertions.
+        return [
+            _record(
+                accession=f"000000000{i}-23-00000{i}",
+                filing_date=f"2024-01-0{5 - i}",
+                record_id=i + 1,
+            )
+            for i in range(5)
+        ]
+
+    def test_limit_returns_single_page(self, filings_app_factory) -> None:
+        app, _registry, _store = filings_app_factory(records=self._paging_records())
+        client = TestClient(app, base_url="https://testserver")
+        response = client.get("/api/filings/?limit=2")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body["filings"]) == 2
+        # ``total`` is the count of returned rows (page size), per contract.
+        assert body["total"] == 2
+        dates = [f["filing_date"] for f in body["filings"]]
+        assert dates == ["2024-01-05", "2024-01-04"]
+
+    def test_offset_returns_next_page(self, filings_app_factory) -> None:
+        app, _registry, _store = filings_app_factory(records=self._paging_records())
+        client = TestClient(app, base_url="https://testserver")
+        page1 = client.get("/api/filings/?limit=2&offset=0").json()["filings"]
+        page2 = client.get("/api/filings/?limit=2&offset=2").json()["filings"]
+        # Non-overlapping windows.
+        a1 = {f["accession_number"] for f in page1}
+        a2 = {f["accession_number"] for f in page2}
+        assert a1.isdisjoint(a2)
+        assert [f["filing_date"] for f in page2] == ["2024-01-03", "2024-01-02"]
+
+    def test_omitting_limit_returns_full_list_unchanged(self, filings_app_factory) -> None:
+        # Backward-compatibility guard: the pre-pagination SPA sends no
+        # ``limit`` and must still receive every row.
+        app, _registry, _store = filings_app_factory(records=self._paging_records())
+        client = TestClient(app, base_url="https://testserver")
+        body = client.get("/api/filings/").json()
+        assert body["total"] == 5
+        assert len(body["filings"]) == 5
+
+    def test_limit_zero_is_rejected(self, filings_app_factory) -> None:
+        app, _registry, _store = filings_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        assert client.get("/api/filings/?limit=0").status_code == 422
+
+    def test_negative_offset_is_rejected(self, filings_app_factory) -> None:
+        app, _registry, _store = filings_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        assert client.get("/api/filings/?offset=-1").status_code == 422
+
+    def test_oversize_limit_is_rejected(self, filings_app_factory) -> None:
+        app, _registry, _store = filings_app_factory()
+        client = TestClient(app, base_url="https://testserver")
+        assert client.get("/api/filings/?limit=10001").status_code == 422
 
     def test_database_error_returns_500_envelope(self, filings_app_factory) -> None:
         app, _registry, _store = filings_app_factory(raise_on_list=True)

@@ -85,6 +85,13 @@ logger = get_logger(__name__)
 _ACCESSION_PATH_PATTERN = r"^[0-9]{10}-[0-9]{2}-[0-9]{6}$"
 
 
+# Generous per-page ceiling for the opt-in ``limit`` query param.  The
+# ``filings`` table is itself bounded by ``DB_MAX_FILINGS`` (≤ 10 000 in
+# B/C), so this cap only guards against an absurd single-page request;
+# omitting ``limit`` still returns the full (bounded) list unchanged.
+_MAX_PAGE_SIZE = 10_000
+
+
 # Read-tier router: list / detail are gated by ``verify_api_key`` only.
 router = APIRouter(dependencies=[Depends(verify_api_key)])
 
@@ -170,27 +177,47 @@ def list_filings(
         default="desc",
         description="Sort order.",
     ),
+    limit: int | None = Query(
+        default=None,
+        ge=1,
+        le=_MAX_PAGE_SIZE,
+        description=(
+            "Maximum filings to return (one page). Omit for the full "
+            "bounded list. Pair with 'offset' to page through results."
+        ),
+    ),
+    offset: int = Query(
+        default=0,
+        ge=0,
+        description="Number of filings to skip before the page starts.",
+    ),
 ) -> FilingListResponse:
-    """List filings with optional filters and operator-chosen sort.
+    """List filings with optional filters, operator-chosen sort, and paging.
 
-    The registry returns rows ordered by ``filing_date DESC``; we re-sort
-    in-memory only when the caller requests something else.  The list is
-    bounded by the configured ``DB_MAX_FILINGS`` and is therefore safe
-    to materialise in process — there is no pagination because the
-    storage ceiling already serves as one.
+    Sorting and pagination are resolved entirely in SQL — the registry
+    applies ``ORDER BY … LIMIT … OFFSET`` (backed by
+    ``idx_filings_filing_date`` for the default sort) with a deterministic
+    ``id`` tie-breaker, so a page is stable across requests.
+
+    Pagination is **opt-in and additive**: omitting ``limit`` returns the
+    full ``DB_MAX_FILINGS``-bounded list exactly as before, so existing
+    callers are unaffected. ``total`` remains the count of *returned* rows
+    (a page size when paginating), not the registry-wide cardinality —
+    operators needing the global count use ``GET /api/status/``. A client
+    walking pages stops when a page returns fewer than ``limit`` rows.
     """
     try:
         records = registry.list_filings(
             ticker=ticker.upper() if ticker else None,
             form_type=form_type.upper() if form_type else None,
+            sort_by=sort_by,
+            order=order,
+            limit=limit,
+            offset=offset,
         )
     except DatabaseError as exc:
         logger.error("list_filings failed: %s", exc.details)
         raise _database_error(exc) from exc
-
-    if sort_by != "filing_date" or order != "desc":
-        reverse = order == "desc"
-        records.sort(key=lambda r: getattr(r, sort_by), reverse=reverse)
 
     schemas = [_record_to_schema(r) for r in records]
     return FilingListResponse(filings=schemas, total=len(schemas))
