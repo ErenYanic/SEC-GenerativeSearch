@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from fastapi.testclient import TestClient
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from sec_generative_search.api.middleware import (
     DEFAULT_MAX_CONTENT_LENGTH,
     SECURITY_HEADERS_RAW,
+    ContentSizeLimitMiddleware,
 )
 
 
@@ -103,6 +107,136 @@ class TestContentSizeLimit:
             headers={"content-type": "application/json"},
         )
         assert response.status_code != 413
+
+
+@pytest.mark.security
+class TestContentSizeLimitStreamRejection:
+    """The stream-counting rejection path (chunked / no ``Content-Length``).
+
+    The ``Content-Length`` short-circuit above is exercised by the real
+    routes through :class:`TestClient`; this drives the middleware
+    directly at the ASGI layer because **no current route responds
+        before it has finished consuming the request body**, so the
+        protocol edge these tests pin is otherwise unreachable through the
+        app.  The invariant under test: the middleware MUST NEVER emit a
+        second ``http.response.start`` — sending one after the downstream
+        app already sent its own is an ASGI protocol violation the server
+        surfaces as a broken connection.
+    """
+
+    @staticmethod
+    def _run(
+        app: ASGIApp,
+        chunks: list[tuple[bytes, bool]],
+        *,
+        max_bytes: int = 64,
+        path: str = "/api/rag/query",
+        method: str = "POST",
+    ) -> list[Message]:
+        """Run ``ContentSizeLimitMiddleware`` over ``app``, feeding ``chunks``.
+
+        Returns every ASGI message the middleware forwarded *downstream*
+        (i.e. towards the server / client).  ``max_bytes`` is the global
+        ceiling; with the 1 KiB smallest route cap it always wins, so 64
+        bytes is the effective body limit.
+        """
+        scope: Scope = {
+            "type": "http",
+            "method": method,
+            "path": path,
+            "headers": [],  # no Content-Length → the stream-counting path
+            "client": ("test-client", 0),
+        }
+        queue = list(chunks)
+
+        async def receive() -> Message:
+            if queue:
+                body, more_body = queue.pop(0)
+                return {"type": "http.request", "body": body, "more_body": more_body}
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        sent: list[Message] = []
+
+        async def send(message: Message) -> None:
+            sent.append(message)
+
+        middleware = ContentSizeLimitMiddleware(app, max_bytes=max_bytes)
+        asyncio.run(middleware(scope, receive, send))
+        return sent
+
+    @staticmethod
+    def _starts(sent: list[Message]) -> list[Message]:
+        return [m for m in sent if m["type"] == "http.response.start"]
+
+    # -- Downstream ASGI apps with distinct receive/send orderings -------
+
+    @staticmethod
+    async def _respond_before_body(scope: Scope, receive: Receive, send: Send) -> None:
+        """Commit to a 200 *before* consuming the body (streaming shape)."""
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"text/plain")],
+            }
+        )
+        more = True
+        while more:
+            message = await receive()
+            more = bool(message.get("more_body", False))
+        await send({"type": "http.response.body", "body": b"partial", "more_body": False})
+
+    @staticmethod
+    async def _read_before_respond(scope: Scope, receive: Receive, send: Send) -> None:
+        """Drain the whole body first, then respond (every real route's shape)."""
+        more = True
+        while more:
+            message = await receive()
+            more = bool(message.get("more_body", False))
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok", "more_body": False})
+
+    # -- Tests -----------------------------------------------------------
+
+    def test_no_second_start_when_response_already_began(self) -> None:
+        # 40 + 40 = 80 bytes > the 64-byte effective cap → the tally trips
+        # on the second chunk, AFTER the app has already sent its 200
+        # start. The middleware must NOT then send its own 413 start:
+        # that would be a second http.response.start (protocol violation).
+        oversize = [(b"x" * 40, True), (b"x" * 40, True)]
+        sent = self._run(self._respond_before_body, oversize)
+
+        starts = self._starts(sent)
+        assert len(starts) == 1, (
+            f"expected exactly one http.response.start, got {len(starts)} "
+            "(a second one is an ASGI protocol violation)"
+        )
+        # The single start is the app's own 200 — the middleware left the
+        # in-flight response alone rather than corrupting it with a 413.
+        assert starts[0]["status"] == 200
+
+    def test_read_before_respond_still_413s(self) -> None:
+        # The reachable path: the app reads the whole body before
+        # responding, so the tally trips before any http.response.start.
+        # The middleware suppresses the app's 200 and issues its own 413.
+        oversize = [(b"x" * 40, True), (b"x" * 40, True)]
+        sent = self._run(self._read_before_respond, oversize)
+
+        starts = self._starts(sent)
+        assert len(starts) == 1
+        assert starts[0]["status"] == 413
+        body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+        assert b"payload_too_large" in body
+
+    def test_under_limit_stream_passes_through(self) -> None:
+        # A body under the cap is forwarded untouched — the app's 200 and
+        # its body reach the client, no 413.
+        under = [(b"x" * 20, True), (b"x" * 20, False)]
+        sent = self._run(self._read_before_respond, under)
+
+        starts = self._starts(sent)
+        assert len(starts) == 1
+        assert starts[0]["status"] == 200
 
 
 @pytest.mark.security

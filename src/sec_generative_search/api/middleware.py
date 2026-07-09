@@ -301,6 +301,17 @@ class ContentSizeLimitMiddleware:
        and tallies the bytes received so far.  Rejects mid-stream when
        the tally exceeds the limit, which catches chunked transfer
        encoding (no ``Content-Length`` header).
+
+    The mid-stream 413 is only substituted while the app has **not yet**
+    sent ``http.response.start``.  Every current route reads its whole
+    body before responding, so that is the reachable path; but a
+    hypothetical handler that starts responding before draining the body
+    would have its status line already on the wire when the tally trips
+    — the middleware then lets that in-flight response finish untouched
+    rather than emitting a **second** ``http.response.start`` (an ASGI
+    protocol violation the server surfaces as a broken connection).  The
+    body cap is still enforced in that case: the stream-counting wrapper
+    stops feeding the app once the limit is exceeded.
     """
 
     def __init__(self, app: ASGIApp, *, max_bytes: int = DEFAULT_MAX_CONTENT_LENGTH) -> None:
@@ -349,6 +360,7 @@ class ContentSizeLimitMiddleware:
 
         bytes_received = 0
         rejected = False
+        response_started = False
 
         async def receive_with_limit() -> Message:
             nonlocal bytes_received, rejected
@@ -361,15 +373,38 @@ class ContentSizeLimitMiddleware:
             return message
 
         async def send_with_guard(message: Message) -> None:
-            # Suppress whatever the app tried to send — we will issue
-            # our own 413 below.
-            if rejected and message["type"] in ("http.response.start", "http.response.body"):
+            nonlocal response_started
+            # If the tally has tripped but the app has NOT yet committed
+            # to a response, swallow its start/body so we can substitute
+            # our own 413 after it returns. Once ``http.response.start``
+            # has passed through, the status line + headers are already
+            # on the wire and a 413 can no longer be substituted — so we
+            # stop guarding and let the app's in-flight response finish
+            # untouched (sending our own start now would be a second
+            # ``http.response.start``, an ASGI protocol violation). The
+            # body cap is still enforced regardless: ``receive_with_limit``
+            # stops feeding the app once the limit is exceeded.
+            if (
+                rejected
+                and not response_started
+                and message["type"]
+                in (
+                    "http.response.start",
+                    "http.response.body",
+                )
+            ):
                 return
+            if message["type"] == "http.response.start":
+                response_started = True
             await send(message)
 
         await self.app(scope, receive_with_limit, send_with_guard)
 
-        if rejected:
+        # Only issue the 413 when the app never began responding. If the
+        # response already started, we cannot override it — the cap was
+        # still enforced on the received body, and emitting a start here
+        # would be a duplicate.
+        if rejected and not response_started:
             await self._send_payload_error(
                 send,
                 status=413,
