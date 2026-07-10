@@ -53,6 +53,7 @@ import type {
 } from "@/lib/api-types";
 import { ModelPicker, type ModelPickerValue } from "@/components/model-picker";
 import { formatUsd } from "@/lib/format";
+import { useBatchedStreamText } from "@/lib/use-batched-stream-text";
 
 const ANSWER_MODES: AnswerMode[] = [
   "concise",
@@ -142,6 +143,19 @@ export default function RagPage(): JSX.Element {
   const [tuning, setTuning] = useState<RetrievalTuning>(EMPTY_TUNING);
   const abortRef = useRef<AbortController | null>(null);
 
+  // Coalesces answer-delta state updates to at most one per animation
+  // frame instead of one per SSE chunk. The guard against a late flush
+  // landing outside "streaming" already lives in the `setGeneration`
+  // updater below, unaffected by batching.
+  const batchedDelta = useBatchedStreamText((text) => {
+    setGeneration((prev) => {
+      if (prev.kind !== "streaming") {
+        return prev;
+      }
+      return { ...prev, answer: prev.answer + text };
+    });
+  });
+
   const queryId = useId();
 
   // Cancel any in-flight stream when the page unmounts to avoid
@@ -184,6 +198,7 @@ export default function RagPage(): JSX.Element {
       // the previous answer.
       abortRef.current?.abort();
       abortRef.current = null;
+      batchedDelta.reset();
       setPlanning(true);
       setPlanError(null);
       setPlan(null);
@@ -215,7 +230,7 @@ export default function RagPage(): JSX.Element {
         setPlanning(false);
       }
     },
-    [planning, query, pickerValue.provider, pickerValue.model],
+    [planning, query, pickerValue.provider, pickerValue.model, batchedDelta],
   );
 
   const handleGenerate = useCallback(async () => {
@@ -223,6 +238,11 @@ export default function RagPage(): JSX.Element {
       return;
     }
     abortRef.current?.abort();
+    // Drop any buffered-but-unflushed delta text from a generation this
+    // one is superseding — otherwise a stale animation-frame flush could
+    // land after the new "streaming" state is set and prepend leftover
+    // text onto this generation's answer.
+    batchedDelta.reset();
     const controller = new AbortController();
     abortRef.current = controller;
     setCitations([]);
@@ -245,12 +265,7 @@ export default function RagPage(): JSX.Element {
         {
           onDelta: (text) => {
             answerSoFar += text;
-            setGeneration((prev) => {
-              if (prev.kind !== "streaming") {
-                return prev;
-              }
-              return { ...prev, answer: answerSoFar };
-            });
+            batchedDelta.push(text);
           },
           onCitation: (citation) => {
             setCitations((prev) => [...prev, citation]);
@@ -309,13 +324,14 @@ export default function RagPage(): JSX.Element {
         retryable: true,
       });
     }
-  }, [plan, modeOverride, pickerValue, tuning]);
+  }, [plan, modeOverride, pickerValue, tuning, batchedDelta]);
 
   const handleCancel = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
+    batchedDelta.reset();
     setGeneration({ kind: "idle" });
-  }, []);
+  }, [batchedDelta]);
 
   const generating = generation.kind === "streaming";
 

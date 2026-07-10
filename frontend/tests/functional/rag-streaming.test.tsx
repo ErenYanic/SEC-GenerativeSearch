@@ -121,6 +121,39 @@ describe("RagPage — streaming mechanics", () => {
     );
   });
 
+  it("assembles the in-progress answer from many single-character deltas (F9 coalescing)", async () => {
+    // Assert on the live streaming state before `final` replaces the
+    // answer wholesale so the batched path is exercised directly.
+    const partial = "Apple discloses AI risk";
+    const pending = pendingStreamingResponse();
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/api/admin/rag/plan") {
+        return planResponse();
+      }
+      if (url === "/api/admin/providers/") {
+        return emptyProvidersResponse();
+      }
+      return pending.response;
+    }) as unknown as typeof fetch;
+
+    render(<RagPage />);
+    const user = userEvent.setup();
+    await planThenGenerate(user);
+
+    pending.release(partial.split("").map((ch) => sseFrame("delta", { text: ch })));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/^answer$/i).textContent ?? "").toContain(
+        partial,
+      );
+    });
+
+    // Let the stream finish cleanly so React can unmount without a
+    // dangling reader.
+    pending.release([finalFrame(partial)]);
+  });
+
   it("renders the refusal notice when the orchestrator refuses (final.refused)", async () => {
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();

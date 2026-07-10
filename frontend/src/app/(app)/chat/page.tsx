@@ -51,6 +51,7 @@ import type {
 } from "@/lib/api-types";
 import { ModelPicker, type ModelPickerValue } from "@/components/model-picker";
 import { formatUsd } from "@/lib/format";
+import { useBatchedStreamText } from "@/lib/use-batched-stream-text";
 import { INITIAL_STATE, reducer, type InFlightState } from "./reducer";
 
 // One committed conversation turn. Mirrors the wire-tier
@@ -97,6 +98,13 @@ export default function ChatPage(): JSX.Element {
   });
   const abortRef = useRef<AbortController | null>(null);
   const draftId = useId();
+
+  // Coalesces `STREAM_DELTA` dispatches to at most one per animation
+  // frame instead of one per SSE chunk. A fast stream would otherwise
+  // force a React render per token; the reducer contract stays the same.
+  const batchedDelta = useBatchedStreamText((text) => {
+    dispatch({ type: "STREAM_DELTA", text });
+  });
 
   // Abort any in-flight stream on unmount — the SPA's only consumer
   // lives here while this page is mounted.
@@ -165,6 +173,11 @@ export default function ChatPage(): JSX.Element {
       // Plan first; the backend rejects a raw query at /rag/stream by
       // contract (chat does not bypass the plan gate).
       abortRef.current?.abort();
+      // Drop any buffered-but-unflushed delta text from a turn this one
+      // is superseding — otherwise a stale animation-frame flush could
+      // land after PLAN_OK and prepend leftover text onto this turn's
+      // answer.
+      batchedDelta.reset();
       const controller = new AbortController();
       abortRef.current = controller;
       dispatch({ type: "START_PLAN", query });
@@ -222,7 +235,7 @@ export default function ChatPage(): JSX.Element {
           {
             onDelta: (text) => {
               answerMirror += text;
-              dispatch({ type: "STREAM_DELTA", text });
+              batchedDelta.push(text);
             },
             onCitation: (citation) => {
               citationsMirror.push(citation);
@@ -309,7 +322,7 @@ export default function ChatPage(): JSX.Element {
       dispatch({ type: "RESET" });
       abortRef.current = null;
     },
-    [historyForWire, pickerValue],
+    [historyForWire, pickerValue, batchedDelta],
   );
 
   const handleSubmit = useCallback(
@@ -328,15 +341,17 @@ export default function ChatPage(): JSX.Element {
   const handleCancel = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
+    batchedDelta.reset();
     dispatch({ type: "CANCEL" });
-  }, []);
+  }, [batchedDelta]);
 
   const handleClear = useCallback(() => {
     setTurns([]);
     dispatch({ type: "RESET" });
     abortRef.current?.abort();
     abortRef.current = null;
-  }, []);
+    batchedDelta.reset();
+  }, [batchedDelta]);
 
   const handleRetry = useCallback(() => {
     if (state.kind !== "error") {
